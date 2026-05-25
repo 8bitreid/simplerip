@@ -42,6 +42,7 @@ type MakeMKVConfig struct {
 
 type MetadataConfig struct {
 	TMDBApiKey        string `yaml:"tmdb_api_key"`
+	OMDbApiKey        string `yaml:"omdb_api_key"`
 	PreferredLanguage string `yaml:"preferred_language"`
 }
 
