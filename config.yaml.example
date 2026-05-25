@@ -1,0 +1,75 @@
+# simplerip configuration
+# Copy this file to config/config.yaml and adjust to your setup.
+# All values shown are their built-in defaults unless noted otherwise.
+
+# ── Title classification ─────────────────────────────────────────────────────
+detection:
+  # Number of same-duration titles required to classify a disc as TV.
+  # A Blu-ray with 3 or more titles within duration_tolerance_sec of each
+  # other will be treated as a TV episode disc and ripped without prompting.
+  tv_threshold: 3
+
+  # Two titles are considered "the same duration" if they differ by no more
+  # than this many seconds. Handles minor encoding length differences between
+  # episodes on the same disc.
+  duration_tolerance_sec: 60
+
+  # A title must be at least this many minutes long to be considered a
+  # feature-length film. Shorter titles are treated as extras.
+  min_feature_minutes: 40
+
+  # Titles shorter than this are silently classified as junk and skipped.
+  # FBI warnings, studio logos, and unskippable trailers typically fall here.
+  min_extra_minutes: 2
+
+# ── Output paths ─────────────────────────────────────────────────────────────
+output:
+  # MKV files are written here first, then rsync'd to nas_path.
+  # Should be on fast local storage (SSD or tmpfs).
+  staging_dir: /staging
+
+  # Final destination for finished rips. Typically a NAS mount point.
+  nas_path: /output
+
+  # Go template for the output folder name.
+  # Available fields: .Title, .Year  (populated via TMDB metadata lookup)
+  folder_format: "{{.Title}} ({{.Year}})"
+
+# ── Discord / n8n notifications ───────────────────────────────────────────────
+notification:
+  # n8n webhook URL that receives JSON payloads when user input is needed
+  # (extras, double features, ambiguous discs). Leave empty to disable.
+  webhook_url: ""
+
+  # How long simplerip waits for a Discord response before giving up and
+  # skipping extras. 0 means wait forever (not recommended).
+  response_timeout_minutes: 30
+
+  # Port that simplerip's HTTP server listens on for n8n callbacks.
+  callback_port: 8090
+
+# ── MakeMKV ──────────────────────────────────────────────────────────────────
+makemkv:
+  # MakeMKV licence key. Overridden at runtime by the MAKEMKV_KEY environment
+  # variable — prefer the env var so the key is not checked into version control.
+  # Get a free beta key at https://www.makemkv.com/forum/viewtopic.php?t=1053
+  key: ""
+
+  # Kill makemkvcon and raise an error after this many minutes.
+  # Blu-ray rips typically take 20–60 min; 120 gives a comfortable margin.
+  timeout_minutes: 120
+
+  # Optical drives to monitor for disc insertions.
+  devices:
+    - /dev/sr0
+    - /dev/sr1
+
+# ── Metadata ─────────────────────────────────────────────────────────────────
+metadata:
+  # TMDB API key for title and year lookup.
+  # Register for a free key at https://www.themoviedb.org/settings/api
+  tmdb_api_key: ""
+
+  # ISO 639-2 language code for preferred audio/subtitle track selection
+  # and metadata language. "eng" = English, "deu" = German, "fra" = French.
+  preferred_language: eng
