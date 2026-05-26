@@ -48,7 +48,7 @@ export MAKEMKV_KEY="your-license-key-here"
 docker compose up -d
 ```
 
-Optical drives are passed through as devices (`/dev/sr0`, `/dev/sr1`). The `MAKEMKV_KEY` environment variable is required — see Configuration below.
+Optical drives are passed through as devices (`/dev/sr0`, `/dev/sr1`). Set `MAKEMKV_KEY` for Blu-ray ripping (recommended) — see Configuration below.
 
 ---
 
