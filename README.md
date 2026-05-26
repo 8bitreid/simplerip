@@ -191,6 +191,12 @@ internal/config/               config.yaml loading
 
 ---
 
+## License and legal
+
+**MakeMKV:** The Docker image builds and bundles `makemkvcon` from source. By building or pulling this image you are accepting the [MakeMKV End-User License Agreement](https://www.makemkv.com/download/eula.txt). MakeMKV is free to use while in beta; a license key is required for Blu-ray ripping. SimpleRip does not distribute MakeMKV binaries directly.
+
+---
+
 ## Credits and attributions
 
 - [Automatic Ripping Machine (ARM)](https://github.com/automatic-ripping-machine/automatic-ripping-machine) — the original inspiration for automated disc ripping on Linux. ARM is a community project with a lot of history; SimpleRip simply takes a different design approach.
