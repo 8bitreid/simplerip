@@ -101,7 +101,7 @@ func runScan(args []string) {
 		}
 	} else {
 		var serr error
-		result, serr = ripper.ScanInfo(context.Background(), "makemkvcon", *device)
+		result, serr = ripper.ScanInfo(context.Background(), "makemkvcon", *device, cfg.MakeMKV.Key)
 		if serr != nil {
 			fatal("scan:", serr)
 		}
@@ -309,7 +309,7 @@ func runClean(args []string) {
 			}
 			fmt.Fprintf(os.Stderr, " %s", formatBytes(dr.SizeBytes))
 		}
-		fmt.Fprintln(os.Stderr, ") — all share the same duration\n")
+		fmt.Fprintln(os.Stderr, ") — all share the same duration")
 
 		if *dryRun {
 			fmt.Fprintln(os.Stderr, "[dry-run] No files were moved.")

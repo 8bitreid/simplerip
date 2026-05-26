@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -50,8 +51,10 @@ const (
 )
 
 // ScanInfo runs `makemkvcon -r info dev:<device>` and returns the parsed titles.
-func ScanInfo(ctx context.Context, makemkvBin, device string) (*disc.ClassifiedDisc, error) {
+// key is exported as MAKEMKV_KEY so the licence is available to makemkvcon.
+func ScanInfo(ctx context.Context, makemkvBin, device, key string) (*disc.ClassifiedDisc, error) {
 	cmd := exec.CommandContext(ctx, makemkvBin, "-r", "info", "dev:"+device)
+	cmd.Env = append(os.Environ(), "MAKEMKV_KEY="+key)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
