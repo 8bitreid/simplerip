@@ -1,16 +1,13 @@
 services:
   simplerip:
-    build: .
+    image: ghcr.io/8bitreid/simplerip:latest
     restart: unless-stopped
-
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - /tmp/staging:/staging
-      - /mnt/nas/movies:/output    # update to match your NAS mount point
-
+      - /output:/output
     devices:
-      - /dev/sr0:/dev/sr0          # add /dev/sr1 if you have a second drive
-
+      - /dev/sr0:/dev/sr0
+      - /dev/sr1:/dev/sr1
     cap_add:
-      # Required for raw device I/O (Blu-ray drive access via makemkvcon)
       - SYS_RAWIO
