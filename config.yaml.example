@@ -70,6 +70,10 @@ metadata:
   # Register for a free key at https://www.themoviedb.org/settings/api
   tmdb_api_key: ""
 
+  # OMDb API key for runtime cross-reference via IMDb ID.
+  # Register for a free key at https://www.omdbapi.com/apikey.aspx
+  omdb_api_key: ""
+
   # ISO 639-2 language code for preferred audio/subtitle track selection
   # and metadata language. "eng" = English, "deu" = German, "fra" = French.
   preferred_language: eng
