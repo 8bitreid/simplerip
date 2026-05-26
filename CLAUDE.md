@@ -150,7 +150,7 @@ notification:
   callback_port: 8090
 
 makemkv:
-  key: ""                      # overridden by MAKEMKV_KEY env var
+  # key: use MAKEMKV_KEY env var instead
   timeout_minutes: 120
   devices:
     - /dev/sr0
@@ -162,7 +162,12 @@ metadata:
   preferred_language: eng
 ```
 
-`MAKEMKV_KEY` env var always overrides `makemkv.key`. Never commit config/config.yaml.
+**MakeMKV key handling:**
+- The `MAKEMKV_KEY` environment variable **always overrides** `makemkv.key` from config
+- Environment variable is the **recommended approach** (keeps secrets out of config files)
+- Required for Docker deployments (passed through in compose.yaml)
+- Config file fallback exists for simpler local development setups
+- `config/config.yaml` is gitignored — never commit it
 
 ## Git workflow
 **Never push directly to main.** main is branch-protected — direct pushes are
