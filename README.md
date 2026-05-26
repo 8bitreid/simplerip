@@ -2,7 +2,7 @@
 
 A minimal, stable Blu-ray/DVD ripper written in Go. Wraps **makemkvcon**, **ffprobe**, and **rsync**.
 
-Deliberately rewritten from [Automatic Ripping Machine (ARM)](https://github.com/automatic-ripping-machine/automatic-ripping-machine), which is unstable. SimpleRip owns zero media logic — it is a pure orchestrator.
+Inspired by [Automatic Ripping Machine (ARM)](https://github.com/automatic-ripping-machine/automatic-ripping-machine). SimpleRip takes a different architectural approach: it never modifies the video stream, delegates all ripping to makemkvcon, and delegates all transcoding to Tdarr. Its own logic is limited to disc classification, duplicate detection, and audio quality scoring for keeper selection.
 
 ---
 
@@ -188,6 +188,15 @@ internal/notify/               Discord webhook payloads
 internal/server/               HTTP callback server for n8n responses
 internal/config/               config.yaml loading
 ```
+
+---
+
+## Credits and attributions
+
+- [Automatic Ripping Machine (ARM)](https://github.com/automatic-ripping-machine/automatic-ripping-machine) — the original inspiration for automated disc ripping on Linux. ARM is a community project with a lot of history; SimpleRip simply takes a different design approach.
+- [MakeMKV](https://www.makemkv.com/) — the core ripping engine. MakeMKV is a commercial product; a valid license key is required for Blu-ray ripping. SimpleRip does not bundle or redistribute MakeMKV binaries.
+- This product uses the [TMDB API](https://www.themoviedb.org/) but is not endorsed or certified by TMDB.
+- Movie and series data provided in part by [OMDb API](https://www.omdbapi.com/).
 
 ---
 
