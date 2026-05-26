@@ -1,6 +1,8 @@
 package ripper
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +154,38 @@ func TestParseDuration(t *testing.T) {
 		if got != c.want {
 			t.Errorf("parseDuration(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+func TestWriteKey(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	const key = "T-testkey123"
+	if err := writeKey(key); err != nil {
+		t.Fatalf("writeKey: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmp, ".MakeMKV", "settings.conf"))
+	if err != nil {
+		t.Fatalf("settings.conf not written: %v", err)
+	}
+	got := string(data)
+	want := `app_Key = "T-testkey123"` + "\n"
+	if got != want {
+		t.Errorf("settings.conf content:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestWriteKeyEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	if err := writeKey(""); err != nil {
+		t.Fatalf("writeKey empty: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, ".MakeMKV", "settings.conf")); !os.IsNotExist(err) {
+		t.Error("settings.conf should not be written for empty key")
 	}
 }
 

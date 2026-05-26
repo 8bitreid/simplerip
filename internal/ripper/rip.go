@@ -38,6 +38,9 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 
 	start := time.Now()
 
+	if err := writeKey(key); err != nil {
+		return nil, fmt.Errorf("write makemkv key: %w", err)
+	}
 	cmd := exec.CommandContext(ctx,
 		"makemkvcon", "mkv",
 		"--noscan", "-r",
@@ -47,7 +50,6 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 		strconv.Itoa(title.Index),
 		outputDir,
 	)
-	cmd.Env = append(os.Environ(), "MAKEMKV_KEY="+key)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

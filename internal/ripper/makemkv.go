@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -50,11 +51,26 @@ const (
 	attrStreamType = 22
 )
 
+// writeKey writes the MakeMKV licence key to ~/.MakeMKV/settings.conf,
+// which is the only path makemkvcon reads for registration.
+func writeKey(key string) error {
+	if key == "" {
+		return nil
+	}
+	dir := filepath.Join(os.Getenv("HOME"), ".MakeMKV")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	content := fmt.Sprintf("app_Key = %q\n", key)
+	return os.WriteFile(filepath.Join(dir, "settings.conf"), []byte(content), 0o600)
+}
+
 // ScanInfo runs `makemkvcon -r info dev:<device>` and returns the parsed titles.
-// key is exported as MAKEMKV_KEY so the licence is available to makemkvcon.
 func ScanInfo(ctx context.Context, makemkvBin, device, key string) (*disc.ClassifiedDisc, error) {
+	if err := writeKey(key); err != nil {
+		return nil, fmt.Errorf("write makemkv key: %w", err)
+	}
 	cmd := exec.CommandContext(ctx, makemkvBin, "-r", "info", "dev:"+device)
-	cmd.Env = append(os.Environ(), "MAKEMKV_KEY="+key)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
