@@ -629,10 +629,17 @@ func fatal(prefix string, err error) {
 }
 
 func moveFile(src, dst string) error {
-	if sameDevice(src, dst) {
-		return os.Rename(src, dst)
+	err := os.Rename(src, dst)
+	if err == nil {
+		return nil
 	}
-	return copyAndRemove(src, dst)
+
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) && errors.Is(linkErr.Err, syscall.EXDEV) {
+		return copyAndRemove(src, dst)
+	}
+
+	return err
 }
 
 func copyAndRemove(src, dst string) error {
