@@ -632,6 +632,10 @@ func moveFile(src, dst string) error {
 	if sameDevice(src, dst) {
 		return os.Rename(src, dst)
 	}
+	return copyAndRemove(src, dst)
+}
+
+func copyAndRemove(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -653,9 +657,9 @@ func moveFile(src, dst string) error {
 	return os.Remove(src)
 }
 
-func sameDevice(a, b string) bool {
+func sameDevice(src, dst string) bool {
 	var sa, sb syscall.Stat_t
-	if syscall.Stat(a, &sa) != nil || syscall.Stat(filepath.Dir(b), &sb) != nil {
+	if syscall.Stat(filepath.Dir(src), &sa) != nil || syscall.Stat(filepath.Dir(dst), &sb) != nil {
 		return false
 	}
 	return sa.Dev == sb.Dev
