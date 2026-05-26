@@ -164,6 +164,19 @@ metadata:
 
 `MAKEMKV_KEY` env var always overrides `makemkv.key`. Never commit config/config.yaml.
 
+## Git workflow
+**Never push directly to main.** main is branch-protected — direct pushes are
+blocked and the rule applies to admins too.
+
+All changes must go through a pull request:
+1. Create a branch: `git checkout -b your-branch`
+2. Push the branch: `git push origin your-branch`
+3. Open a PR targeting main
+4. The `test` CI job must pass before merging
+
+The `test` workflow runs `go test ./...` on every PR. Tests must never be
+broken at merge time. The Docker publish workflow fires automatically on merge.
+
 ## Testing
 Fixture support: `simplerip scan -fixture <file>` replays captured makemkvcon output
 without a physical disc. Use this in tests via `ScanInfoFromReader()` in makemkv.go.
