@@ -92,4 +92,6 @@ COPY --from=makemkv /usr/lib/libmakemkv.so.1   /usr/lib/libmakemkv.so.1
 COPY --from=makemkv /usr/lib/libmmbd.so.0      /usr/lib/libmmbd.so.0
 RUN ldconfig
 
+RUN mkdir -p /root/.MakeMKV
+
 ENTRYPOINT ["/usr/local/bin/simplerip"]
