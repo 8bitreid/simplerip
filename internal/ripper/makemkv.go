@@ -51,8 +51,9 @@ const (
 	attrStreamType = 22
 )
 
-// writeKey writes the MakeMKV licence key to ~/.MakeMKV/settings.conf,
-// which is the only path makemkvcon reads for registration.
+// writeKey ensures the MakeMKV licence key is present in ~/.MakeMKV/settings.conf.
+// If settings.conf already contains the key it is left untouched so that any
+// extra fields written by `makemkvcon reg` (sdf_Stop, etc.) are preserved.
 func writeKey(key string) error {
 	if key == "" {
 		return nil
@@ -61,16 +62,25 @@ func writeKey(key string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	conf := filepath.Join(dir, "settings.conf")
+	existing, _ := os.ReadFile(conf)
+	if strings.Contains(string(existing), key) {
+		fmt.Fprintf(os.Stderr, "scan: key already in settings.conf, skipping write\n")
+		return nil
+	}
 	content := fmt.Sprintf("app_Key = %q\n", key)
-	return os.WriteFile(filepath.Join(dir, "settings.conf"), []byte(content), 0o600)
+	return os.WriteFile(conf, []byte(content), 0o600)
 }
 
 // ScanInfo runs `makemkvcon -r info dev:<device>` and returns the parsed titles.
 func ScanInfo(ctx context.Context, makemkvBin, device, key string) (*disc.ClassifiedDisc, error) {
+	fmt.Fprintf(os.Stderr, "scan: writing key to settings.conf (len=%d)\n", len(key))
 	if err := writeKey(key); err != nil {
 		return nil, fmt.Errorf("write makemkv key: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "scan: running %s -r info dev:%s\n", makemkvBin, device)
 	cmd := exec.CommandContext(ctx, makemkvBin, "-r", "info", "dev:"+device)
+	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
