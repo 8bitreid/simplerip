@@ -581,12 +581,6 @@ func runClean(args []string) {
 		}
 		fmt.Printf("%s\n", newFile)
 	}
-
-	if err := os.RemoveAll(absDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not remove old directory: %v\n", err)
-	} else {
-		fmt.Fprintf(os.Stderr, "Removed: %s\n", absDir)
-	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
