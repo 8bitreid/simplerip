@@ -35,6 +35,8 @@ type MKVTitle struct {
 	SizeGB         float64
 	// SourceFileName is the source segment map reported by makemkvcon.
 	SourceFileName string
+	// AngleNumber is the camera angle number for multi-angle discs; 0 means not an angle.
+	AngleNumber    int
 }
 
 // ClassifiedDisc is the result of scanning + classifying titles on a disc.
