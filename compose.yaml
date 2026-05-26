@@ -2,12 +2,13 @@ services:
   simplerip:
     image: ghcr.io/8bitreid/simplerip:latest
     volumes:
-      - ./config.yaml:/config/config.yaml:ro
+      - ./config/config.yaml:/config/config.yaml:ro
       - ./makemkv-config:/root/.MakeMKV
       - /tmp/staging:/staging
       - /output:/output
     devices:
       - /dev/sr0:/dev/sr0
       - /dev/sr1:/dev/sr1
-    cap_add:
-      - SYS_RAWIO
+    privileged: true
+    environment:
+      - MAKEMKV_KEY=${MAKEMKV_KEY:-}
