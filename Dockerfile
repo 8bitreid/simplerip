@@ -56,8 +56,7 @@ RUN cd "makemkv-oss-${MAKEMKV_VERSION}" \
 # Accept the MakeMKV End-User Licence Agreement and build the CLI binary.
 # Creating the sentinel file tells the Makefile that the EULA has been read
 # and accepted — equivalent to pressing Enter at the interactive prompt.
-# By building this image you agree to the MakeMKV EULA at
-# https://www.makemkv.com/download/eula.txt
+# By building this image you agree to the MakeMKV EULA (see makemkv.com).
 RUN cd "makemkv-bin-${MAKEMKV_VERSION}" \
     && mkdir -p tmp \
     && touch tmp/eula_accepted \

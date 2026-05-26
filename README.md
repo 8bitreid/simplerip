@@ -193,7 +193,7 @@ internal/config/               config.yaml loading
 
 ## License and legal
 
-**MakeMKV:** The Docker image builds and bundles `makemkvcon` from source. By building or pulling this image you are accepting the [MakeMKV End-User License Agreement](https://www.makemkv.com/download/eula.txt). MakeMKV is free to use while in beta; a license key is required for Blu-ray ripping. SimpleRip does not distribute MakeMKV binaries directly.
+**MakeMKV:** The Docker image builds and bundles `makemkvcon` from source. By building or pulling this image you are accepting the MakeMKV End-User License Agreement, available at [makemkv.com](https://www.makemkv.com). MakeMKV is free to use while in beta; a license key is required for Blu-ray ripping. SimpleRip does not distribute MakeMKV binaries directly.
 
 ---
 
