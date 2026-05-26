@@ -658,9 +658,9 @@ func moveFile(src, dst string) error {
 }
 
 func isExdev(err error) bool {
-	var pe *os.PathError
-	if errors.As(err, &pe) {
-		return pe.Err == syscall.EXDEV
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Err == syscall.EXDEV
 	}
 	return false
 }
