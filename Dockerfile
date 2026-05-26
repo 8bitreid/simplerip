@@ -35,6 +35,7 @@ RUN apt-get update \
         zlib1g-dev \
         wget \
         ca-certificates \
+        less \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
