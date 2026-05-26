@@ -3,23 +3,13 @@ services:
     build: .
     restart: unless-stopped
 
-    environment:
-      # MakeMKV licence key — get a beta key at https://www.makemkv.com/forum/viewtopic.php?t=1053
-      # or purchase a permanent key. Required for ripping encrypted discs.
-      - MAKEMKV_KEY=${MAKEMKV_KEY}
-      # Path inside the container where config.yaml is mounted.
-      - CONFIG_PATH=/config/config.yaml
-
     volumes:
-      # config.yaml lives here (see config.yaml.example)
       - ./config:/config:ro
-      # Staging area: MKV files land here before rsync to NAS
       - /tmp/staging:/staging
+      - /mnt/nas/movies:/output    # update to match your NAS mount point
 
     devices:
-      # Optical drives — add or remove entries to match your hardware
-      - /dev/sr0:/dev/sr0
-      - /dev/sr1:/dev/sr1
+      - /dev/sr0:/dev/sr0          # add /dev/sr1 if you have a second drive
 
     cap_add:
       # Required for raw device I/O (Blu-ray drive access via makemkvcon)
