@@ -50,10 +50,9 @@ notification:
 
 # ── MakeMKV ──────────────────────────────────────────────────────────────────
 makemkv:
-  # MakeMKV licence key. Overridden at runtime by the MAKEMKV_KEY environment
-  # variable — prefer the env var so the key is not checked into version control.
+  # MakeMKV licence key: Set via MAKEMKV_KEY environment variable
+  #   export MAKEMKV_KEY="your-key-here"
   # Get a free beta key at https://www.makemkv.com/forum/viewtopic.php?t=1053
-  key: ""
 
   # Kill makemkvcon and raise an error after this many minutes.
   # Blu-ray rips typically take 20–60 min; 120 gives a comfortable margin.

@@ -44,10 +44,11 @@ go build -o simplerip ./cmd/simplerip
 ### Docker
 
 ```bash
+export MAKEMKV_KEY="your-license-key-here"
 docker compose up -d
 ```
 
-See [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml). Optical drives are passed through as devices (`/dev/sr0`, `/dev/sr1`). Set `MAKEMKV_KEY` as an environment variable.
+Optical drives are passed through as devices (`/dev/sr0`, `/dev/sr1`). Set `MAKEMKV_KEY` for Blu-ray ripping (recommended) — see Configuration below.
 
 ---
 
@@ -57,18 +58,25 @@ Copy the example config and fill in your paths and API keys:
 
 ```bash
 cp config.yaml.example config/config.yaml
+# Edit config/config.yaml with your TMDB/OMDb keys
 ```
 
-Key fields:
+### MakeMKV License Key
+
+Set the `MAKEMKV_KEY` environment variable:
+
+```bash
+export MAKEMKV_KEY="your-license-key-here"
+```
+
+For Docker, this is passed through in compose.yaml. For systemd, add it to your service file. Get a free beta key at https://www.makemkv.com/forum/viewtopic.php?t=1053
+
+### Key configuration fields:
 
 ```yaml
 output:
   staging_dir: /staging      # fast local storage
   nas_path: /output          # NAS mount point
-
-makemkv:
-  key: ""                    # or set MAKEMKV_KEY env var
-  devices: [/dev/sr0, /dev/sr1]
 
 metadata:
   tmdb_api_key: ""           # https://www.themoviedb.org/settings/api
@@ -76,10 +84,10 @@ metadata:
 
 notification:
   webhook_url: ""            # n8n webhook for Discord alerts
-  callback_port: 8090
+  callback_port: 8090        # port for n8n to POST responses back
 ```
 
-API keys are gitignored — never commit `config/config.yaml`.
+See [config.yaml.example](config.yaml.example) for all options. The file `config/config.yaml` is gitignored.
 
 ---
 
