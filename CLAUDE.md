@@ -165,7 +165,7 @@ metadata:
 **MakeMKV key handling:**
 - The `MAKEMKV_KEY` environment variable **always overrides** `makemkv.key` from config
 - Environment variable is the **recommended approach** (keeps secrets out of config files)
-- Required for Docker deployments (passed through in compose.yaml)
+- Docker Compose passes it through via compose.yaml (needed for Blu-ray ripping)
 - Config file fallback exists for simpler local development setups
 - `config/config.yaml` is gitignored — never commit it
 
