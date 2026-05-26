@@ -86,8 +86,10 @@ RUN apt-get update \
 COPY --from=gobuilder /simplerip /usr/local/bin/simplerip
 
 # makemkvcon binary and the makemkv shared library it links against.
-COPY --from=makemkv /usr/local/bin/makemkvcon /usr/local/bin/makemkvcon
-COPY --from=makemkv /usr/local/lib/            /usr/local/lib/
+COPY --from=makemkv /usr/bin/makemkvcon        /usr/local/bin/makemkvcon
+COPY --from=makemkv /usr/lib/libdriveio.so.0   /usr/lib/libdriveio.so.0
+COPY --from=makemkv /usr/lib/libmakemkv.so.1   /usr/lib/libmakemkv.so.1
+COPY --from=makemkv /usr/lib/libmmbd.so.0      /usr/lib/libmmbd.so.0
 RUN ldconfig
 
 ENTRYPOINT ["/usr/local/bin/simplerip"]
