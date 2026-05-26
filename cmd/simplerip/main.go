@@ -396,7 +396,7 @@ func runClean(args []string) {
 	// ── Step 3: TMDB + OMDb lookup ──────────────────────────────────────
 	searchQuery := *query
 	if searchQuery == "" {
-		searchQuery = metadata.QueryFromDirName(filepath.Base(absDir))
+		searchQuery = queryFromMKVPath(keptFile)
 	}
 
 	tmdbClient := metadata.NewClient(cfg.Metadata.TMDBApiKey)
@@ -618,4 +618,24 @@ func formatBytes(b int64) string {
 func fatal(prefix string, err error) {
 	fmt.Fprintf(os.Stderr, "simplerip: %s %v\n", prefix, err)
 	os.Exit(1)
+}
+
+// queryFromMKVPath derives a TMDB search query from a MKV file path.
+// makemkvcon names output files like "Revenge of the Sith_t00.mkv"; this
+// strips the _tNN suffix and extension before passing through QueryFromDirName.
+func queryFromMKVPath(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), ".mkv")
+	if i := strings.LastIndex(name, "_t"); i != -1 && isAllDigits(name[i+2:]) {
+		name = name[:i]
+	}
+	return metadata.QueryFromDirName(name)
+}
+
+func isAllDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
