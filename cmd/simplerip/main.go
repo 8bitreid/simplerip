@@ -7,9 +7,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/8bitreid/simplerip/internal/config"
@@ -516,7 +518,13 @@ func runClean(args []string) {
 	}
 
 	// ── Step 4: rename with edition labels ──────────────────────────────
-	baseDir := filepath.Dir(absDir)
+	// Use NASPath if configured, otherwise stay inside the staging dir.
+	// Never use filepath.Dir(absDir) — if absDir is /staging that resolves to /
+	// and cross-device renames fail when staging and output are separate mounts.
+	baseDir := cfg.Output.NASPath
+	if baseDir == "" {
+		baseDir = absDir
+	}
 	folderDir := filepath.Join(baseDir, details.FolderName())
 	if err := os.MkdirAll(folderDir, 0o755); err != nil {
 		fatal("clean:", err)
@@ -568,7 +576,7 @@ func runClean(args []string) {
 		if _, err := os.Stat(newFile); err == nil {
 			fatal("clean:", fmt.Errorf("destination already exists: %s", newFile))
 		}
-		if err := os.Rename(k.path, newFile); err != nil {
+		if err := moveFile(k.path, newFile); err != nil {
 			fatal("clean:", err)
 		}
 		fmt.Printf("%s\n", newFile)
@@ -618,6 +626,43 @@ func formatBytes(b int64) string {
 func fatal(prefix string, err error) {
 	fmt.Fprintf(os.Stderr, "simplerip: %s %v\n", prefix, err)
 	os.Exit(1)
+}
+
+// moveFile moves src to dst, falling back to copy+delete when src and dst are
+// on different filesystems (os.Rename returns EXDEV in that case).
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	} else if !isExdev(err) {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return err
+	}
+	return os.Remove(src)
+}
+
+func isExdev(err error) bool {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return pe.Err == syscall.EXDEV
+	}
+	return false
 }
 
 // queryFromMKVPath derives a TMDB search query from a MKV file path.

@@ -2,7 +2,7 @@ services:
   simplerip:
     image: ghcr.io/8bitreid/simplerip:latest
     volumes:
-      - ./config/config.yaml:/config/config.yaml:ro
+      - ./config.yaml:/config/config.yaml:ro
       - ./makemkv-config:/root/.MakeMKV
       - /tmp/staging:/staging
       - /output:/output
