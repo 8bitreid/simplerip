@@ -628,13 +628,9 @@ func fatal(prefix string, err error) {
 	os.Exit(1)
 }
 
-// moveFile moves src to dst, falling back to copy+delete when src and dst are
-// on different filesystems (os.Rename returns EXDEV in that case).
 func moveFile(src, dst string) error {
-	if err := os.Rename(src, dst); err == nil {
-		return nil
-	} else if !isExdev(err) {
-		return err
+	if sameDevice(src, dst) {
+		return os.Rename(src, dst)
 	}
 	in, err := os.Open(src)
 	if err != nil {
@@ -657,12 +653,12 @@ func moveFile(src, dst string) error {
 	return os.Remove(src)
 }
 
-func isExdev(err error) bool {
-	var le *os.LinkError
-	if errors.As(err, &le) {
-		return le.Err == syscall.EXDEV
+func sameDevice(a, b string) bool {
+	var sa, sb syscall.Stat_t
+	if syscall.Stat(a, &sa) != nil || syscall.Stat(filepath.Dir(b), &sb) != nil {
+		return false
 	}
-	return false
+	return sa.Dev == sb.Dev
 }
 
 // queryFromMKVPath derives a TMDB search query from a MKV file path.
