@@ -109,16 +109,38 @@ func runScan(args []string) {
 
 	cl := ripper.ClassifyTitles(result.Titles, cfg.Detection)
 
+	// Warn on stderr if metadata is missing (happens with encrypted/unreadable discs).
+	if cl.MissingMetadata {
+		fmt.Fprintln(os.Stderr, "WARNING: Disc metadata is missing or incomplete.")
+		fmt.Fprintln(os.Stderr, "         Most titles have zero duration/size/chapters.")
+		fmt.Fprintln(os.Stderr, "         This can happen with:")
+		fmt.Fprintln(os.Stderr, "         - Heavily encrypted discs")
+		fmt.Fprintln(os.Stderr, "         - Drive read errors")
+		fmt.Fprintln(os.Stderr, "         - Unsupported disc structures")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "         Try ripping title 0 or 1 manually:")
+		fmt.Fprintln(os.Stderr, "         simplerip rip -device", result.Device, "-title 0 -output /tmp/test")
+		fmt.Fprintln(os.Stderr, "")
+	}
+
 	out := struct {
-		Pattern string      `json:"pattern"`
-		Main    []titleJSON `json:"main"`
-		Extras  []titleJSON `json:"extras"`
-		Junk    []titleJSON `json:"junk"`
+		Pattern         string      `json:"pattern"`
+		Main            []titleJSON `json:"main"`
+		Extras          []titleJSON `json:"extras"`
+		Junk            []titleJSON `json:"junk"`
+		MissingMetadata bool        `json:"missing_metadata,omitempty"`
+		AllTitles       []titleJSON `json:"all_titles,omitempty"`
+		MultiAngle      bool        `json:"multi_angle,omitempty"`
+		AngleCount      int         `json:"angle_count,omitempty"`
 	}{
-		Pattern: strings.ToLower(cl.Pattern.String()),
-		Main:    toTitleJSON(cl.MainTitles),
-		Extras:  toTitleJSON(cl.ExtraTitles),
-		Junk:    toTitleJSON(cl.JunkTitles),
+		Pattern:         strings.ToLower(cl.Pattern.String()),
+		Main:            toTitleJSON(cl.MainTitles),
+		Extras:          toTitleJSON(cl.ExtraTitles),
+		Junk:            toTitleJSON(cl.JunkTitles),
+		MissingMetadata: cl.MissingMetadata,
+		AllTitles:       toTitleJSON(cl.AllTitles),
+		MultiAngle:      cl.MultiAngle,
+		AngleCount:      cl.AngleCount,
 	}
 
 	enc := json.NewEncoder(os.Stdout)

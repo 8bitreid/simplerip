@@ -27,6 +27,15 @@ Three subcommands (all in cmd/simplerip/main.go):
 Scans a disc with `makemkvcon -r info`, classifies titles, prints JSON.
 Flags: `-device /dev/sr0`, `-fixture <file>` (replay captured output for testing).
 
+If scan reports `missing_metadata: true`, the disc is encrypted or unreadable
+and makemkvcon couldn't extract title information (duration, size, chapters).
+In this case, try ripping title 0 or 1 manually:
+```bash
+simplerip rip -device /dev/sr0 -title 0 -output /tmp/test
+```
+Some heavily encrypted Blu-rays won't reveal metadata during scan but will rip
+successfully once you specify a title index.
+
 ### rip
 Rips a single title from a disc to an output directory.
 Flags: `-device`, `-title` (index), `-output`.
@@ -40,6 +49,7 @@ Flags: `-dir` (required), `-query`, `-edition`, `-dry-run`, `-yes`.
 
 ## Title classification logic
 Scan all titles with `makemkvcon -r info` first, then:
+- All titles missing duration metadata (80%+ have zero duration) → Missing metadata mode, show warning
 - 3+ titles within 60s duration of each other → TV mode, rip all as main titles
 - Exactly 2 feature-length titles within tolerance → double feature, ask via Discord
 - 1 long title (>40 min) + shorter others → rip main immediately, ask about extras
@@ -48,6 +58,18 @@ Scan all titles with `makemkvcon -r info` first, then:
 
 TV mode always rips everything automatically. Main feature never waits for user input.
 Extras and ambiguous cases pause and ask via Discord.
+
+Missing metadata mode occurs when makemkvcon can't read title information due to
+encryption or disc read errors. The scan will show all titles with zero duration,
+size, and chapter count. In this case, manual title selection is required — typically
+title 0 or 1 is the main feature.
+
+**Multi-angle discs:** Some Blu-rays (especially older releases like Star Wars) have
+the same movie from multiple camera angles as separate titles. SimpleRip detects
+multi-angle discs by identifying titles with identical duration and chapter counts.
+When detected, only angle 1 is automatically selected as the main title (classification
+rule 0.5, highest priority). The scan JSON output includes `multi_angle: true` and
+`angle_count: N` fields to indicate multi-angle disc structure.
 
 ## Duplicate detection and quality scoring
 `simplerip clean` groups MKVs by duration (±30s = same version), scores each by
@@ -160,3 +182,27 @@ MAKEMKV_KEY set as environment variable.
 - udev / polling disc detection (internal/disc/detect.go referenced but not built)
 - Daemon mode tying scan → rip → deliver → notify into a full automated pipeline
 - Integration between `rip` command and Discord extras flow (currently separate)
+
+## Recent fixes (May 2026)
+**makemkvcon v1.18.3 attribute ID corrections:**
+The makemkvcon robot-mode output format changed between versions. Fixed attribute ID
+mappings in `internal/ripper/makemkv.go`:
+- TINFO attribute 8 = chapters (was incorrectly 9)
+- TINFO attribute 9 = duration (was incorrectly 11)
+- TINFO attribute 11 = size in bytes (was incorrectly 28)
+- TINFO attribute 30 = title description (newly added, used for angle detection)
+- SINFO attribute 1 = stream type code (was incorrectly 22)
+
+**Multi-angle detection (Rule 0.5):**
+Added `detectMultiAngle()` in `internal/ripper/classify.go` that:
+- Identifies titles with identical duration (±3s) and chapter count
+- Filters to titles with AngleNumber > 0 (parsed from attribute 30)
+- Requires 2+ matching titles to trigger multi-angle classification
+- Selects only angle 1 as MainTitle, classifies as Movie pattern
+- Adds `MultiAngle` and `AngleCount` fields to `ClassificationResult`
+- Outputs `multi_angle: true` and `angle_count: N` in scan JSON
+
+**Test fixture updates:**
+Updated `testdata/movie.txt`, `testdata/tvshow.txt`, and added
+`testdata/missing-metadata.txt` to match makemkvcon v1.18.3 output format
+with corrected attribute positions.

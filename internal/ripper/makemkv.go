@@ -28,10 +28,11 @@ import (
 // Attribute IDs for TINFO:
 //
 //	2  = Name
-//	9  = Chapter count
-//	11 = Duration (H:MM:SS)
+//	8  = Chapter count
+//	9  = Duration (H:MM:SS)
+//	11 = Estimated size (bytes)
 //	27 = Source file name
-//	28 = Estimated size (bytes)
+//	30 = Title description (contains angle info)
 //
 // Attribute IDs for CINFO:
 //
@@ -39,16 +40,17 @@ import (
 //
 // Attribute IDs for SINFO:
 //
-//	22 = Stream type text ("Video", "Audio", "Subtitles")
+//	1 = Stream type text ("Video", "Audio", "Subtitles")
 
 const (
-	attrName       = 2
-	attrChapters   = 9
-	attrDuration   = 11
-	attrSourceFile = 27
-	attrSizeBytes  = 28
-	attrDiscName   = 30
-	attrStreamType = 22
+	attrName        = 2
+	attrChapters    = 8
+	attrDuration    = 9
+	attrSourceFile  = 27
+	attrSizeBytes   = 11
+	attrDiscName    = 30
+	attrTitleDesc   = 30
+	attrStreamType  = 1
 )
 
 // writeKey ensures the MakeMKV licence key is present in ~/.MakeMKV/settings.conf.
@@ -214,6 +216,9 @@ func parseTitleInfo(payload string, titleMap map[int]*disc.MKVTitle) {
 		if b, err := strconv.ParseFloat(val, 64); err == nil {
 			t.SizeGB = b / (1024 * 1024 * 1024)
 		}
+	case attrTitleDesc:
+		// Extract angle number from "(angle N)" in description
+		t.AngleNumber = parseAngleNumber(val)
 	}
 }
 
@@ -340,4 +345,25 @@ func parseDuration(s string) (time.Duration, error) {
 		return 0, err
 	}
 	return time.Duration(h)*time.Hour + time.Duration(m)*time.Minute + time.Duration(sec)*time.Second, nil
+}
+
+// parseAngleNumber extracts the angle number from strings like "Title - info (angle 1)".
+// Returns 0 if no angle marker is found.
+func parseAngleNumber(s string) int {
+	// Look for "(angle N)" pattern
+	idx := strings.Index(s, "(angle ")
+	if idx == -1 {
+		return 0
+	}
+	rest := s[idx+7:] // skip "(angle "
+	endIdx := strings.Index(rest, ")")
+	if endIdx == -1 {
+		return 0
+	}
+	numStr := strings.TrimSpace(rest[:endIdx])
+	n, err := strconv.Atoi(numStr)
+	if err != nil {
+		return 0
+	}
+	return n
 }

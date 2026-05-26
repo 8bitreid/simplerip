@@ -31,10 +31,14 @@ func (p DiscPattern) String() string {
 }
 
 type ClassificationResult struct {
-	Pattern     DiscPattern
-	MainTitles  []disc.MKVTitle // rip immediately without asking
-	ExtraTitles []disc.MKVTitle // ask user before ripping
-	JunkTitles  []disc.MKVTitle // under min duration, silently ignored
+	Pattern           DiscPattern
+	MainTitles        []disc.MKVTitle // rip immediately without asking
+	ExtraTitles       []disc.MKVTitle // ask user before ripping
+	JunkTitles        []disc.MKVTitle // under min duration, silently ignored
+	MissingMetadata   bool            // true if all titles have zero/missing duration
+	AllTitles         []disc.MKVTitle // all non-junk titles regardless of metadata quality
+	MultiAngle        bool            // true if disc contains multi-angle titles
+	AngleCount        int             // number of angles detected
 }
 
 // ClassifyTitles applies disc-pattern rules to a flat list of titles and
@@ -45,6 +49,8 @@ type ClassificationResult struct {
 // translation layer needed.
 //
 // Rule priority (first match wins):
+//  0. All titles have zero/missing duration → Missing metadata (ask user)
+//  0.5. Multi-angle disc detection (same duration, same chapters, angle markers)
 //  1. 3+ titles within DurationTolerance of each other → TV (rip all)
 //  2. Exactly 2 feature-length titles within DurationTolerance → Double (ask)
 //  3. Exactly 1 feature-length title → Movie (rip main, ask about rest)
@@ -53,6 +59,23 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 	minExtra := time.Duration(cfg.MinExtraMinutes) * time.Minute
 	minFeature := time.Duration(cfg.MinFeatureMinutes) * time.Minute
 	tolerance := time.Duration(cfg.DurationToleranceSec) * time.Second
+
+	// Rule 0: Check if all or most titles have zero duration (missing metadata).
+	// This happens with heavily encrypted discs or when makemkvcon can't read title info.
+	zeroCount := 0
+	for _, t := range titles {
+		if t.Duration == 0 {
+			zeroCount++
+		}
+	}
+	// If 80%+ of titles have no duration, the metadata is unreliable.
+	if len(titles) > 0 && float64(zeroCount)/float64(len(titles)) >= 0.8 {
+		return ClassificationResult{
+			Pattern:         DiscPatternAmbiguous,
+			MissingMetadata: true,
+			AllTitles:       titles,
+		}
+	}
 
 	var junk, candidates []disc.MKVTitle
 	for _, t := range titles {
@@ -64,7 +87,11 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 	}
 
 	if len(candidates) == 0 {
-		return ClassificationResult{Pattern: DiscPatternAmbiguous, JunkTitles: junk}
+		return ClassificationResult{
+			Pattern:    DiscPatternAmbiguous,
+			JunkTitles: junk,
+			AllTitles:  candidates,
+		}
 	}
 
 	sorted := make([]disc.MKVTitle, len(candidates))
@@ -75,12 +102,51 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 
 	largest := largestCluster(buildClusters(sorted, tolerance))
 
+	// Rule 0.5: Multi-angle detection
+	// If we have 2+ titles marked as angles with same duration and chapter count, 
+	// it's a multi-angle disc. Select only angle 1.
+	angleGroup := detectMultiAngle(largest)
+	if len(angleGroup) > 1 {
+		// Find angle 1 (or the first angle if angle 1 doesn't exist)
+		var mainAngle *disc.MKVTitle
+		for i := range angleGroup {
+			if angleGroup[i].AngleNumber == 1 {
+				mainAngle = &angleGroup[i]
+				break
+			}
+		}
+		if mainAngle == nil {
+			mainAngle = &angleGroup[0]
+		}
+		
+		// Separate angles from other candidates
+		var nonAngles, angles []disc.MKVTitle
+		for _, t := range candidates {
+			if t.AngleNumber > 0 && t.Duration == mainAngle.Duration && t.ChapterCount == mainAngle.ChapterCount {
+				angles = append(angles, t)
+			} else {
+				nonAngles = append(nonAngles, t)
+			}
+		}
+		
+		return ClassificationResult{
+			Pattern:     DiscPatternMovie,
+			MainTitles:  []disc.MKVTitle{*mainAngle},
+			ExtraTitles: nonAngles,
+			JunkTitles:  junk,
+			AllTitles:   candidates,
+			MultiAngle:  true,
+			AngleCount:  len(angles),
+		}
+	}
+
 	// Rule 1: TV
 	if len(largest) >= cfg.TVThreshold {
 		return ClassificationResult{
 			Pattern:    DiscPatternTV,
 			MainTitles: candidates,
 			JunkTitles: junk,
+			AllTitles:  candidates,
 		}
 	}
 
@@ -90,6 +156,7 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 			Pattern:     DiscPatternDouble,
 			ExtraTitles: candidates,
 			JunkTitles:  junk,
+			AllTitles:   candidates,
 		}
 	}
 
@@ -108,6 +175,7 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 			MainTitles:  features,
 			ExtraTitles: extras,
 			JunkTitles:  junk,
+			AllTitles:   candidates,
 		}
 	}
 
@@ -116,6 +184,7 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 		Pattern:     DiscPatternAmbiguous,
 		ExtraTitles: candidates,
 		JunkTitles:  junk,
+		AllTitles:   candidates,
 	}
 }
 
@@ -146,4 +215,35 @@ func largestCluster(clusters [][]disc.MKVTitle) []disc.MKVTitle {
 		}
 	}
 	return largest
+}
+
+// detectMultiAngle returns titles from the cluster that are marked as angles
+// (AngleNumber > 0) and have identical duration and chapter count.
+func detectMultiAngle(cluster []disc.MKVTitle) []disc.MKVTitle {
+	if len(cluster) < 2 {
+		return nil
+	}
+	
+	// Count how many titles have angle markers
+	var angles []disc.MKVTitle
+	for _, t := range cluster {
+		if t.AngleNumber > 0 {
+			angles = append(angles, t)
+		}
+	}
+	
+	if len(angles) < 2 {
+		return nil
+	}
+	
+	// Verify all angles have same duration and chapter count
+	firstDur := angles[0].Duration
+	firstChap := angles[0].ChapterCount
+	for _, a := range angles[1:] {
+		if a.Duration != firstDur || a.ChapterCount != firstChap {
+			return nil
+		}
+	}
+	
+	return angles
 }
