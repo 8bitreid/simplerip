@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
 
     volumes:
-      - ./config:/config:ro
+      - ./config.yaml:/config/config.yaml:ro
       - /tmp/staging:/staging
       - /mnt/nas/movies:/output    # update to match your NAS mount point
 

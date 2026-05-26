@@ -1,4 +1,5 @@
 config/config.yaml
 config/*.yaml
+config.yaml
 *.env
 .env
