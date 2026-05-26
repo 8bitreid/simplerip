@@ -35,7 +35,6 @@ RUN apt-get update \
         zlib1g-dev \
         wget \
         ca-certificates \
-        less \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -59,9 +58,9 @@ RUN cd "makemkv-oss-${MAKEMKV_VERSION}" \
 # and accepted — equivalent to pressing Enter at the interactive prompt.
 # By building this image you agree to the MakeMKV EULA at
 # https://www.makemkv.com/download/eula.txt
-RUN mkdir -p /tmp/makemkv \
-    && touch /tmp/makemkv/eula_agreed \
-    && cd "makemkv-bin-${MAKEMKV_VERSION}" \
+RUN cd "makemkv-bin-${MAKEMKV_VERSION}" \
+    && mkdir -p tmp \
+    && touch tmp/eula_accepted \
     && make -j"$(nproc)" \
     && make install
 
