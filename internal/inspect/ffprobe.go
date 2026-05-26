@@ -25,19 +25,40 @@ type FileInfo struct {
 // AudioTrack describes one audio stream.
 type AudioTrack struct {
 	Codec    string // e.g. "dts", "ac3", "truehd"
+	Profile  string // e.g. "DTS-HD MA", "DTS", "" for non-DTS
 	Channels int
 	Layout   string // e.g. "7.1", "5.1(side)", "stereo"
 	Language string // e.g. "eng", "fra"
 }
 
-// String formats the track for display: "DTS 6.1 (eng)"
+// DisplayCodec returns a human-readable codec name including profile where relevant.
+func (a AudioTrack) DisplayCodec() string {
+	if a.Codec == "dts" && a.Profile != "" {
+		return a.Profile // "DTS-HD MA", "DTS-HD HRA", "DTS"
+	}
+	switch a.Codec {
+	case "truehd":
+		return "TrueHD"
+	case "eac3":
+		return "EAC3"
+	case "ac3":
+		return "AC3"
+	case "flac":
+		return "FLAC"
+	case "pcm_bluray", "pcm_s16le", "pcm_s24le":
+		return "PCM"
+	default:
+		return strings.ToUpper(a.Codec)
+	}
+}
+
+// String formats the track for display: "TrueHD 7.1 (eng)"
 func (a AudioTrack) String() string {
-	codec := strings.ToUpper(a.Codec)
 	lang := a.Language
 	if lang == "" {
 		lang = "und"
 	}
-	return fmt.Sprintf("%s %s (%s)", codec, a.Layout, lang)
+	return fmt.Sprintf("%s %s (%s)", a.DisplayCodec(), a.Layout, lang)
 }
 
 type ffprobeOutput struct {
@@ -48,6 +69,7 @@ type ffprobeOutput struct {
 type ffprobeStream struct {
 	CodecType     string            `json:"codec_type"`
 	CodecName     string            `json:"codec_name"`
+	Profile       string            `json:"profile"`
 	Width         int               `json:"width"`
 	Height        int               `json:"height"`
 	Channels      int               `json:"channels"`
@@ -110,6 +132,7 @@ func Probe(ctx context.Context, path string) (*FileInfo, error) {
 			}
 			info.Audio = append(info.Audio, AudioTrack{
 				Codec:    s.CodecName,
+				Profile:  s.Profile,
 				Channels: s.Channels,
 				Layout:   s.ChannelLayout,
 				Language: lang,

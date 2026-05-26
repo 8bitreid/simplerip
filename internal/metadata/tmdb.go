@@ -123,19 +123,36 @@ func (c *Client) GetMovie(ctx context.Context, id int) (*TMDbMovieDetail, error)
 }
 
 // QueryFromDirName converts a raw directory name like
-// "Star-Wars--Episode-I---The-Phantom-Menace" or "Pitch-Black (2000)"
-// into a clean TMDB search query "Star Wars Episode I The Phantom Menace".
+// "Star-Wars--Episode-I---The-Phantom-Menace", "Pitch-Black (2000)",
+// or "HIGH_SCHOOL_MUSICAL2" into a clean TMDB search query.
 func QueryFromDirName(dir string) string {
-	// Strip parenthesized year suffix e.g. " (2000)" — TMDB doesn't want it in the query.
+	// Strip parenthesized year suffix e.g. " (2000)".
 	if idx := strings.LastIndex(dir, " ("); idx != -1 {
 		dir = dir[:idx]
 	}
-	// Replace runs of dashes/underscores with spaces.
+	// Replace dashes and underscores with spaces.
 	r := strings.NewReplacer("-", " ", "_", " ")
 	s := r.Replace(dir)
-	fields := strings.Fields(s)
+	// Insert a space between a letter and a digit boundary: "MUSICAL2" → "MUSICAL 2".
+	var out strings.Builder
+	runes := []rune(s)
+	for i, ch := range runes {
+		if i > 0 {
+			prev := runes[i-1]
+			letterToDigit := isLetter(prev) && isDigit(ch)
+			digitToLetter := isDigit(prev) && isLetter(ch)
+			if letterToDigit || digitToLetter {
+				out.WriteRune(' ')
+			}
+		}
+		out.WriteRune(ch)
+	}
+	fields := strings.Fields(out.String())
 	return strings.Join(fields, " ")
 }
+
+func isLetter(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') }
+func isDigit(r rune) bool  { return r >= '0' && r <= '9' }
 
 // sanitize strips characters that are illegal in Linux/macOS filenames.
 func sanitize(s string) string {

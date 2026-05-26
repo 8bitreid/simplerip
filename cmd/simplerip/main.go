@@ -267,7 +267,17 @@ func runClean(args []string) {
 	ctx := context.Background()
 	stdin := bufio.NewScanner(os.Stdin)
 
-	// ── Step 1: analyse (no files touched) ─────────────────────────────
+	// ── Step 1: flatten extras/ into parent dir ─────────────────────────
+	if moved, err := output.FlattenSubdirs(absDir); err != nil {
+		fatal("clean:", err)
+	} else if len(moved) > 0 {
+		fmt.Fprintf(os.Stderr, "Flattened %d file(s) from extras/\n", len(moved))
+		for _, f := range moved {
+			fmt.Fprintf(os.Stderr, "  %s\n", filepath.Base(f))
+		}
+	}
+
+	// ── Step 2: analyse (no files touched) ─────────────────────────────
 	fmt.Fprintf(os.Stderr, "Scanning %s...\n", absDir)
 	analyses, err := output.AnalyzeDir(ctx, absDir)
 	if err != nil {
@@ -368,15 +378,30 @@ func runClean(args []string) {
 	}
 
 	tmdbClient := metadata.NewClient(cfg.Metadata.TMDBApiKey)
-	fmt.Fprintf(os.Stderr, "\nSearching TMDB for %q...\n", searchQuery)
 
-	movies, err := tmdbClient.SearchMovie(ctx, searchQuery)
-	if err != nil {
-		fatal("clean:", err)
+	// Try progressively shorter queries by dropping the last word until we get results.
+	words := strings.Fields(searchQuery)
+	var movies []metadata.MovieResult
+	var usedQuery string
+	for len(words) > 0 {
+		q := strings.Join(words, " ")
+		fmt.Fprintf(os.Stderr, "\nSearching TMDB for %q...\n", q)
+		results, err := tmdbClient.SearchMovie(ctx, q)
+		if err != nil {
+			fatal("clean:", err)
+		}
+		if len(results) > 0 {
+			movies = results
+			usedQuery = q
+			break
+		}
+		fmt.Fprintf(os.Stderr, "  no results — retrying without %q\n", words[len(words)-1])
+		words = words[:len(words)-1]
 	}
 	if len(movies) == 0 {
-		fatal("clean:", fmt.Errorf("no TMDB results for %q", searchQuery))
+		fatal("clean:", fmt.Errorf("no TMDB results for %q", usedQuery))
 	}
+	_ = usedQuery
 
 	fmt.Fprintln(os.Stderr, "")
 	for i, m := range movies {
@@ -434,20 +459,27 @@ func runClean(args []string) {
 	fmt.Fprintln(os.Stderr, "─────────────────────────────────────────────────────")
 
 	if *dryRun {
-		altCount := 0
-		for _, k := range keepers {
-			if details.EditionLabel(k.dur) != "" {
-				altCount++
+		ref := time.Duration(details.RuntimeMinutes) * time.Minute
+		dryClosestIdx, dryClosestDiff := 0, time.Duration(1<<62)
+		for i, k := range keepers {
+			d := k.dur - ref
+			if d < 0 {
+				d = -d
+			}
+			if d < dryClosestDiff {
+				dryClosestDiff, dryClosestIdx = d, i
 			}
 		}
+		altCount := len(keepers) - 1
 		fmt.Fprintln(os.Stderr, "\n[dry-run] Would rename:")
-		for _, k := range keepers {
-			label := details.EditionLabel(k.dur)
-			if label != "" {
+		for i, k := range keepers {
+			var label string
+			if i != dryClosestIdx {
+				label = "Alternate"
 				if *edition != "" {
 					label = *edition
 				}
-				if altCount > 1 {
+				if altCount > 1 || *edition == "" {
 					label = fmt.Sprintf("%s (%dmin)", label, int(k.dur.Minutes()))
 				}
 			}
@@ -468,22 +500,40 @@ func runClean(args []string) {
 		fatal("clean:", err)
 	}
 
-	// Count how many files will need an alternate label (for collision detection).
+	// Find the single keeper closest to theatrical runtime — it gets the clean name.
+	// All others get an Alternate label to prevent collisions.
+	theatricalRef := time.Duration(details.RuntimeMinutes) * time.Minute
+	closestIdx, closestDiff := 0, time.Duration(1<<62)
+	for i, k := range keepers {
+		d := k.dur - theatricalRef
+		if d < 0 {
+			d = -d
+		}
+		if d < closestDiff {
+			closestDiff, closestIdx = d, i
+		}
+	}
+
+	// Count alternates for duration-suffix logic.
 	alternateCount := 0
-	for _, k := range keepers {
-		if details.EditionLabel(k.dur) != "" {
+	for i, k := range keepers {
+		if i == closestIdx {
+			continue
+		}
+		if details.EditionLabel(k.dur) != "" || len(keepers) > 1 {
 			alternateCount++
 		}
 	}
 
-	for _, k := range keepers {
-		label := details.EditionLabel(k.dur)
-		if label != "" {
+	for i, k := range keepers {
+		var label string
+		if i != closestIdx {
+			// Non-closest files always get an alternate label.
+			label = "Alternate"
 			if *edition != "" {
 				label = *edition
 			}
-			// Append duration when multiple alternates share the same label.
-			if alternateCount > 1 {
+			if alternateCount > 1 || *edition == "" {
 				label = fmt.Sprintf("%s (%dmin)", label, int(k.dur.Minutes()))
 			}
 		}
@@ -492,6 +542,10 @@ func runClean(args []string) {
 			baseName += " - " + label
 		}
 		newFile := filepath.Join(folderDir, baseName+".mkv")
+		// Never silently overwrite — fail loudly.
+		if _, err := os.Stat(newFile); err == nil {
+			fatal("clean:", fmt.Errorf("destination already exists: %s", newFile))
+		}
 		if err := os.Rename(k.path, newFile); err != nil {
 			fatal("clean:", err)
 		}
@@ -522,6 +576,15 @@ func printFileReport(w *os.File, label string, r output.FileReport) {
 			fmt.Fprintf(w, "        Audio:    %s\n", a)
 		}
 		fmt.Fprintf(w, "        Subs:     %d tracks\n", r.Info.Subtitles)
+	}
+	// Quality score breakdown
+	sc := r.Score
+	if sc.HasEnglish {
+		fmt.Fprintf(w, "        Quality:  score=%d  codec=%d  channels=%d  subs=%d  size=%d\n",
+			sc.Total, sc.BestCodecScore, sc.BestChanScore, sc.SubScore, sc.SizeScore)
+		fmt.Fprintf(w, "        Decision: %s\n", sc.ScoreLabel())
+	} else {
+		fmt.Fprintf(w, "        Quality:  DISQUALIFIED (no English audio)\n")
 	}
 }
 

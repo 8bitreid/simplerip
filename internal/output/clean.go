@@ -11,7 +11,7 @@ import (
 	"github.com/8bitreid/simplerip/internal/inspect"
 )
 
-const dupTolerance = 5 * time.Second
+const dupTolerance = 30 * time.Second
 
 // FileReport holds ffprobe data for one file in a duplicate group.
 type FileReport struct {
@@ -19,6 +19,7 @@ type FileReport struct {
 	SizeBytes int64
 	Duration  time.Duration
 	Info      *inspect.FileInfo
+	Score     inspect.QualityScore
 }
 
 // CleanAnalysis is the result of analysing a directory — no files are moved.
@@ -59,13 +60,19 @@ func AnalyzeDir(ctx context.Context, dir string) ([]CleanAnalysis, error) {
 		if len(group) < 2 {
 			continue
 		}
+		// Score each file; pick the highest-quality as keeper.
 		sort.Slice(group, func(i, j int) bool {
-			return group[i].SizeBytes > group[j].SizeBytes
+			si := inspect.Score(group[i], group[i].SizeBytes)
+			sj := inspect.Score(group[j], group[j].SizeBytes)
+			return si.Total > sj.Total
 		})
 		keeper := toReport(group[0])
+		keeper.Score = inspect.Score(group[0], group[0].SizeBytes)
 		var dups []FileReport
 		for _, d := range group[1:] {
-			dups = append(dups, toReport(d))
+			r := toReport(d)
+			r.Score = inspect.Score(d, d.SizeBytes)
+			dups = append(dups, r)
 		}
 		analyses = append(analyses, CleanAnalysis{Keeper: keeper, Duplicates: dups})
 	}
@@ -104,6 +111,42 @@ func ExecuteDedupe(dir string, analyses []CleanAnalysis) ([]CleanResult, error) 
 		})
 	}
 	return results, nil
+}
+
+// FlattenSubdirs moves all MKV files from any immediate subdirectory of dir
+// up into dir, then removes the (now-empty) subdirectory. This normalises
+// the layout before AnalyzeDir runs so all files are considered together.
+// Returns the paths of any files that were moved.
+func FlattenSubdirs(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read dir: %w", err)
+	}
+
+	var moved []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		subdir := filepath.Join(dir, entry.Name())
+		mkvs, _ := filepath.Glob(filepath.Join(subdir, "*.mkv"))
+		for _, src := range mkvs {
+			dst := filepath.Join(dir, filepath.Base(src))
+			// Avoid overwriting an existing file with the same name.
+			if _, err := os.Stat(dst); err == nil {
+				ext := filepath.Ext(dst)
+				base := dst[:len(dst)-len(ext)]
+				dst = fmt.Sprintf("%s_%s%s", base, entry.Name(), ext)
+			}
+			if err := os.Rename(src, dst); err != nil {
+				return moved, fmt.Errorf("flatten %q: %w", filepath.Base(src), err)
+			}
+			moved = append(moved, dst)
+		}
+		// Remove subdirectory if now empty.
+		_ = os.Remove(subdir)
+	}
+	return moved, nil
 }
 
 // RenameToTitle moves keptFile into baseDir/folderName/folderName.mkv.
