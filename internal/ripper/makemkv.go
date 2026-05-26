@@ -89,7 +89,7 @@ func ScanInfo(ctx context.Context, makemkvBin, device, key string) (*disc.Classi
 		return nil, fmt.Errorf("start makemkvcon: %w", err)
 	}
 
-	result, parseErr := ScanInfoFromReader(stdout, device)
+	result, parseErr := ScanInfoFromReader(io.TeeReader(stdout, os.Stderr), device)
 
 	if werr := cmd.Wait(); werr != nil {
 		if ctx.Err() != nil {
