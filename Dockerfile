@@ -95,4 +95,7 @@ RUN ldconfig
 
 RUN mkdir -p /root/.MakeMKV
 
-ENTRYPOINT ["/usr/local/bin/simplerip"]
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
