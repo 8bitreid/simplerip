@@ -65,10 +65,11 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 // Returns an error if any step fails.
 func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	// Step 1: Scan and classify.
-	result, err := s.ScanDisc(device)
+	scanned, err := ripper.ScanInfo(ctx, "makemkvcon", device, s.cfg.MakeMKV.Key)
 	if err != nil {
-		return err
+		return fmt.Errorf("scan device %q: %w", device, err)
 	}
+	result := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
 
 	// Step 2: Determine which titles to rip.
 	// In daemon mode, we always rip MainTitles immediately.
