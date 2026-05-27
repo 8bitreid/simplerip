@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -209,7 +210,7 @@ func TestEnrichMovie_NoAPIKey(t *testing.T) {
 	cfg := config.Defaults() // TMDBApiKey is empty
 	svc := New(cfg)
 
-	_, err := svc.EnrichMovie(t.Context(), metadata.MovieResult{ID: 1, Title: "Oppenheimer"})
+	_, err := svc.EnrichMovie(context.Background(), metadata.MovieResult{ID: 1, Title: "Oppenheimer"})
 	if err == nil {
 		t.Fatal("expected error when TMDB API key is not configured, got nil")
 	}
@@ -219,7 +220,7 @@ func TestSearchMovie_NoAPIKey(t *testing.T) {
 	cfg := config.Defaults() // TMDBApiKey is empty
 	svc := New(cfg)
 
-	_, err := svc.SearchMovie(t.Context(), "Oppenheimer")
+	_, err := svc.SearchMovie(context.Background(), "Oppenheimer")
 	if err == nil {
 		t.Fatal("expected error when TMDB API key is not configured, got nil")
 	}
