@@ -412,8 +412,8 @@ func isAllDigits(s string) bool {
 }
 
 // ScanInfoFromReader scans a disc from a captured makemkvcon output fixture.
-// This is a testing-only helper that wraps ripper.ScanInfoFromReader.
-func (s *RipService) ScanInfoFromReader(r *os.File, deviceLabel string) (*ripper.ClassificationResult, error) {
+// It wraps ripper.ScanInfoFromReader and is useful for tests and for --fixture CLI mode.
+func (s *RipService) ScanInfoFromReader(r io.Reader, deviceLabel string) (*ripper.ClassificationResult, error) {
 	scanned, err := ripper.ScanInfoFromReader(r, deviceLabel)
 	if err != nil {
 		return nil, fmt.Errorf("scan fixture: %w", err)
