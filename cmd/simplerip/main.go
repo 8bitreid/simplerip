@@ -7,11 +7,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/8bitreid/simplerip/internal/config"
@@ -323,6 +321,7 @@ func runClean(args []string) {
 	if cfg.Metadata.TMDBApiKey == "" {
 		fatal("clean:", fmt.Errorf("metadata.tmdb_api_key not set in config"))
 	}
+	svc := service.New(cfg)
 
 	ctx := context.Background()
 	stdin := bufio.NewScanner(os.Stdin)
@@ -396,10 +395,6 @@ func runClean(args []string) {
 
 	// ── Step 2: collect all keeper files and probe their durations ─────────
 	allMKVs, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
-	type mkvFile struct {
-		path string
-		dur  time.Duration
-	}
 	// Build set of files to keep: the dedupe winner + any distinct-duration files.
 	keepPaths := []string{keptFile}
 	if len(analyses) > 0 {
@@ -416,13 +411,13 @@ func runClean(args []string) {
 
 	// Probe all keepers now so both dry-run and execution use real durations.
 	fmt.Fprintln(os.Stderr, "\nProbing files...")
-	var keepers []mkvFile
+	var keepers []service.RenameEntry
 	for _, p := range keepPaths {
 		info, err := inspect.Probe(ctx, p)
 		if err != nil {
 			fatal("clean:", fmt.Errorf("probe %q: %w", filepath.Base(p), err))
 		}
-		keepers = append(keepers, mkvFile{path: p, dur: info.Duration})
+		keepers = append(keepers, service.RenameEntry{Path: p, Dur: info.Duration})
 		fmt.Fprintf(os.Stderr, "  %s  %d:%02d:%02d\n",
 			filepath.Base(p),
 			int(info.Duration.Hours()),
@@ -434,34 +429,14 @@ func runClean(args []string) {
 	// ── Step 3: TMDB + OMDb lookup ──────────────────────────────────────
 	searchQuery := *query
 	if searchQuery == "" {
-		searchQuery = queryFromMKVPath(keptFile)
+		searchQuery = service.QueryFromMKVPath(keptFile)
 	}
 
-	tmdbClient := metadata.NewClient(cfg.Metadata.TMDBApiKey)
-
-	// Try progressively shorter queries by dropping the last word until we get results.
-	words := strings.Fields(searchQuery)
-	var movies []metadata.MovieResult
-	var usedQuery string
-	for len(words) > 0 {
-		q := strings.Join(words, " ")
-		fmt.Fprintf(os.Stderr, "\nSearching TMDB for %q...\n", q)
-		results, err := tmdbClient.SearchMovie(ctx, q)
-		if err != nil {
-			fatal("clean:", err)
-		}
-		if len(results) > 0 {
-			movies = results
-			usedQuery = q
-			break
-		}
-		fmt.Fprintf(os.Stderr, "  no results — retrying without %q\n", words[len(words)-1])
-		words = words[:len(words)-1]
+	fmt.Fprintf(os.Stderr, "\nSearching TMDB for %q...\n", searchQuery)
+	movies, err := svc.SearchMovie(ctx, searchQuery)
+	if err != nil {
+		fatal("clean:", err)
 	}
-	if len(movies) == 0 {
-		fatal("clean:", fmt.Errorf("no TMDB results for %q", usedQuery))
-	}
-	_ = usedQuery
 
 	fmt.Fprintln(os.Stderr, "")
 	for i, m := range movies {
@@ -486,12 +461,8 @@ func runClean(args []string) {
 	}
 
 	// Enrich with full TMDB detail + OMDb cross-reference.
-	var omdbClient *metadata.OMDbClient
-	if cfg.Metadata.OMDbApiKey != "" {
-		omdbClient = metadata.NewOMDbClient(cfg.Metadata.OMDbApiKey)
-	}
 	fmt.Fprintln(os.Stderr, "\nFetching metadata...")
-	details, err := metadata.Enrich(ctx, tmdbClient, omdbClient, chosen)
+	details, err := svc.EnrichMovie(ctx, chosen)
 	if err != nil {
 		fatal("clean:", err)
 	}
@@ -519,35 +490,10 @@ func runClean(args []string) {
 	fmt.Fprintln(os.Stderr, "─────────────────────────────────────────────────────")
 
 	if *dryRun {
-		ref := time.Duration(details.RuntimeMinutes) * time.Minute
-		dryClosestIdx, dryClosestDiff := 0, time.Duration(1<<62)
-		for i, k := range keepers {
-			d := k.dur - ref
-			if d < 0 {
-				d = -d
-			}
-			if d < dryClosestDiff {
-				dryClosestDiff, dryClosestIdx = d, i
-			}
-		}
-		altCount := len(keepers) - 1
+		plans := service.PlanRename(keepers, details, *edition)
 		fmt.Fprintln(os.Stderr, "\n[dry-run] Would rename:")
-		for i, k := range keepers {
-			var label string
-			if i != dryClosestIdx {
-				label = "Alternate"
-				if *edition != "" {
-					label = *edition
-				}
-				if altCount > 1 || *edition == "" {
-					label = fmt.Sprintf("%s (%dmin)", label, int(k.dur.Minutes()))
-				}
-			}
-			name := details.FolderName()
-			if label != "" {
-				name += " - " + label
-			}
-			fmt.Fprintf(os.Stderr, "  %s → %s/%s.mkv\n", filepath.Base(k.path), details.FolderName(), name)
+		for _, p := range plans {
+			fmt.Fprintf(os.Stderr, "  %s → %s/%s.mkv\n", filepath.Base(p.Src), p.Folder, p.Base)
 		}
 		fmt.Fprintln(os.Stderr, "[dry-run] No files were renamed.")
 		return
@@ -561,61 +507,13 @@ func runClean(args []string) {
 	if baseDir == "" {
 		baseDir = absDir
 	}
-	folderDir := filepath.Join(baseDir, details.FolderName())
-	if err := os.MkdirAll(folderDir, 0o755); err != nil {
+	plans := service.PlanRename(keepers, details, *edition)
+	renamed, err := service.ExecuteRename(plans, baseDir)
+	if err != nil {
 		fatal("clean:", err)
 	}
-
-	// Find the single keeper closest to theatrical runtime — it gets the clean name.
-	// All others get an Alternate label to prevent collisions.
-	theatricalRef := time.Duration(details.RuntimeMinutes) * time.Minute
-	closestIdx, closestDiff := 0, time.Duration(1<<62)
-	for i, k := range keepers {
-		d := k.dur - theatricalRef
-		if d < 0 {
-			d = -d
-		}
-		if d < closestDiff {
-			closestDiff, closestIdx = d, i
-		}
-	}
-
-	// Count alternates for duration-suffix logic.
-	alternateCount := 0
-	for i, k := range keepers {
-		if i == closestIdx {
-			continue
-		}
-		if details.EditionLabel(k.dur) != "" || len(keepers) > 1 {
-			alternateCount++
-		}
-	}
-
-	for i, k := range keepers {
-		var label string
-		if i != closestIdx {
-			// Non-closest files always get an alternate label.
-			label = "Alternate"
-			if *edition != "" {
-				label = *edition
-			}
-			if alternateCount > 1 || *edition == "" {
-				label = fmt.Sprintf("%s (%dmin)", label, int(k.dur.Minutes()))
-			}
-		}
-		baseName := details.FolderName()
-		if label != "" {
-			baseName += " - " + label
-		}
-		newFile := filepath.Join(folderDir, baseName+".mkv")
-		// Never silently overwrite — fail loudly.
-		if _, err := os.Stat(newFile); err == nil {
-			fatal("clean:", fmt.Errorf("destination already exists: %s", newFile))
-		}
-		if err := moveFile(k.path, newFile); err != nil {
-			fatal("clean:", err)
-		}
-		fmt.Printf("%s\n", newFile)
+	for _, f := range renamed {
+		fmt.Printf("%s\n", f)
 	}
 }
 
@@ -658,66 +556,4 @@ func fatal(prefix string, err error) {
 	os.Exit(1)
 }
 
-func moveFile(src, dst string) error {
-	err := os.Rename(src, dst)
-	if err == nil {
-		return nil
-	}
 
-	var linkErr *os.LinkError
-	if errors.As(err, &linkErr) && errors.Is(linkErr.Err, syscall.EXDEV) {
-		return copyAndRemove(src, dst)
-	}
-
-	return err
-}
-
-func copyAndRemove(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(dst)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(dst)
-		return err
-	}
-	return os.Remove(src)
-}
-
-func sameDevice(src, dst string) bool {
-	var sa, sb syscall.Stat_t
-	if syscall.Stat(filepath.Dir(src), &sa) != nil || syscall.Stat(filepath.Dir(dst), &sb) != nil {
-		return false
-	}
-	return sa.Dev == sb.Dev
-}
-
-// queryFromMKVPath derives a TMDB search query from a MKV file path.
-// makemkvcon names output files like "Revenge of the Sith_t00.mkv"; this
-// strips the _tNN suffix and extension before passing through QueryFromDirName.
-func queryFromMKVPath(path string) string {
-	name := strings.TrimSuffix(filepath.Base(path), ".mkv")
-	if i := strings.LastIndex(name, "_t"); i != -1 && isAllDigits(name[i+2:]) {
-		name = name[:i]
-	}
-	return metadata.QueryFromDirName(name)
-}
-
-func isAllDigits(s string) bool {
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return len(s) > 0
-}

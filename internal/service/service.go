@@ -5,13 +5,18 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/8bitreid/simplerip/internal/config"
 	"github.com/8bitreid/simplerip/internal/inspect"
+	"github.com/8bitreid/simplerip/internal/metadata"
 	"github.com/8bitreid/simplerip/internal/notify"
 	"github.com/8bitreid/simplerip/internal/output"
 	"github.com/8bitreid/simplerip/internal/ripper"
@@ -209,6 +214,200 @@ func (s *RipService) CleanDir(dir string) error {
 	// Current implementation stops after deduplication to avoid breaking existing CLI.
 
 	return nil
+}
+
+// RenameEntry is an MKV file paired with its probed duration.
+type RenameEntry struct {
+	Path string
+	Dur  time.Duration
+}
+
+// RenamePlan describes a single file rename operation.
+type RenamePlan struct {
+	Src    string // full source path
+	Folder string // destination subfolder name, e.g. "Oppenheimer (2023)"
+	Base   string // destination base name without extension
+}
+
+// PlanRename computes a rename plan for the given keepers. The keeper whose
+// duration is closest to the theatrical reference (details.RuntimeMinutes)
+// receives the clean folder name. All others receive an "Alternate" label
+// (or the edition name if provided), with a duration suffix appended unless
+// exactly one alternate exists and a specific edition name is given.
+func PlanRename(keepers []RenameEntry, details *metadata.MovieDetails, edition string) []RenamePlan {
+	ref := time.Duration(details.RuntimeMinutes) * time.Minute
+	closestIdx, closestDiff := 0, time.Duration(1<<62)
+	for i, k := range keepers {
+		d := k.Dur - ref
+		if d < 0 {
+			d = -d
+		}
+		if d < closestDiff {
+			closestDiff, closestIdx = d, i
+		}
+	}
+
+	alternateCount := len(keepers) - 1
+	folder := details.FolderName()
+
+	plans := make([]RenamePlan, len(keepers))
+	for i, k := range keepers {
+		var label string
+		if i != closestIdx {
+			label = "Alternate"
+			if edition != "" {
+				label = edition
+			}
+			if alternateCount > 1 || edition == "" {
+				label = fmt.Sprintf("%s (%dmin)", label, int(k.Dur.Minutes()))
+			}
+		}
+		base := folder
+		if label != "" {
+			base += " - " + label
+		}
+		plans[i] = RenamePlan{
+			Src:    k.Path,
+			Folder: folder,
+			Base:   base,
+		}
+	}
+	return plans
+}
+
+// ExecuteRename creates destination directories and moves each source file to
+// baseDir/plan.Folder/plan.Base+".mkv". It returns the destination paths of
+// all successfully moved files. If a destination already exists or a move
+// fails, execution stops immediately and the error is returned.
+func ExecuteRename(plans []RenamePlan, baseDir string) ([]string, error) {
+	var renamed []string
+	for _, p := range plans {
+		destDir := filepath.Join(baseDir, p.Folder)
+		if err := os.MkdirAll(destDir, 0o755); err != nil {
+			return renamed, err
+		}
+		dst := filepath.Join(destDir, p.Base+".mkv")
+		if _, err := os.Stat(dst); err == nil {
+			return renamed, fmt.Errorf("destination already exists: %s", dst)
+		}
+		if err := MoveFile(p.Src, dst); err != nil {
+			return renamed, err
+		}
+		renamed = append(renamed, dst)
+	}
+	return renamed, nil
+}
+
+// EnrichMovie fetches full TMDB detail + OMDb metadata for the chosen movie
+// result. If an OMDb API key is configured, runtimes are cross-referenced and
+// reconciled. Returns an error if the TMDB API key is not configured.
+func (s *RipService) EnrichMovie(ctx context.Context, chosen metadata.MovieResult) (*metadata.MovieDetails, error) {
+	if s.cfg.Metadata.TMDBApiKey == "" {
+		return nil, fmt.Errorf("metadata.tmdb_api_key not configured")
+	}
+
+	tmdbClient := metadata.NewClient(s.cfg.Metadata.TMDBApiKey)
+
+	var omdbClient *metadata.OMDbClient
+	if s.cfg.Metadata.OMDbApiKey != "" {
+		omdbClient = metadata.NewOMDbClient(s.cfg.Metadata.OMDbApiKey)
+	}
+
+	return metadata.Enrich(ctx, tmdbClient, omdbClient, chosen)
+}
+
+// SearchMovie searches TMDB for movies matching query. When the initial query
+// returns no results, it retries with progressively shorter queries by dropping
+// the last word until results are found or all words are exhausted.
+// Returns an error if the TMDB API key is not configured or no results are found.
+func (s *RipService) SearchMovie(ctx context.Context, query string) ([]metadata.MovieResult, error) {
+	if s.cfg.Metadata.TMDBApiKey == "" {
+		return nil, fmt.Errorf("metadata.tmdb_api_key not configured")
+	}
+
+	client := metadata.NewClient(s.cfg.Metadata.TMDBApiKey)
+
+	words := strings.Fields(query)
+	for len(words) > 0 {
+		q := strings.Join(words, " ")
+		results, err := client.SearchMovie(ctx, q)
+		if err != nil {
+			return nil, fmt.Errorf("tmdb search %q: %w", q, err)
+		}
+		if len(results) > 0 {
+			return results, nil
+		}
+		words = words[:len(words)-1]
+	}
+
+	return nil, fmt.Errorf("no TMDB results for %q", query)
+}
+
+// MoveFile moves src to dst, falling back to a copy+delete when src and dst
+// are on different devices (EXDEV). This is necessary when staging and NAS
+// are separate mounts.
+func MoveFile(src, dst string) error {
+	err := os.Rename(src, dst)
+	if err == nil {
+		return nil
+	}
+
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) && errors.Is(linkErr.Err, syscall.EXDEV) {
+		return copyAndRemove(src, dst)
+	}
+
+	return err
+}
+
+func copyAndRemove(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return err
+	}
+	return os.Remove(src)
+}
+
+func sameDevice(src, dst string) bool {
+	var sa, sb syscall.Stat_t
+	if syscall.Stat(filepath.Dir(src), &sa) != nil || syscall.Stat(filepath.Dir(dst), &sb) != nil {
+		return false
+	}
+	return sa.Dev == sb.Dev
+}
+
+// QueryFromMKVPath derives a TMDB search query from a MKV file path.
+// makemkvcon names output files like "Revenge of the Sith_t00.mkv"; this
+// strips the _tNN suffix and extension before passing through metadata.QueryFromDirName.
+func QueryFromMKVPath(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), ".mkv")
+	if i := strings.LastIndex(name, "_t"); i != -1 && isAllDigits(name[i+2:]) {
+		name = name[:i]
+	}
+	return metadata.QueryFromDirName(name)
+}
+
+func isAllDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // ScanInfoFromReader scans a disc from a captured makemkvcon output fixture.
