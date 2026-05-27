@@ -5,12 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/8bitreid/simplerip/internal/config"
 	"github.com/8bitreid/simplerip/internal/disc"
@@ -23,214 +24,236 @@ import (
 
 const version = "0.1.0-dev"
 
+// cfgPath holds the value of the --config persistent flag.
+var cfgPath string
+
 func main() {
-	// Handle no subcommand — check for -device flag for daemon-style ripping.
-	if len(os.Args) == 1 {
-		usage()
-		os.Exit(2)
-	}
-
-	// Check if first arg is a flag (starts with -) — if so, run default rip pipeline.
-	if strings.HasPrefix(os.Args[1], "-") {
-		runDefaultRip(os.Args[1:])
-		return
-	}
-
-	switch os.Args[1] {
-	case "scan":
-		runScan(os.Args[2:])
-	case "rip":
-		runRip(os.Args[2:])
-	case "clean":
-		runClean(os.Args[2:])
-	case "version":
-		fmt.Println(version)
-	default:
-		fmt.Fprintf(os.Stderr, "simplerip: unknown subcommand %q\n\n", os.Args[1])
-		usage()
-		os.Exit(2)
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "simplerip:", err)
+		os.Exit(1)
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `simplerip - minimal Blu-ray/DVD ripper
+func init() {
+	rootCmd.PersistentFlags().StringVar(&cfgPath, "config", "",
+		"config file path (overrides CONFIG_PATH env var, default /config/config.yaml)")
+	rootCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
 
-Usage:
-  simplerip -device /dev/sr0             (full pipeline: scan → rip → deliver → notify)
-  simplerip scan    -device /dev/sr0
-  simplerip scan    -fixture ./testdata/movie.txt
-  simplerip rip     -device /dev/sr0 -title 0 -output /tmp/rip
-  simplerip clean   -dir /path/to/mkv/folder [-query "search title"] [-yes]
-  simplerip version
+	scanCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
+	scanCmd.Flags().String("fixture", "",
+		"parse a captured makemkvcon output file instead of running makemkvcon")
 
-Environment:
+	ripCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
+	ripCmd.Flags().Int("title", 0, "title index to rip (from scan output)")
+	ripCmd.Flags().String("output", "", "directory to write .mkv files into")
+
+	cleanCmd.Flags().String("dir", "", "directory containing MKV files to clean")
+	cleanCmd.Flags().String("query", "", "TMDB search query (defaults to directory name)")
+	cleanCmd.Flags().String("edition", "", `edition label for alternate cuts (e.g. "Director's Cut")`)
+	cleanCmd.Flags().Bool("yes", false, "skip confirmation prompts (TMDB selection only)")
+	cleanCmd.Flags().Bool("dry-run", false,
+		"show what would happen without moving or renaming anything")
+
+	rootCmd.AddCommand(scanCmd, ripCmd, cleanCmd, versionCmd)
+}
+
+// ── root (full rip pipeline) ──────────────────────────────────────────────
+
+var rootCmd = &cobra.Command{
+	Use:   "simplerip",
+	Short: "Minimal Blu-ray/DVD ripper",
+	Long: `simplerip — minimal Blu-ray/DVD ripper
+
+Wraps makemkvcon + ffprobe + rsync for automated disc ripping.
+Run without a subcommand to start the full pipeline (scan → rip → deliver → notify).
+
+Environment variables:
   CONFIG_PATH   path to config.yaml (default /config/config.yaml)
-  MAKEMKV_KEY   MakeMKV licence key (always overrides config file)
-`)
-}
-
-// ── default rip (daemon mode) ─────────────────────────────────────────────
-
-func runDefaultRip(args []string) {
-	fs := flag.NewFlagSet("rip", flag.ExitOnError)
-	device := fs.String("device", "", "optical device path (e.g. /dev/sr0)")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: simplerip -device /dev/sr0")
-		fmt.Fprintln(os.Stderr, "Runs the full automated pipeline: scan → rip → deliver → notify")
-		fs.PrintDefaults()
-	}
-	fs.Parse(args) //nolint:errcheck
-
-	if *device == "" {
-		fmt.Fprintln(os.Stderr, "simplerip: -device is required")
-		fs.Usage()
-		os.Exit(2)
-	}
-
-	cfg := loadConfig()
-	svc := service.New(cfg)
-
-	fmt.Fprintf(os.Stderr, "Starting automated rip pipeline for %s...\n", *device)
-	if err := svc.RipDisc(context.Background(), *device); err != nil {
-		fatal("rip pipeline:", err)
-	}
-	fmt.Fprintln(os.Stderr, "Rip pipeline completed successfully.")
+  MAKEMKV_KEY   MakeMKV licence key (always overrides config file)`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		device, _ := cmd.Flags().GetString("device")
+		if device == "" {
+			return cmd.Help()
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		svc := service.New(cfg)
+		fmt.Fprintf(os.Stderr, "Starting automated rip pipeline for %s...\n", device)
+		if err := svc.RipDisc(context.Background(), device); err != nil {
+			return fmt.Errorf("rip pipeline: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, "Rip pipeline completed successfully.")
+		return nil
+	},
 }
 
 // ── scan ──────────────────────────────────────────────────────────────────
 
-func runScan(args []string) {
-	fs := flag.NewFlagSet("scan", flag.ExitOnError)
-	device  := fs.String("device", "", "optical device path (e.g. /dev/sr0)")
-	fixture := fs.String("fixture", "", "parse a captured makemkvcon output file instead of running makemkvcon")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: simplerip scan -device /dev/sr0")
-		fmt.Fprintln(os.Stderr, "       simplerip scan -fixture ./testdata/movie.txt")
-		fs.PrintDefaults()
-	}
-	fs.Parse(args) //nolint:errcheck // ExitOnError never returns an error
+var scanCmd = &cobra.Command{
+	Use:   "scan",
+	Short: "Scan a disc and print title classification as JSON",
+	Long: `Scans a disc with makemkvcon, classifies titles (movie/TV/ambiguous),
+and prints structured JSON to stdout.
 
-	if *fixture == "" && *device == "" {
-		fmt.Fprintln(os.Stderr, "scan: -device or -fixture is required")
-		fs.Usage()
-		os.Exit(2)
-	}
+Use --fixture to replay captured makemkvcon output without a physical disc.`,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		device, _ := cmd.Flags().GetString("device")
+		fixture, _ := cmd.Flags().GetString("fixture")
 
-	cfg := loadConfig()
-	svc := service.New(cfg)
-
-	var result *ripper.ClassificationResult
-	var err error
-
-	if *fixture != "" {
-		// Use fixture mode.
-		deviceLabel := *device
-		if deviceLabel == "" {
-			deviceLabel = *fixture
+		if fixture == "" && device == "" {
+			return fmt.Errorf("scan: --device or --fixture is required")
 		}
-		f, ferr := os.Open(*fixture)
-		if ferr != nil {
-			fatal("fixture:", ferr)
+
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
 		}
-		defer f.Close()
-		result, err = svc.ScanInfoFromReader(f, deviceLabel)
-	} else {
-		// Scan physical device.
-		result, err = svc.ScanDisc(*device)
-	}
+		svc := service.New(cfg)
 
-	if err != nil {
-		fatal("scan:", err)
-	}
-
-	// Warn on stderr if metadata is missing (happens with encrypted/unreadable discs).
-	if result.MissingMetadata {
-		fmt.Fprintln(os.Stderr, "WARNING: Disc metadata is missing or incomplete.")
-		fmt.Fprintln(os.Stderr, "         Most titles have zero duration/size/chapters.")
-		fmt.Fprintln(os.Stderr, "         This can happen with:")
-		fmt.Fprintln(os.Stderr, "         - Heavily encrypted discs")
-		fmt.Fprintln(os.Stderr, "         - Drive read errors")
-		fmt.Fprintln(os.Stderr, "         - Unsupported disc structures")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "         Try ripping title 0 or 1 manually:")
-		if *device != "" {
-			fmt.Fprintln(os.Stderr, "         simplerip rip -device", *device, "-title 0 -output /tmp/test")
+		var result *ripper.ClassificationResult
+		if fixture != "" {
+			deviceLabel := device
+			if deviceLabel == "" {
+				deviceLabel = fixture
+			}
+			f, ferr := os.Open(fixture)
+			if ferr != nil {
+				return fmt.Errorf("scan: fixture: %w", ferr)
+			}
+			defer f.Close()
+			result, err = svc.ScanInfoFromReader(f, deviceLabel)
+		} else {
+			result, err = svc.ScanDisc(device)
 		}
-		fmt.Fprintln(os.Stderr, "")
-	}
+		if err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
 
-	out := struct {
-		Pattern         string      `json:"pattern"`
-		Main            []titleJSON `json:"main"`
-		Extras          []titleJSON `json:"extras"`
-		Junk            []titleJSON `json:"junk"`
-		MissingMetadata bool        `json:"missing_metadata,omitempty"`
-		AllTitles       []titleJSON `json:"all_titles,omitempty"`
-		MultiAngle      bool        `json:"multi_angle,omitempty"`
-		AngleCount      int         `json:"angle_count,omitempty"`
-	}{
-		Pattern:         strings.ToLower(result.Pattern.String()),
-		Main:            toTitleJSON(result.MainTitles),
-		Extras:          toTitleJSON(result.ExtraTitles),
-		Junk:            toTitleJSON(result.JunkTitles),
-		MissingMetadata: result.MissingMetadata,
-		AllTitles:       toTitleJSON(result.AllTitles),
-		MultiAngle:      result.MultiAngle,
-		AngleCount:      result.AngleCount,
-	}
+		if result.MissingMetadata {
+			fmt.Fprintln(os.Stderr, "WARNING: Disc metadata is missing or incomplete.")
+			fmt.Fprintln(os.Stderr, "         Most titles have zero duration/size/chapters.")
+			fmt.Fprintln(os.Stderr, "         This can happen with:")
+			fmt.Fprintln(os.Stderr, "         - Heavily encrypted discs")
+			fmt.Fprintln(os.Stderr, "         - Drive read errors")
+			fmt.Fprintln(os.Stderr, "         - Unsupported disc structures")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "         Try ripping title 0 or 1 manually:")
+			if device != "" {
+				fmt.Fprintln(os.Stderr, "         simplerip rip --device", device, "--title 0 --output /tmp/test")
+			}
+			fmt.Fprintln(os.Stderr, "")
+		}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
-		fatal("json encode:", err)
-	}
+		out := struct {
+			Pattern         string      `json:"pattern"`
+			Main            []titleJSON `json:"main"`
+			Extras          []titleJSON `json:"extras"`
+			Junk            []titleJSON `json:"junk"`
+			MissingMetadata bool        `json:"missing_metadata,omitempty"`
+			AllTitles       []titleJSON `json:"all_titles,omitempty"`
+			MultiAngle      bool        `json:"multi_angle,omitempty"`
+			AngleCount      int         `json:"angle_count,omitempty"`
+		}{
+			Pattern:         strings.ToLower(result.Pattern.String()),
+			Main:            toTitleJSON(result.MainTitles),
+			Extras:          toTitleJSON(result.ExtraTitles),
+			Junk:            toTitleJSON(result.JunkTitles),
+			MissingMetadata: result.MissingMetadata,
+			AllTitles:       toTitleJSON(result.AllTitles),
+			MultiAngle:      result.MultiAngle,
+			AngleCount:      result.AngleCount,
+		}
+
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	},
 }
 
 // ── rip ───────────────────────────────────────────────────────────────────
 
-func runRip(args []string) {
-	fs := flag.NewFlagSet("rip", flag.ExitOnError)
-	device    := fs.String("device", "", "optical device path (e.g. /dev/sr0)")
-	titleIdx  := fs.Int("title", 0, "title index to rip (from scan output)")
-	outputDir := fs.String("output", "", "directory to write .mkv files into")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: simplerip rip -device /dev/sr0 -title 0 -output /tmp/rip")
-		fs.PrintDefaults()
-	}
-	fs.Parse(args) //nolint:errcheck
+var ripCmd = &cobra.Command{
+	Use:   "rip",
+	Short: "Rip a single title from a disc (debug/manual use)",
+	Long: `Rips a specific title index from a disc using makemkvcon.
 
-	if *device == "" || *outputDir == "" {
-		fmt.Fprintln(os.Stderr, "rip: -device and -output are required")
-		fs.Usage()
-		os.Exit(2)
-	}
+Intended for debugging or manual overrides; the full pipeline runs automatically
+via the root command (simplerip --device /dev/sr0).
 
-	cfg := loadConfig()
-	title := disc.MKVTitle{Index: *titleIdx}
+Exits with code 3 on timeout (distinct from other errors).`,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		device, _ := cmd.Flags().GetString("device")
+		titleIdx, _ := cmd.Flags().GetInt("title")
+		outputDir, _ := cmd.Flags().GetString("output")
 
-	files, err := ripper.RipTitle(
-		context.Background(),
-		*device,
-		title,
-		*outputDir,
-		cfg.MakeMKV.Key,
-		cfg.MakeMKV.TimeoutMinutes,
-	)
-	if err != nil {
-		if errors.Is(err, ripper.ErrRipTimeout) {
-			fmt.Fprintf(os.Stderr, "rip: %v\n", err)
-			os.Exit(3) // distinct exit code so callers can retry
+		if device == "" || outputDir == "" {
+			return fmt.Errorf("rip: --device and --output are required")
 		}
-		fatal("rip:", err)
-	}
 
-	for _, f := range files {
-		fmt.Println(f)
-	}
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		title := disc.MKVTitle{Index: titleIdx}
+		files, err := ripper.RipTitle(
+			context.Background(),
+			device,
+			title,
+			outputDir,
+			cfg.MakeMKV.Key,
+			cfg.MakeMKV.TimeoutMinutes,
+		)
+		if err != nil {
+			if errors.Is(err, ripper.ErrRipTimeout) {
+				fmt.Fprintf(os.Stderr, "rip: %v\n", err)
+				os.Exit(3) // distinct exit code so callers can retry
+			}
+			return fmt.Errorf("rip: %w", err)
+		}
+		for _, f := range files {
+			fmt.Println(f)
+		}
+		return nil
+	},
+}
+
+// ── version ───────────────────────────────────────────────────────────────
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the simplerip version",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println(version)
+	},
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
-
+// loadConfig reads the config file.
+// Priority: --config flag > CONFIG_PATH env > /config/config.yaml.
+// A missing file returns defaults. Invalid YAML is a fatal error.
+func loadConfig() (*config.Config, error) {
+	path := cfgPath
+	if path == "" {
+		path = os.Getenv("CONFIG_PATH")
+	}
+	if path == "" {
+		path = "/config/config.yaml"
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return config.Defaults(), nil
+		}
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	return cfg, nil
+}
 // titleJSON is the JSON shape for a single disc title.
 type titleJSON struct {
 	Index        int     `json:"index"`
@@ -274,247 +297,226 @@ func roundGB(gb float64) float64 {
 	return float64(int(gb*100+0.5)) / 100
 }
 
-// loadConfig reads CONFIG_PATH (default /config/config.yaml).
-// Missing file → defaults. Invalid YAML → fatal.
-func loadConfig() *config.Config {
-	path := os.Getenv("CONFIG_PATH")
-	if path == "" {
-		path = "/config/config.yaml"
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return config.Defaults()
-		}
-		fatal("config:", err)
-	}
-	return cfg
-}
+
 
 // ── clean ─────────────────────────────────────────────────────────────────
 
-func runClean(args []string) {
-	fs := flag.NewFlagSet("clean", flag.ExitOnError)
-	dir     := fs.String("dir", "", "directory containing MKV files to clean")
-	query   := fs.String("query", "", "TMDB search query (defaults to directory name)")
-	edition := fs.String("edition", "", "edition label for alternate cuts e.g. \"Director's Cut\"")
-	yes     := fs.Bool("yes", false, "skip confirmation prompts (TMDB selection only)")
-	dryRun  := fs.Bool("dry-run", false, "show what would happen without moving or renaming anything")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: simplerip clean -dir /path/to/folder [-query \"title\"] [-edition \"Director's Cut\"] [-dry-run] [-yes]")
-		fs.PrintDefaults()
-	}
-	fs.Parse(args) //nolint:errcheck
+var cleanCmd = &cobra.Command{
+	Use:   "clean",
+	Short: "Deduplicate and rename MKVs in a staging directory",
+	Long: `Reads an already-ripped directory, removes duplicate MKVs (keeping the
+highest audio quality), looks up TMDB/OMDb metadata, and renames files to
+"Title (Year)/Title (Year).mkv".`,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dir, _ := cmd.Flags().GetString("dir")
+		query, _ := cmd.Flags().GetString("query")
+		edition, _ := cmd.Flags().GetString("edition")
+		yes, _ := cmd.Flags().GetBool("yes")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "clean: -dir is required")
-		fs.Usage()
-		os.Exit(2)
-	}
-
-	absDir, err := filepath.Abs(*dir)
-	if err != nil {
-		fatal("clean:", err)
-	}
-
-	cfg := loadConfig()
-	if cfg.Metadata.TMDBApiKey == "" {
-		fatal("clean:", fmt.Errorf("metadata.tmdb_api_key not set in config"))
-	}
-	svc := service.New(cfg)
-
-	ctx := context.Background()
-	stdin := bufio.NewScanner(os.Stdin)
-
-	// ── Step 1: flatten extras/ into parent dir ─────────────────────────
-	if moved, err := output.FlattenSubdirs(absDir); err != nil {
-		fatal("clean:", err)
-	} else if len(moved) > 0 {
-		fmt.Fprintf(os.Stderr, "Flattened %d file(s) from extras/\n", len(moved))
-		for _, f := range moved {
-			fmt.Fprintf(os.Stderr, "  %s\n", filepath.Base(f))
+		if dir == "" {
+			return fmt.Errorf("clean: --dir is required")
 		}
-	}
 
-	// ── Step 2: analyse (no files touched) ─────────────────────────────
-	fmt.Fprintf(os.Stderr, "Scanning %s...\n", absDir)
-	analyses, err := output.AnalyzeDir(ctx, absDir)
-	if err != nil {
-		fatal("clean:", err)
-	}
-
-	var keptFile string
-	if len(analyses) == 0 {
-		// No duplicates — find the single MKV.
-		matches, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
-		if len(matches) == 0 {
-			fatal("clean:", fmt.Errorf("no MKV files found in %q", absDir))
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			return fmt.Errorf("clean: %w", err)
 		}
-		keptFile = matches[0]
-		fmt.Fprintf(os.Stderr, "No duplicates found. File: %s\n", filepath.Base(keptFile))
-	} else {
-		a := analyses[0]
 
-		fmt.Fprintln(os.Stderr, "\n── Duplicate analysis ───────────────────────────────")
-		printFileReport(os.Stderr, "KEEP", a.Keeper)
-		for _, dr := range a.Duplicates {
-			printFileReport(os.Stderr, "DUPE", dr)
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		if cfg.Metadata.TMDBApiKey == "" {
+			return fmt.Errorf("clean: metadata.tmdb_api_key not set in config")
+		}
+		svc := service.New(cfg)
+		ctx := context.Background()
+		stdin := bufio.NewScanner(os.Stdin)
+
+		// ── Step 1: flatten extras/ into parent dir ─────────────────────────
+		if moved, err := output.FlattenSubdirs(absDir); err != nil {
+			return fmt.Errorf("clean: %w", err)
+		} else if len(moved) > 0 {
+			fmt.Fprintf(os.Stderr, "Flattened %d file(s) from extras/\n", len(moved))
+			for _, f := range moved {
+				fmt.Fprintf(os.Stderr, "  %s\n", filepath.Base(f))
+			}
+		}
+
+		// ── Step 2: deduplicate ──────────────────────────────────────────────
+		fmt.Fprintf(os.Stderr, "Scanning %s...\n", absDir)
+		analyses, err := output.AnalyzeDir(ctx, absDir)
+		if err != nil {
+			return fmt.Errorf("clean: %w", err)
+		}
+
+		var keptFile string
+		if len(analyses) == 0 {
+			matches, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
+			if len(matches) == 0 {
+				return fmt.Errorf("clean: no MKV files found in %q", absDir)
+			}
+			keptFile = matches[0]
+			fmt.Fprintf(os.Stderr, "No duplicates found. File: %s\n", filepath.Base(keptFile))
+		} else {
+			a := analyses[0]
+			fmt.Fprintln(os.Stderr, "\n── Duplicate analysis ───────────────────────────────")
+			printFileReport(os.Stderr, "KEEP", a.Keeper)
+			for _, dr := range a.Duplicates {
+				printFileReport(os.Stderr, "DUPE", dr)
+			}
+			fmt.Fprintln(os.Stderr, "─────────────────────────────────────────────────────")
+			fmt.Fprintf(os.Stderr, "Reason: largest file by size (%s vs", formatBytes(a.Keeper.SizeBytes))
+			for i, dr := range a.Duplicates {
+				if i > 0 {
+					fmt.Fprint(os.Stderr, ",")
+				}
+				fmt.Fprintf(os.Stderr, " %s", formatBytes(dr.SizeBytes))
+			}
+			fmt.Fprintln(os.Stderr, ") — all share the same duration")
+
+			if dryRun {
+				fmt.Fprintln(os.Stderr, "[dry-run] No files were moved.")
+				return nil
+			}
+
+			fmt.Fprintf(os.Stderr, "Move %d duplicate(s) to _duplicates/? [y/N]: ", len(a.Duplicates))
+			stdin.Scan()
+			if strings.ToLower(strings.TrimSpace(stdin.Text())) != "y" {
+				fmt.Fprintln(os.Stderr, "Aborted.")
+				return nil
+			}
+
+			results, err := output.ExecuteDedupe(absDir, analyses)
+			if err != nil {
+				return fmt.Errorf("clean: %w", err)
+			}
+			for _, dup := range results[0].Duplicates {
+				fmt.Fprintf(os.Stderr, "Moved: %s → _duplicates/\n", filepath.Base(dup))
+			}
+			keptFile = results[0].Kept
+		}
+
+		allMKVs, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
+		keepPaths := []string{keptFile}
+		if len(analyses) > 0 {
+			deduped := map[string]bool{keptFile: true}
+			for _, dr := range analyses[0].Duplicates {
+				deduped[dr.Path] = true
+			}
+			for _, mkv := range allMKVs {
+				if !deduped[mkv] {
+					keepPaths = append(keepPaths, mkv)
+				}
+			}
+		}
+
+		fmt.Fprintln(os.Stderr, "\nProbing files...")
+		var keepers []service.RenameEntry
+		for _, p := range keepPaths {
+			info, err := inspect.Probe(ctx, p)
+			if err != nil {
+				return fmt.Errorf("clean: probe %q: %w", filepath.Base(p), err)
+			}
+			keepers = append(keepers, service.RenameEntry{Path: p, Dur: info.Duration})
+			fmt.Fprintf(os.Stderr, "  %s  %d:%02d:%02d\n",
+				filepath.Base(p),
+				int(info.Duration.Hours()),
+				int(info.Duration.Minutes())%60,
+				int(info.Duration.Seconds())%60,
+			)
+		}
+
+		// ── Step 3: TMDB + OMDb lookup ──────────────────────────────────────
+		searchQuery := query
+		if searchQuery == "" {
+			searchQuery = service.QueryFromMKVPath(keptFile)
+		}
+		fmt.Fprintf(os.Stderr, "\nSearching TMDB for %q...\n", searchQuery)
+		movies, err := svc.SearchMovie(ctx, searchQuery)
+		if err != nil {
+			return fmt.Errorf("clean: %w", err)
+		}
+
+		fmt.Fprintln(os.Stderr, "")
+		for i, m := range movies {
+			fmt.Fprintf(os.Stderr, "  [%d] %s (%s)  — id:%d\n", i+1, m.Title, m.Year(), m.ID)
+		}
+
+		var chosen metadata.MovieResult
+		if yes {
+			chosen = movies[0]
+			fmt.Fprintf(os.Stderr, "\nAuto-selecting [1] %s (%s)\n", chosen.Title, chosen.Year())
+		} else {
+			fmt.Fprint(os.Stderr, "\nSelect [1]: ")
+			stdin.Scan()
+			input := strings.TrimSpace(stdin.Text())
+			idx := 1
+			if input != "" {
+				if _, err := fmt.Sscanf(input, "%d", &idx); err != nil || idx < 1 || idx > len(movies) {
+					return fmt.Errorf("clean: invalid selection %q", input)
+				}
+			}
+			chosen = movies[idx-1]
+		}
+
+		fmt.Fprintln(os.Stderr, "\nFetching metadata...")
+		details, err := svc.EnrichMovie(ctx, chosen)
+		if err != nil {
+			return fmt.Errorf("clean: %w", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "\n── Runtime cross-reference ──────────────────────────\n")
+		fmt.Fprintf(os.Stderr, "  TMDB:       %d min\n", details.TMDbRuntime)
+		if details.OMDbRuntime > 0 {
+			fmt.Fprintf(os.Stderr, "  OMDb:       %d min\n", details.OMDbRuntime)
+		}
+		if details.RuntimeConflict {
+			fmt.Fprintf(os.Stderr, "  WARNING: sources disagree by >3 min — using longer value\n")
+		}
+		fmt.Fprintf(os.Stderr, "  Reconciled: %d min (theatrical reference)\n", details.RuntimeMinutes)
+		if details.Director != "" {
+			fmt.Fprintf(os.Stderr, "  Director:   %s\n", details.Director)
+		}
+		if details.ImdbRating != "" {
+			fmt.Fprintf(os.Stderr, "  IMDb:       %s/10", details.ImdbRating)
+			if details.RTRating != "" {
+				fmt.Fprintf(os.Stderr, "   RT: %s", details.RTRating)
+			}
+			fmt.Fprintln(os.Stderr, "")
 		}
 		fmt.Fprintln(os.Stderr, "─────────────────────────────────────────────────────")
-		fmt.Fprintf(os.Stderr, "Reason: largest file by size (%s vs", formatBytes(a.Keeper.SizeBytes))
-		for i, dr := range a.Duplicates {
-			if i > 0 {
-				fmt.Fprint(os.Stderr, ",")
+
+		if dryRun {
+			plans := service.PlanRename(keepers, details, edition)
+			fmt.Fprintln(os.Stderr, "\n[dry-run] Would rename:")
+			for _, p := range plans {
+				fmt.Fprintf(os.Stderr, "  %s → %s/%s.mkv\n", filepath.Base(p.Src), p.Folder, p.Base)
 			}
-			fmt.Fprintf(os.Stderr, " %s", formatBytes(dr.SizeBytes))
-		}
-		fmt.Fprintln(os.Stderr, ") — all share the same duration")
-
-		if *dryRun {
-			fmt.Fprintln(os.Stderr, "[dry-run] No files were moved.")
-			return
+			fmt.Fprintln(os.Stderr, "[dry-run] No files were renamed.")
+			return nil
 		}
 
-		// Confirm before touching anything.
-		fmt.Fprintf(os.Stderr, "Move %d duplicate(s) to _duplicates/? [y/N]: ", len(a.Duplicates))
-		stdin.Scan()
-		if strings.ToLower(strings.TrimSpace(stdin.Text())) != "y" {
-			fmt.Fprintln(os.Stderr, "Aborted.")
-			return
+		// ── Step 4: rename ──────────────────────────────────────────────────
+		// Use NASPath if configured, otherwise stay inside the staging dir.
+		// Never use filepath.Dir(absDir) — if absDir is /staging that resolves to /
+		// and cross-device renames fail when staging and output are separate mounts.
+		baseDir := cfg.Output.NASPath
+		if baseDir == "" {
+			baseDir = absDir
 		}
-
-		results, err := output.ExecuteDedupe(absDir, analyses)
+		plans := service.PlanRename(keepers, details, edition)
+		renamed, err := service.ExecuteRename(plans, baseDir)
 		if err != nil {
-			fatal("clean:", err)
+			return fmt.Errorf("clean: %w", err)
 		}
-		for _, dup := range results[0].Duplicates {
-			fmt.Fprintf(os.Stderr, "Moved: %s → _duplicates/\n", filepath.Base(dup))
+		for _, f := range renamed {
+			fmt.Printf("%s\n", f)
 		}
-		keptFile = results[0].Kept
-	}
-
-	// ── Step 2: collect all keeper files and probe their durations ─────────
-	allMKVs, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
-	// Build set of files to keep: the dedupe winner + any distinct-duration files.
-	keepPaths := []string{keptFile}
-	if len(analyses) > 0 {
-		deduped := map[string]bool{keptFile: true}
-		for _, dr := range analyses[0].Duplicates {
-			deduped[dr.Path] = true
-		}
-		for _, mkv := range allMKVs {
-			if !deduped[mkv] {
-				keepPaths = append(keepPaths, mkv)
-			}
-		}
-	}
-
-	// Probe all keepers now so both dry-run and execution use real durations.
-	fmt.Fprintln(os.Stderr, "\nProbing files...")
-	var keepers []service.RenameEntry
-	for _, p := range keepPaths {
-		info, err := inspect.Probe(ctx, p)
-		if err != nil {
-			fatal("clean:", fmt.Errorf("probe %q: %w", filepath.Base(p), err))
-		}
-		keepers = append(keepers, service.RenameEntry{Path: p, Dur: info.Duration})
-		fmt.Fprintf(os.Stderr, "  %s  %d:%02d:%02d\n",
-			filepath.Base(p),
-			int(info.Duration.Hours()),
-			int(info.Duration.Minutes())%60,
-			int(info.Duration.Seconds())%60,
-		)
-	}
-
-	// ── Step 3: TMDB + OMDb lookup ──────────────────────────────────────
-	searchQuery := *query
-	if searchQuery == "" {
-		searchQuery = service.QueryFromMKVPath(keptFile)
-	}
-
-	fmt.Fprintf(os.Stderr, "\nSearching TMDB for %q...\n", searchQuery)
-	movies, err := svc.SearchMovie(ctx, searchQuery)
-	if err != nil {
-		fatal("clean:", err)
-	}
-
-	fmt.Fprintln(os.Stderr, "")
-	for i, m := range movies {
-		fmt.Fprintf(os.Stderr, "  [%d] %s (%s)  — id:%d\n", i+1, m.Title, m.Year(), m.ID)
-	}
-
-	var chosen metadata.MovieResult
-	if *yes {
-		chosen = movies[0]
-		fmt.Fprintf(os.Stderr, "\nAuto-selecting [1] %s (%s)\n", chosen.Title, chosen.Year())
-	} else {
-		fmt.Fprint(os.Stderr, "\nSelect [1]: ")
-		stdin.Scan()
-		input := strings.TrimSpace(stdin.Text())
-		idx := 1
-		if input != "" {
-			if _, err := fmt.Sscanf(input, "%d", &idx); err != nil || idx < 1 || idx > len(movies) {
-				fatal("clean:", fmt.Errorf("invalid selection %q", input))
-			}
-		}
-		chosen = movies[idx-1]
-	}
-
-	// Enrich with full TMDB detail + OMDb cross-reference.
-	fmt.Fprintln(os.Stderr, "\nFetching metadata...")
-	details, err := svc.EnrichMovie(ctx, chosen)
-	if err != nil {
-		fatal("clean:", err)
-	}
-
-	// Print runtime report.
-	fmt.Fprintf(os.Stderr, "\n── Runtime cross-reference ──────────────────────────\n")
-	fmt.Fprintf(os.Stderr, "  TMDB:       %d min\n", details.TMDbRuntime)
-	if details.OMDbRuntime > 0 {
-		fmt.Fprintf(os.Stderr, "  OMDb:       %d min\n", details.OMDbRuntime)
-	}
-	if details.RuntimeConflict {
-		fmt.Fprintf(os.Stderr, "  WARNING: sources disagree by >3 min — using longer value\n")
-	}
-	fmt.Fprintf(os.Stderr, "  Reconciled: %d min (theatrical reference)\n", details.RuntimeMinutes)
-	if details.Director != "" {
-		fmt.Fprintf(os.Stderr, "  Director:   %s\n", details.Director)
-	}
-	if details.ImdbRating != "" {
-		fmt.Fprintf(os.Stderr, "  IMDb:       %s/10", details.ImdbRating)
-		if details.RTRating != "" {
-			fmt.Fprintf(os.Stderr, "   RT: %s", details.RTRating)
-		}
-		fmt.Fprintln(os.Stderr, "")
-	}
-	fmt.Fprintln(os.Stderr, "─────────────────────────────────────────────────────")
-
-	if *dryRun {
-		plans := service.PlanRename(keepers, details, *edition)
-		fmt.Fprintln(os.Stderr, "\n[dry-run] Would rename:")
-		for _, p := range plans {
-			fmt.Fprintf(os.Stderr, "  %s → %s/%s.mkv\n", filepath.Base(p.Src), p.Folder, p.Base)
-		}
-		fmt.Fprintln(os.Stderr, "[dry-run] No files were renamed.")
-		return
-	}
-
-	// ── Step 4: rename with edition labels ──────────────────────────────
-	// Use NASPath if configured, otherwise stay inside the staging dir.
-	// Never use filepath.Dir(absDir) — if absDir is /staging that resolves to /
-	// and cross-device renames fail when staging and output are separate mounts.
-	baseDir := cfg.Output.NASPath
-	if baseDir == "" {
-		baseDir = absDir
-	}
-	plans := service.PlanRename(keepers, details, *edition)
-	renamed, err := service.ExecuteRename(plans, baseDir)
-	if err != nil {
-		fatal("clean:", err)
-	}
-	for _, f := range renamed {
-		fmt.Printf("%s\n", f)
-	}
+		return nil
+	},
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -549,11 +551,6 @@ func printFileReport(w *os.File, label string, r output.FileReport) {
 func formatBytes(b int64) string {
 	const gb = 1024 * 1024 * 1024
 	return fmt.Sprintf("%.2f GB", float64(b)/float64(gb))
-}
-
-func fatal(prefix string, err error) {
-	fmt.Fprintf(os.Stderr, "simplerip: %s %v\n", prefix, err)
-	os.Exit(1)
 }
 
 
