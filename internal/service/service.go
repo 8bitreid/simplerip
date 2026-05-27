@@ -165,7 +165,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 
 	if err := s.notify.Send(ctx, payload); err != nil {
 		// Notification failure is not fatal — the rip succeeded.
-		return fmt.Errorf("send notification (non-fatal): %w", err)
+		return nil
 	}
 
 	return nil
