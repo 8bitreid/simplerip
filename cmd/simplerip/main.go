@@ -401,7 +401,9 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 
 		allMKVs, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
 		keepPaths := []string{keptFile}
-		if len(analyses) > 0 {
+		if len(analyses) == 0 {
+			keepPaths = append([]string{}, allMKVs...)
+		} else {
 			deduped := map[string]bool{keptFile: true}
 			for _, dr := range analyses[0].Duplicates {
 				deduped[dr.Path] = true

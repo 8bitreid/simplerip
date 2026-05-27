@@ -126,6 +126,40 @@ func TestCopyAndRemove(t *testing.T) {
 		t.Fatalf("copyAndRemove: %v", err)
 	}
 	assertMovedFile(t, src, dst)
+
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat dst: %v", err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o644); got != want {
+		t.Fatalf("dst mode = %v, want %v", got, want)
+	}
+}
+
+func TestCopyAndRemove_DestExists(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.mkv")
+	dst := filepath.Join(dir, "dst.mkv")
+	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyAndRemove(src, dst); err == nil {
+		t.Fatal("expected error when destination exists")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("src should remain on failure: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "existing" {
+		t.Fatalf("dst content changed: got %q, want %q", got, "existing")
+	}
 }
 
 func TestMoveFileCrossDeviceFallback(t *testing.T) {
@@ -244,6 +278,16 @@ func TestPlanRename_Single(t *testing.T) {
 	}
 	if plans[0].Folder != "Oppenheimer (2023)" {
 		t.Errorf("single keeper: Folder = %q, want %q", plans[0].Folder, "Oppenheimer (2023)")
+	}
+}
+
+func TestPlanRename_NilDetails(t *testing.T) {
+	keepers := []RenameEntry{
+		{Path: "/staging/oppenheimer.mkv", Dur: 180 * time.Minute},
+	}
+	plans := PlanRename(keepers, nil, "")
+	if len(plans) != 0 {
+		t.Fatalf("expected 0 plans for nil details, got %d", len(plans))
 	}
 }
 
@@ -385,6 +429,23 @@ func TestExecuteRename_DestExists(t *testing.T) {
 	_, err := ExecuteRename(plans, dir)
 	if err == nil {
 		t.Fatal("expected error for pre-existing destination, got nil")
+	}
+}
+
+func TestExecuteRename_DestStatError(t *testing.T) {
+	dir := t.TempDir()
+
+	src := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plans := []RenamePlan{
+		{Src: src, Folder: "Movie (2024)", Base: "Movie\x00(2024)"},
+	}
+	_, err := ExecuteRename(plans, dir)
+	if err == nil {
+		t.Fatal("expected stat error for invalid destination path, got nil")
 	}
 }
 

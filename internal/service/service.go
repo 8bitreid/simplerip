@@ -56,10 +56,10 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 }
 
 // RipDisc executes the full automated pipeline:
-//   1. Scan the disc and classify titles
-//   2. Rip main titles + extras (if configured to auto-rip)
-//   3. Deliver files to NAS via rsync
-//   4. Send Discord notification on completion
+//  1. Scan the disc and classify titles
+//  2. Rip main titles + extras (if configured to auto-rip)
+//  3. Deliver files to NAS via rsync
+//  4. Send Discord notification on completion
 //
 // This method is intended for unattended daemon mode.
 // Returns an error if any step fails.
@@ -87,8 +87,11 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		return fmt.Errorf("create staging dir: %w", err)
 	}
 
-	jobID := fmt.Sprintf("rip-%d", time.Now().Unix())
+	jobID := fmt.Sprintf("rip-%d", time.Now().UnixNano())
 	ripOutputDir := filepath.Join(stagingDir, jobID)
+	if err := os.MkdirAll(ripOutputDir, 0o755); err != nil {
+		return fmt.Errorf("create rip output dir: %w", err)
+	}
 
 	var rippedFiles []string
 	for _, title := range result.MainTitles {
@@ -236,6 +239,10 @@ type RenamePlan struct {
 // (or the edition name if provided), with a duration suffix appended unless
 // exactly one alternate exists and a specific edition name is given.
 func PlanRename(keepers []RenameEntry, details *metadata.MovieDetails, edition string) []RenamePlan {
+	if details == nil {
+		return []RenamePlan{}
+	}
+
 	ref := time.Duration(details.RuntimeMinutes) * time.Minute
 	closestIdx, closestDiff := 0, time.Duration(1<<62)
 	for i, k := range keepers {
@@ -290,6 +297,8 @@ func ExecuteRename(plans []RenamePlan, baseDir string) ([]string, error) {
 		dst := filepath.Join(destDir, p.Base+".mkv")
 		if _, err := os.Stat(dst); err == nil {
 			return renamed, fmt.Errorf("destination already exists: %s", dst)
+		} else if !os.IsNotExist(err) {
+			return renamed, fmt.Errorf("stat destination %s: %w", dst, err)
 		}
 		if err := MoveFile(p.Src, dst); err != nil {
 			return renamed, err
@@ -367,7 +376,13 @@ func copyAndRemove(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
@@ -381,14 +396,6 @@ func copyAndRemove(src, dst string) error {
 		return err
 	}
 	return os.Remove(src)
-}
-
-func sameDevice(src, dst string) bool {
-	var sa, sb syscall.Stat_t
-	if syscall.Stat(filepath.Dir(src), &sa) != nil || syscall.Stat(filepath.Dir(dst), &sb) != nil {
-		return false
-	}
-	return sa.Dev == sb.Dev
 }
 
 // QueryFromMKVPath derives a TMDB search query from a MKV file path.
