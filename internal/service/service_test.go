@@ -115,6 +115,32 @@ func TestMoveFile(t *testing.T) {
 	assertMovedFile(t, src, dst)
 }
 
+func TestMoveFile_DestExists(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.mkv")
+	dst := filepath.Join(dir, "dst.mkv")
+	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MoveFile(src, dst); err == nil {
+		t.Fatal("expected error when destination exists")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("src should remain on failure: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "existing" {
+		t.Fatalf("dst content changed: got %q, want %q", got, "existing")
+	}
+}
+
 func TestCopyAndRemove(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.mkv")

@@ -62,7 +62,7 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 //  4. Send Discord notification on completion
 //
 // This method is intended for unattended daemon mode.
-// Returns an error if any step fails.
+// Returns an error if scan/rip/delivery steps fail. Notification is best-effort.
 func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	// Step 1: Scan and classify.
 	scanned, err := ripper.ScanInfo(ctx, "makemkvcon", device, s.cfg.MakeMKV.Key)
@@ -118,7 +118,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	if destDir != "" {
 		// Deliver files to NAS using rsync.
 		// Use job ID as subdirectory name (future enhancement: TMDB-enriched names).
-		result, err := output.Deliver(
+		deliverResult, err := output.Deliver(
 			ctx,
 			rippedFiles,
 			ripOutputDir,
@@ -131,7 +131,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			return fmt.Errorf("deliver to NAS: %w", err)
 		}
 		// Update rippedFiles to point to destination paths for notification.
-		rippedFiles = result.Files
+		rippedFiles = deliverResult.Files
 	}
 
 	// Step 5: Send completion notification.
@@ -207,15 +207,8 @@ func (s *RipService) CleanDir(dir string) error {
 	}
 
 	// Step 4: TMDB enrichment and renaming.
-	// This is a simplified version — full implementation would require
-	// interactive TMDB selection and runtime reconciliation.
-	// For now, we just verify the config is usable.
-	if s.cfg.Metadata.TMDBApiKey == "" {
-		return fmt.Errorf("metadata.tmdb_api_key not configured")
-	}
-
 	// Future enhancement: add TMDB search, OMDb cross-reference, and file renaming.
-	// Current implementation stops after deduplication to avoid breaking existing CLI.
+	// Current implementation intentionally stops after deduplication.
 
 	return nil
 }
@@ -357,6 +350,12 @@ func (s *RipService) SearchMovie(ctx context.Context, query string) ([]metadata.
 // are on different devices (EXDEV). This is necessary when staging and NAS
 // are separate mounts.
 func MoveFile(src, dst string) error {
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("destination already exists: %s", dst)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat destination %s: %w", dst, err)
+	}
+
 	err := os.Rename(src, dst)
 	if err == nil {
 		return nil
