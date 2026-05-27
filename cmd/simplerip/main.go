@@ -20,14 +20,22 @@ import (
 	"github.com/8bitreid/simplerip/internal/metadata"
 	"github.com/8bitreid/simplerip/internal/output"
 	"github.com/8bitreid/simplerip/internal/ripper"
+	"github.com/8bitreid/simplerip/internal/service"
 )
 
 const version = "0.1.0-dev"
 
 func main() {
-	if len(os.Args) < 2 {
+	// Handle no subcommand — check for -device flag for daemon-style ripping.
+	if len(os.Args) == 1 {
 		usage()
 		os.Exit(2)
+	}
+
+	// Check if first arg is a flag (starts with -) — if so, run default rip pipeline.
+	if strings.HasPrefix(os.Args[1], "-") {
+		runDefaultRip(os.Args[1:])
+		return
 	}
 
 	switch os.Args[1] {
@@ -50,6 +58,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `simplerip - minimal Blu-ray/DVD ripper
 
 Usage:
+  simplerip -device /dev/sr0             (full pipeline: scan → rip → deliver → notify)
   simplerip scan    -device /dev/sr0
   simplerip scan    -fixture ./testdata/movie.txt
   simplerip rip     -device /dev/sr0 -title 0 -output /tmp/rip
@@ -60,6 +69,34 @@ Environment:
   CONFIG_PATH   path to config.yaml (default /config/config.yaml)
   MAKEMKV_KEY   MakeMKV licence key (always overrides config file)
 `)
+}
+
+// ── default rip (daemon mode) ─────────────────────────────────────────────
+
+func runDefaultRip(args []string) {
+	fs := flag.NewFlagSet("rip", flag.ExitOnError)
+	device := fs.String("device", "", "optical device path (e.g. /dev/sr0)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: simplerip -device /dev/sr0")
+		fmt.Fprintln(os.Stderr, "Runs the full automated pipeline: scan → rip → deliver → notify")
+		fs.PrintDefaults()
+	}
+	fs.Parse(args) //nolint:errcheck
+
+	if *device == "" {
+		fmt.Fprintln(os.Stderr, "simplerip: -device is required")
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	cfg := loadConfig()
+	svc := service.New(cfg)
+
+	fmt.Fprintf(os.Stderr, "Starting automated rip pipeline for %s...\n", *device)
+	if err := svc.RipDisc(context.Background(), *device); err != nil {
+		fatal("rip pipeline:", err)
+	}
+	fmt.Fprintln(os.Stderr, "Rip pipeline completed successfully.")
 }
 
 // ── scan ──────────────────────────────────────────────────────────────────
@@ -82,37 +119,34 @@ func runScan(args []string) {
 	}
 
 	cfg := loadConfig()
+	svc := service.New(cfg)
 
-	var result *disc.ClassifiedDisc
+	var result *ripper.ClassificationResult
+	var err error
 
 	if *fixture != "" {
-		// Use the fixture filename as the device label when -device is omitted.
+		// Use fixture mode.
 		deviceLabel := *device
 		if deviceLabel == "" {
 			deviceLabel = *fixture
 		}
-		f, err := os.Open(*fixture)
-		if err != nil {
-			fatal("fixture:", err)
+		f, ferr := os.Open(*fixture)
+		if ferr != nil {
+			fatal("fixture:", ferr)
 		}
 		defer f.Close()
-		var serr error
-		result, serr = ripper.ScanInfoFromReader(f, deviceLabel)
-		if serr != nil {
-			fatal("scan:", serr)
-		}
+		result, err = svc.ScanInfoFromReader(f, deviceLabel)
 	} else {
-		var serr error
-		result, serr = ripper.ScanInfo(context.Background(), "makemkvcon", *device, cfg.MakeMKV.Key)
-		if serr != nil {
-			fatal("scan:", serr)
-		}
+		// Scan physical device.
+		result, err = svc.ScanDisc(*device)
 	}
 
-	cl := ripper.ClassifyTitles(result.Titles, cfg.Detection)
+	if err != nil {
+		fatal("scan:", err)
+	}
 
 	// Warn on stderr if metadata is missing (happens with encrypted/unreadable discs).
-	if cl.MissingMetadata {
+	if result.MissingMetadata {
 		fmt.Fprintln(os.Stderr, "WARNING: Disc metadata is missing or incomplete.")
 		fmt.Fprintln(os.Stderr, "         Most titles have zero duration/size/chapters.")
 		fmt.Fprintln(os.Stderr, "         This can happen with:")
@@ -121,7 +155,9 @@ func runScan(args []string) {
 		fmt.Fprintln(os.Stderr, "         - Unsupported disc structures")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "         Try ripping title 0 or 1 manually:")
-		fmt.Fprintln(os.Stderr, "         simplerip rip -device", result.Device, "-title 0 -output /tmp/test")
+		if *device != "" {
+			fmt.Fprintln(os.Stderr, "         simplerip rip -device", *device, "-title 0 -output /tmp/test")
+		}
 		fmt.Fprintln(os.Stderr, "")
 	}
 
@@ -135,14 +171,14 @@ func runScan(args []string) {
 		MultiAngle      bool        `json:"multi_angle,omitempty"`
 		AngleCount      int         `json:"angle_count,omitempty"`
 	}{
-		Pattern:         strings.ToLower(cl.Pattern.String()),
-		Main:            toTitleJSON(cl.MainTitles),
-		Extras:          toTitleJSON(cl.ExtraTitles),
-		Junk:            toTitleJSON(cl.JunkTitles),
-		MissingMetadata: cl.MissingMetadata,
-		AllTitles:       toTitleJSON(cl.AllTitles),
-		MultiAngle:      cl.MultiAngle,
-		AngleCount:      cl.AngleCount,
+		Pattern:         strings.ToLower(result.Pattern.String()),
+		Main:            toTitleJSON(result.MainTitles),
+		Extras:          toTitleJSON(result.ExtraTitles),
+		Junk:            toTitleJSON(result.JunkTitles),
+		MissingMetadata: result.MissingMetadata,
+		AllTitles:       toTitleJSON(result.AllTitles),
+		MultiAngle:      result.MultiAngle,
+		AngleCount:      result.AngleCount,
 	}
 
 	enc := json.NewEncoder(os.Stdout)
