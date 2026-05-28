@@ -283,3 +283,50 @@ func TestBuildClustersEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+func TestDiscPatternString(t *testing.T) {
+	tests := []struct {
+		in   DiscPattern
+		want string
+	}{
+		{in: DiscPatternTV, want: "TV"},
+		{in: DiscPatternMovie, want: "Movie"},
+		{in: DiscPatternDouble, want: "Double"},
+		{in: DiscPatternAmbiguous, want: "Ambiguous"},
+	}
+
+	for _, tc := range tests {
+		if got := tc.in.String(); got != tc.want {
+			t.Fatalf("String() = %q, want %q", got, tc.want)
+		}
+	}
+}
+
+func TestClassifyTitlesMultiAngle(t *testing.T) {
+	cfg := config.DetectionConfig{
+		TVThreshold:          3,
+		DurationToleranceSec: 60,
+		MinFeatureMinutes:    40,
+		MinExtraMinutes:      2,
+	}
+
+	titles := []disc.MKVTitle{
+		{Name: "Main Angle 1", Duration: 110 * time.Minute, ChapterCount: 20, AngleNumber: 1},
+		{Name: "Main Angle 2", Duration: 110 * time.Minute, ChapterCount: 20, AngleNumber: 2},
+		{Name: "Bonus", Duration: 10 * time.Minute, ChapterCount: 4},
+	}
+
+	got := ClassifyTitles(titles, cfg)
+	if !got.MultiAngle {
+		t.Fatal("expected MultiAngle = true")
+	}
+	if got.AngleCount != 2 {
+		t.Fatalf("AngleCount = %d, want 2", got.AngleCount)
+	}
+	if got.Pattern != DiscPatternMovie {
+		t.Fatalf("Pattern = %v, want %v", got.Pattern, DiscPatternMovie)
+	}
+	if len(got.MainTitles) != 1 || got.MainTitles[0].AngleNumber != 1 {
+		t.Fatalf("MainTitles = %+v, want only angle 1", got.MainTitles)
+	}
+}

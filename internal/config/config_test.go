@@ -193,3 +193,26 @@ func TestLoadInvalidYAML(t *testing.T) {
 		t.Fatal("expected error for invalid YAML, got nil")
 	}
 }
+
+func TestDefaults(t *testing.T) {
+	os.Unsetenv("MAKEMKV_KEY")
+	cfg := Defaults()
+
+	if cfg.Detection.TVThreshold != 3 || cfg.Detection.DurationToleranceSec != 60 {
+		t.Fatalf("unexpected detection defaults: %+v", cfg.Detection)
+	}
+	if cfg.MakeMKV.TimeoutMinutes != 120 {
+		t.Fatalf("TimeoutMinutes = %d, want 120", cfg.MakeMKV.TimeoutMinutes)
+	}
+	if cfg.Metadata.PreferredLanguage != "eng" {
+		t.Fatalf("PreferredLanguage = %q, want %q", cfg.Metadata.PreferredLanguage, "eng")
+	}
+}
+
+func TestDefaultsMakeMKVKeyEnvOverride(t *testing.T) {
+	t.Setenv("MAKEMKV_KEY", "env-defaults-key")
+	cfg := Defaults()
+	if cfg.MakeMKV.Key != "env-defaults-key" {
+		t.Fatalf("MakeMKV.Key = %q, want %q", cfg.MakeMKV.Key, "env-defaults-key")
+	}
+}
