@@ -195,7 +195,15 @@ func TestLoadInvalidYAML(t *testing.T) {
 }
 
 func TestDefaults(t *testing.T) {
+	prev, had := os.LookupEnv("MAKEMKV_KEY")
 	os.Unsetenv("MAKEMKV_KEY")
+	t.Cleanup(func() {
+		if had {
+			os.Setenv("MAKEMKV_KEY", prev)
+		} else {
+			os.Unsetenv("MAKEMKV_KEY")
+		}
+	})
 	cfg := Defaults()
 
 	if cfg.Detection.TVThreshold != 3 || cfg.Detection.DurationToleranceSec != 60 {
