@@ -38,7 +38,6 @@ func (t hostRewriteTransport) RoundTrip(req *http.Request) (*http.Response, erro
 
 func installHostRewrites(t *testing.T, targets map[string]string) {
 	t.Helper()
-	original := http.DefaultTransport
 	mapped := make(map[string]*url.URL, len(targets))
 	for host, raw := range targets {
 		u, err := url.Parse(raw)
@@ -47,9 +46,22 @@ func installHostRewrites(t *testing.T, targets map[string]string) {
 		}
 		mapped[host] = u
 	}
-	http.DefaultTransport = hostRewriteTransport{targets: mapped, base: original}
+	originalTMDBClientFactory := newTMDBClient
+	originalOMDbClientFactory := newOMDbClient
+	base := http.DefaultTransport
+	newTMDBClient = func(apiKey string) *metadata.Client {
+		return metadata.NewClientWithHTTPClient(apiKey, &http.Client{
+			Transport: hostRewriteTransport{targets: mapped, base: base},
+		})
+	}
+	newOMDbClient = func(apiKey string) *metadata.OMDbClient {
+		return metadata.NewOMDbClientWithHTTPClient(apiKey, &http.Client{
+			Transport: hostRewriteTransport{targets: mapped, base: base},
+		})
+	}
 	t.Cleanup(func() {
-		http.DefaultTransport = original
+		newTMDBClient = originalTMDBClientFactory
+		newOMDbClient = originalOMDbClientFactory
 	})
 }
 
@@ -525,10 +537,10 @@ func TestSearchMovie_RetryTable(t *testing.T) {
 			wantErr:     "no TMDB results",
 		},
 		{
-			name:      "returns tmdb status error",
-			input:     "broken lookup",
-			responses: map[string]string{},
-			statusByQ: map[string]int{"broken lookup": http.StatusBadGateway},
+			name:        "returns tmdb status error",
+			input:       "broken lookup",
+			responses:   map[string]string{},
+			statusByQ:   map[string]int{"broken lookup": http.StatusBadGateway},
 			wantQueries: []string{"broken lookup"},
 			wantErr:     "tmdb search \"broken lookup\"",
 		},

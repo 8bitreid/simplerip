@@ -29,6 +29,11 @@ type RipService struct {
 	notify *notify.Client
 }
 
+var (
+	newTMDBClient = metadata.NewClient
+	newOMDbClient = metadata.NewOMDbClient
+)
+
 // New creates a RipService with the given configuration.
 // The notification client is initialized from cfg.Notification.WebhookURL.
 func New(cfg *config.Config) *RipService {
@@ -309,11 +314,11 @@ func (s *RipService) EnrichMovie(ctx context.Context, chosen metadata.MovieResul
 		return nil, fmt.Errorf("metadata.tmdb_api_key not configured")
 	}
 
-	tmdbClient := metadata.NewClient(s.cfg.Metadata.TMDBApiKey)
+	tmdbClient := newTMDBClient(s.cfg.Metadata.TMDBApiKey)
 
 	var omdbClient *metadata.OMDbClient
 	if s.cfg.Metadata.OMDbApiKey != "" {
-		omdbClient = metadata.NewOMDbClient(s.cfg.Metadata.OMDbApiKey)
+		omdbClient = newOMDbClient(s.cfg.Metadata.OMDbApiKey)
 	}
 
 	return metadata.Enrich(ctx, tmdbClient, omdbClient, chosen)
@@ -328,7 +333,7 @@ func (s *RipService) SearchMovie(ctx context.Context, query string) ([]metadata.
 		return nil, fmt.Errorf("metadata.tmdb_api_key not configured")
 	}
 
-	client := metadata.NewClient(s.cfg.Metadata.TMDBApiKey)
+	client := newTMDBClient(s.cfg.Metadata.TMDBApiKey)
 
 	words := strings.Fields(query)
 	for len(words) > 0 {

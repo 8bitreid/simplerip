@@ -46,9 +46,17 @@ type Client struct {
 
 // NewClient returns a Client using apiKey.
 func NewClient(apiKey string) *Client {
+	return NewClientWithHTTPClient(apiKey, &http.Client{Timeout: 10 * time.Second})
+}
+
+// NewClientWithHTTPClient returns a Client using apiKey and httpClient.
+func NewClientWithHTTPClient(apiKey string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
 	return &Client{
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: httpClient,
 	}
 }
 
