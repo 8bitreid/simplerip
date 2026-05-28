@@ -2,10 +2,12 @@ package ripper
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/8bitreid/simplerip/internal/disc"
 )
@@ -62,5 +64,52 @@ exit 0
 		if _, err := os.Stat(f); err != nil {
 			t.Errorf("returned path does not exist: %q", f)
 		}
+	}
+}
+
+func TestRipTitleFailure(t *testing.T) {
+	outDir := t.TempDir()
+	scriptDir := t.TempDir()
+	script := filepath.Join(scriptDir, "makemkvcon")
+	scriptBody := `#!/bin/sh
+exit 3
+`
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake script: %v", err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 1}, outDir, "test-key", 1)
+	if err == nil {
+		t.Fatal("expected RipTitle to fail")
+	}
+	if errors.Is(err, ErrRipTimeout) {
+		t.Fatalf("expected non-timeout error, got %v", err)
+	}
+}
+
+func TestNewMKVFilesCutoff(t *testing.T) {
+	dir := t.TempDir()
+	oldFile := filepath.Join(dir, "old.mkv")
+	newFile := filepath.Join(dir, "new.mkv")
+
+	if err := os.WriteFile(oldFile, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * time.Second)
+	if err := os.Chtimes(oldFile, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now()
+	if err := os.WriteFile(newFile, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := newMKVFiles(dir, cutoff)
+	if err != nil {
+		t.Fatalf("newMKVFiles() error = %v", err)
+	}
+	if len(files) != 1 || files[0] != newFile {
+		t.Fatalf("newMKVFiles() = %v, want [%s]", files, newFile)
 	}
 }

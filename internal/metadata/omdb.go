@@ -15,17 +15,17 @@ const omdbBase = "http://www.omdbapi.com/"
 
 // OMDbResult is the response from OMDb for a single movie.
 type OMDbResult struct {
-	Title      string         `json:"Title"`
-	Year       string         `json:"Year"`
-	Runtime    string         `json:"Runtime"` // e.g. "109 min"
-	Director   string         `json:"Director"`
-	Actors     string         `json:"Actors"`
-	Genre      string         `json:"Genre"`
-	ImdbID     string         `json:"imdbID"`
-	ImdbRating string         `json:"imdbRating"`
-	Ratings    []OMDbRating   `json:"Ratings"`
-	Response   string         `json:"Response"`
-	Error      string         `json:"Error"`
+	Title      string       `json:"Title"`
+	Year       string       `json:"Year"`
+	Runtime    string       `json:"Runtime"` // e.g. "109 min"
+	Director   string       `json:"Director"`
+	Actors     string       `json:"Actors"`
+	Genre      string       `json:"Genre"`
+	ImdbID     string       `json:"imdbID"`
+	ImdbRating string       `json:"imdbRating"`
+	Ratings    []OMDbRating `json:"Ratings"`
+	Response   string       `json:"Response"`
+	Error      string       `json:"Error"`
 }
 
 // OMDbRating is one entry from the Ratings array.
@@ -63,9 +63,17 @@ type OMDbClient struct {
 
 // NewOMDbClient returns a client using apiKey.
 func NewOMDbClient(apiKey string) *OMDbClient {
+	return NewOMDbClientWithHTTPClient(apiKey, &http.Client{Timeout: 10 * time.Second})
+}
+
+// NewOMDbClientWithHTTPClient returns a client using apiKey and httpClient.
+func NewOMDbClientWithHTTPClient(apiKey string, httpClient *http.Client) *OMDbClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
 	return &OMDbClient{
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: httpClient,
 	}
 }
 

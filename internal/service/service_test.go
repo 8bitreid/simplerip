@@ -2,8 +2,14 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -12,6 +18,129 @@ import (
 	"github.com/8bitreid/simplerip/internal/metadata"
 	"github.com/8bitreid/simplerip/internal/ripper"
 )
+
+type hostRewriteTransport struct {
+	targets map[string]*url.URL
+	base    http.RoundTripper
+}
+
+func (t hostRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	u := *req.URL
+	if dst, ok := t.targets[req.URL.Host]; ok {
+		u.Scheme = dst.Scheme
+		u.Host = dst.Host
+		clone.URL = &u
+		clone.Host = dst.Host
+	}
+	return t.base.RoundTrip(clone)
+}
+
+func installHostRewrites(t *testing.T, targets map[string]string) {
+	t.Helper()
+	mapped := make(map[string]*url.URL, len(targets))
+	for host, raw := range targets {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse rewrite URL %q: %v", raw, err)
+		}
+		mapped[host] = u
+	}
+	originalTMDBClientFactory := newTMDBClient
+	originalOMDbClientFactory := newOMDbClient
+	base := http.DefaultTransport
+	newTMDBClient = func(apiKey string) *metadata.Client {
+		return metadata.NewClientWithHTTPClient(apiKey, &http.Client{
+			Transport: hostRewriteTransport{targets: mapped, base: base},
+		})
+	}
+	newOMDbClient = func(apiKey string) *metadata.OMDbClient {
+		return metadata.NewOMDbClientWithHTTPClient(apiKey, &http.Client{
+			Transport: hostRewriteTransport{targets: mapped, base: base},
+		})
+	}
+	t.Cleanup(func() {
+		newTMDBClient = originalTMDBClientFactory
+		newOMDbClient = originalOMDbClientFactory
+	})
+}
+
+func installFakeMakeMKVCon(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "makemkvcon")
+	content := `#!/bin/sh
+if [ "$1" = "-r" ] && [ "$2" = "info" ]; then
+	if [ "$INFO_MODE" = "short" ]; then
+		cat <<'EOF'
+CINFO:30,0,"TEST_DISC"
+TCOUNT:1
+TINFO:0,2,0,"Short"
+TINFO:0,8,0,"1"
+TINFO:0,9,0,"0:01:00"
+EOF
+		exit 0
+	fi
+	cat <<'EOF'
+CINFO:30,0,"TEST_DISC"
+TCOUNT:1
+TINFO:0,2,0,"Main Feature"
+TINFO:0,8,0,"10"
+TINFO:0,9,0,"1:45:00"
+SINFO:0,0,1,6202,"Audio"
+EOF
+	exit 0
+fi
+
+if [ "$1" = "mkv" ]; then
+	for last; do :; done
+	outdir="$last"
+	printf 'PRGV:0,0,10000\n'
+	printf 'PRGV:5000,5000,10000\n'
+	printf 'PRGV:10000,10000,10000\n'
+	touch "$outdir/title_t00.mkv"
+	exit 0
+fi
+
+exit 1
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake makemkvcon: %v", err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+}
+
+func installFakeFFProbeForClean(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "ffprobe")
+	content := `#!/bin/sh
+file=""
+for arg in "$@"; do
+	file="$arg"
+done
+base=$(basename "$file")
+case "$base" in
+	keeper.mkv)
+		cat <<'EOF'
+{"format":{"duration":"600","size":"20000000000"},"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height":1080},{"codec_type":"audio","codec_name":"truehd","channels":8,"channel_layout":"7.1","tags":{"language":"eng"}},{"codec_type":"subtitle","codec_name":"subrip"}]}
+EOF
+		;;
+	dup.mkv)
+		cat <<'EOF'
+{"format":{"duration":"610","size":"10000000000"},"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height":1080},{"codec_type":"audio","codec_name":"ac3","channels":6,"channel_layout":"5.1","tags":{"language":"eng"}}]}
+EOF
+		;;
+	*)
+		exit 2
+		;;
+esac
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake ffprobe: %v", err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+}
 
 func TestRipService_ScanDisc_Movie(t *testing.T) {
 	cfg := config.Defaults()
@@ -283,6 +412,293 @@ func TestSearchMovie_NoAPIKey(t *testing.T) {
 	_, err := svc.SearchMovie(context.Background(), "Oppenheimer")
 	if err == nil {
 		t.Fatal("expected error when TMDB API key is not configured, got nil")
+	}
+}
+
+func TestScanDiscWithFakeMakeMKV(t *testing.T) {
+	installFakeMakeMKVCon(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := config.Defaults()
+	svc := New(cfg)
+
+	result, err := svc.ScanDisc("/dev/sr0")
+	if err != nil {
+		t.Fatalf("ScanDisc() error = %v", err)
+	}
+	if result.Pattern != ripper.DiscPatternMovie {
+		t.Fatalf("Pattern = %v, want %v", result.Pattern, ripper.DiscPatternMovie)
+	}
+	if len(result.MainTitles) != 1 {
+		t.Fatalf("MainTitles len = %d, want 1", len(result.MainTitles))
+	}
+}
+
+func TestRipDiscWithFakeMakeMKV(t *testing.T) {
+	installFakeMakeMKVCon(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = ""
+
+	svc := New(cfg)
+	if err := svc.RipDisc(context.Background(), "/dev/sr0"); err != nil {
+		t.Fatalf("RipDisc() error = %v", err)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(cfg.Output.StagingDir, "*", "*.mkv"))
+	if len(matches) == 0 {
+		t.Fatal("expected at least one ripped mkv file in staging dir")
+	}
+}
+
+func TestRipDiscNoMainTitles(t *testing.T) {
+	installFakeMakeMKVCon(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("INFO_MODE", "short")
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+
+	svc := New(cfg)
+	err := svc.RipDisc(context.Background(), "/dev/sr0")
+	if err == nil || !strings.Contains(err.Error(), "no main titles found") {
+		t.Fatalf("RipDisc() error = %v, want no-main-titles error", err)
+	}
+}
+
+func TestCleanDirNoMKVFiles(t *testing.T) {
+	cfg := config.Defaults()
+	svc := New(cfg)
+
+	err := svc.CleanDir(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "analyze dir") {
+		t.Fatalf("CleanDir() error = %v, want analyze dir error", err)
+	}
+}
+
+func TestCleanDirSuccess(t *testing.T) {
+	installFakeFFProbeForClean(t)
+
+	dir := t.TempDir()
+	keeper := filepath.Join(dir, "keeper.mkv")
+	dup := filepath.Join(dir, "dup.mkv")
+	if err := os.WriteFile(keeper, []byte("keeper"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dup, []byte("dup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := New(config.Defaults())
+	if err := svc.CleanDir(dir); err != nil {
+		t.Fatalf("CleanDir() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "_duplicates", "dup.mkv")); err != nil {
+		t.Fatalf("expected duplicate moved to _duplicates: %v", err)
+	}
+}
+
+func TestSearchMovie_RetryTable(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		responses   map[string]string
+		statusByQ   map[string]int
+		wantQueries []string
+		wantCount   int
+		wantErr     string
+	}{
+		{
+			name:  "returns first query results",
+			input: "pitch black",
+			responses: map[string]string{
+				"pitch black": `{"results":[{"id":7,"title":"Pitch Black","release_date":"2000-02-18"}]}`,
+			},
+			wantQueries: []string{"pitch black"},
+			wantCount:   1,
+		},
+		{
+			name:  "drops last word until results",
+			input: "the lord rings",
+			responses: map[string]string{
+				"the": `{"results":[{"id":11,"title":"The","release_date":"2017-01-01"}]}`,
+			},
+			wantQueries: []string{"the lord rings", "the lord", "the"},
+			wantCount:   1,
+		},
+		{
+			name:        "no results after all retries",
+			input:       "this matches nothing",
+			responses:   map[string]string{},
+			wantQueries: []string{"this matches nothing", "this matches", "this"},
+			wantErr:     "no TMDB results",
+		},
+		{
+			name:        "returns tmdb status error",
+			input:       "broken lookup",
+			responses:   map[string]string{},
+			statusByQ:   map[string]int{"broken lookup": http.StatusBadGateway},
+			wantQueries: []string{"broken lookup"},
+			wantErr:     "tmdb search \"broken lookup\"",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			queries := []string{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				q := r.URL.Query().Get("query")
+				queries = append(queries, q)
+				if got := r.URL.Query().Get("api_key"); got != "tmdb-key" {
+					t.Fatalf("api_key = %q, want %q", got, "tmdb-key")
+				}
+				if got := r.URL.Query().Get("language"); got != "en-US" {
+					t.Fatalf("language = %q, want %q", got, "en-US")
+				}
+
+				if code, ok := tc.statusByQ[q]; ok {
+					w.WriteHeader(code)
+					return
+				}
+
+				body, ok := tc.responses[q]
+				if !ok {
+					body = `{"results":[]}`
+				}
+				_, _ = fmt.Fprint(w, body)
+			}))
+			defer server.Close()
+
+			installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+
+			cfg := config.Defaults()
+			cfg.Metadata.TMDBApiKey = "tmdb-key"
+			svc := New(cfg)
+
+			got, err := svc.SearchMovie(context.Background(), tc.input)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("SearchMovie() error = %v, want substring %q", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("SearchMovie() error = %v", err)
+			}
+
+			if !reflect.DeepEqual(queries, tc.wantQueries) {
+				t.Fatalf("queries = %v, want %v", queries, tc.wantQueries)
+			}
+			if tc.wantErr == "" && len(got) != tc.wantCount {
+				t.Fatalf("result count = %d, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestEnrichMovie_Table(t *testing.T) {
+	tests := []struct {
+		name            string
+		tmdbBody        string
+		tmdbStatus      int
+		omdbBody        string
+		omdbStatus      int
+		omdbKey         string
+		wantErr         string
+		wantRuntime     int
+		wantConflict    bool
+		wantDirectorSet bool
+	}{
+		{
+			name:            "tmdb only no omdb key",
+			tmdbBody:        `{"id":7,"title":"Pitch Black","runtime":109,"imdb_id":"tt0134847"}`,
+			wantRuntime:     109,
+			wantConflict:    false,
+			wantDirectorSet: false,
+		},
+		{
+			name:            "omdb success averages runtime",
+			tmdbBody:        `{"id":7,"title":"Pitch Black","runtime":100,"imdb_id":"tt0134847"}`,
+			omdbBody:        `{"Director":"David Twohy","Runtime":"102 min","Response":"True"}`,
+			omdbKey:         "omdb-key",
+			wantRuntime:     101,
+			wantConflict:    false,
+			wantDirectorSet: true,
+		},
+		{
+			name:            "omdb false response non fatal",
+			tmdbBody:        `{"id":7,"title":"Pitch Black","runtime":109,"imdb_id":"tt0134847"}`,
+			omdbBody:        `{"Response":"False","Error":"Movie not found"}`,
+			omdbKey:         "omdb-key",
+			wantRuntime:     109,
+			wantConflict:    false,
+			wantDirectorSet: false,
+		},
+		{
+			name:         "tmdb status error bubbles up",
+			tmdbStatus:   http.StatusBadGateway,
+			wantErr:      "tmdb detail",
+			wantRuntime:  0,
+			wantConflict: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmdbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.tmdbStatus != 0 {
+					w.WriteHeader(tc.tmdbStatus)
+					return
+				}
+				_, _ = fmt.Fprint(w, tc.tmdbBody)
+			}))
+			defer tmdbServer.Close()
+
+			omdbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.omdbStatus != 0 {
+					w.WriteHeader(tc.omdbStatus)
+					return
+				}
+				if tc.omdbBody == "" {
+					_, _ = fmt.Fprint(w, `{"Response":"False","Error":"disabled"}`)
+					return
+				}
+				_, _ = fmt.Fprint(w, tc.omdbBody)
+			}))
+			defer omdbServer.Close()
+
+			installHostRewrites(t, map[string]string{
+				"api.themoviedb.org": tmdbServer.URL,
+				"www.omdbapi.com":    omdbServer.URL,
+			})
+
+			cfg := config.Defaults()
+			cfg.Metadata.TMDBApiKey = "tmdb-key"
+			cfg.Metadata.OMDbApiKey = tc.omdbKey
+			svc := New(cfg)
+
+			got, err := svc.EnrichMovie(context.Background(), metadata.MovieResult{ID: 7, ReleaseDate: "2000-02-18"})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("EnrichMovie() error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EnrichMovie() error = %v", err)
+			}
+			if got.RuntimeMinutes != tc.wantRuntime {
+				t.Fatalf("RuntimeMinutes = %d, want %d", got.RuntimeMinutes, tc.wantRuntime)
+			}
+			if got.RuntimeConflict != tc.wantConflict {
+				t.Fatalf("RuntimeConflict = %v, want %v", got.RuntimeConflict, tc.wantConflict)
+			}
+			hasDirector := got.Director != ""
+			if hasDirector != tc.wantDirectorSet {
+				t.Fatalf("Director set = %v, want %v", hasDirector, tc.wantDirectorSet)
+			}
+		})
 	}
 }
 

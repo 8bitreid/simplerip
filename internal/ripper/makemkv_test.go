@@ -1,6 +1,7 @@
 package ripper
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,5 +204,70 @@ func TestSplitRobotLine(t *testing.T) {
 				t.Errorf("splitRobotLine(%q)[%d] = %q, want %q", c.in, i, g, c.want[i])
 			}
 		}
+	}
+}
+
+func TestParseAngleNumber(t *testing.T) {
+	tests := []struct {
+		in   string
+		want int
+	}{
+		{in: "Title (angle 1)", want: 1},
+		{in: "Main title (angle 2)", want: 2},
+		{in: "No angle marker", want: 0},
+		{in: "Broken (angle x)", want: 0},
+	}
+
+	for _, tc := range tests {
+		if got := parseAngleNumber(tc.in); got != tc.want {
+			t.Fatalf("parseAngleNumber(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestParsePRGVInvalid(t *testing.T) {
+	tests := []string{"", "1,2", "a,b,c", "1,2,three"}
+	for _, in := range tests {
+		if _, ok := parsePRGV(in); ok {
+			t.Fatalf("parsePRGV(%q) unexpectedly succeeded", in)
+		}
+	}
+}
+
+func TestScanInfoFromReaderSetsDevice(t *testing.T) {
+	result, err := ScanInfoFromReader(strings.NewReader(infoFixture), "/dev/sr0")
+	if err != nil {
+		t.Fatalf("ScanInfoFromReader() error = %v", err)
+	}
+	if result.Device != "/dev/sr0" {
+		t.Fatalf("Device = %q, want %q", result.Device, "/dev/sr0")
+	}
+}
+
+func TestScanInfoCommand(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	fake := filepath.Join(tmp, "fake-makemkvcon")
+	script := `#!/bin/sh
+cat <<'EOF'
+CINFO:30,0,"TEST_DISC"
+TCOUNT:1
+TINFO:0,2,0,"Main"
+TINFO:0,8,0,"10"
+TINFO:0,9,0,"1:40:00"
+SINFO:0,0,1,6202,"Audio"
+EOF
+`
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake makemkvcon: %v", err)
+	}
+
+	result, err := ScanInfo(context.Background(), fake, "/dev/sr0", "test-key")
+	if err != nil {
+		t.Fatalf("ScanInfo() error = %v", err)
+	}
+	if len(result.Titles) != 1 || result.Titles[0].Name != "Main" {
+		t.Fatalf("unexpected scan result: %+v", result)
 	}
 }
