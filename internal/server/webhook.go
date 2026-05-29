@@ -17,19 +17,19 @@ type Response struct {
 	Value string `json:"value"` // e.g. "rip_extras", "skip_extras", "rip_all", "skip"
 }
 
-// Server is an HTTP server that receives n8n callbacks.
+// CallbackServer is an HTTP server that receives n8n callbacks.
 // Each in-flight job registers a channel; the callback handler routes
 // responses to the right channel by job ID.
-type Server struct {
+type CallbackServer struct {
 	mu      sync.Mutex
 	pending map[string]chan Response
 	srv     *http.Server
 	addr    string // resolved address after Start (handles port 0)
 }
 
-// New creates a Server that will listen on the given port.
-func New(port int) *Server {
-	s := &Server{
+// NewCallbackServer creates a CallbackServer that will listen on the given port.
+func NewCallbackServer(port int) *CallbackServer {
+	s := &CallbackServer{
 		pending: make(map[string]chan Response),
 	}
 	mux := http.NewServeMux()
@@ -45,7 +45,7 @@ func New(port int) *Server {
 
 // Start begins listening in a background goroutine.
 // The server is ready when the returned channel is closed.
-func (s *Server) Start() (<-chan struct{}, error) {
+func (s *CallbackServer) Start() (<-chan struct{}, error) {
 	ln, err := net.Listen("tcp", s.srv.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", s.srv.Addr, err)
@@ -61,16 +61,16 @@ func (s *Server) Start() (<-chan struct{}, error) {
 
 // Addr returns the address the server is listening on (e.g. "127.0.0.1:8090").
 // Only valid after Start returns successfully.
-func (s *Server) Addr() string { return s.addr }
+func (s *CallbackServer) Addr() string { return s.addr }
 
 // Shutdown gracefully stops the server.
-func (s *Server) Shutdown(ctx context.Context) error {
+func (s *CallbackServer) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
 // Await registers jobID and blocks until n8n posts a response or the context
 // expires. Returns ("", ctx.Err()) on timeout; the response value otherwise.
-func (s *Server) Await(ctx context.Context, jobID string) (string, error) {
+func (s *CallbackServer) Await(ctx context.Context, jobID string) (string, error) {
 	ch := make(chan Response, 1)
 	s.mu.Lock()
 	s.pending[jobID] = ch
@@ -91,7 +91,7 @@ func (s *Server) Await(ctx context.Context, jobID string) (string, error) {
 }
 
 // handleCallback receives POST /callback with a JSON Response body.
-func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
+func (s *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
