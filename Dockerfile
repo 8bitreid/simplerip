@@ -100,5 +100,3 @@ RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["serve"]
-
-ENTRYPOINT ["/entrypoint.sh"]
