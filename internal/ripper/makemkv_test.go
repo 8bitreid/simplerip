@@ -13,8 +13,9 @@ import (
 // output for a Blu-ray with one main feature, one extra, and one junk title.
 // Includes CINFO, TCOUNT, TINFO, SINFO, PRGV, and MSG lines.
 // infoFixture uses the real v1.18.3 attribute IDs:
-//   TINFO attr 8 = chapter count, 9 = duration, 11 = size bytes
-//   SINFO attr 1 = stream type ("Video"/"Audio"/"Subtitles")
+//
+//	TINFO attr 8 = chapter count, 9 = duration, 11 = size bytes
+//	SINFO attr 1 = stream type ("Video"/"Audio"/"Subtitles")
 const infoFixture = `MSG:1005,0,1,"MakeMKV v1.18.3 linux(x86-64-release)"
 MSG:1011,0,1,"/usr/bin/makemkvcon"
 CINFO:1,6331,"Blu-ray disc"

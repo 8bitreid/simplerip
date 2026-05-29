@@ -78,9 +78,9 @@ func TestScoreAndLabel(t *testing.T) {
 		wantLabel string
 	}{
 		{
-			name: "no english audio disqualified",
-			info: &FileInfo{Audio: []AudioTrack{{Codec: "ac3", Channels: 6, Layout: "5.1", Language: "fra"}}},
-			want: QualityScore{},
+			name:      "no english audio disqualified",
+			info:      &FileInfo{Audio: []AudioTrack{{Codec: "ac3", Channels: 6, Layout: "5.1", Language: "fra"}}},
+			want:      QualityScore{},
 			wantLabel: "DISQUALIFIED (no English audio)",
 		},
 		{

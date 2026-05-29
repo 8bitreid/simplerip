@@ -63,7 +63,7 @@ func (a AudioTrack) String() string {
 
 type ffprobeOutput struct {
 	Streams []ffprobeStream `json:"streams"`
-	Format  ffprobeFormat  `json:"format"`
+	Format  ffprobeFormat   `json:"format"`
 }
 
 type ffprobeStream struct {

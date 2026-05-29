@@ -30,9 +30,9 @@ type CleanAnalysis struct {
 
 // CleanResult is returned after deduplication has actually been executed.
 type CleanResult struct {
-	Kept       string       // absolute path of the kept file
+	Kept       string // absolute path of the kept file
 	KeptReport FileReport
-	Duplicates []string     // destination paths inside _duplicates/
+	Duplicates []string // destination paths inside _duplicates/
 	DupReports []FileReport
 }
 

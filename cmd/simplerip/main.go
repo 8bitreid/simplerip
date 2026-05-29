@@ -318,6 +318,7 @@ func loadConfig() (*config.Config, error) {
 	}
 	return cfg, nil
 }
+
 // titleJSON is the JSON shape for a single disc title.
 type titleJSON struct {
 	Index        int     `json:"index"`
@@ -360,8 +361,6 @@ func fmtDuration(d time.Duration) string {
 func roundGB(gb float64) float64 {
 	return float64(int(gb*100+0.5)) / 100
 }
-
-
 
 // ── clean ─────────────────────────────────────────────────────────────────
 
@@ -618,5 +617,3 @@ func formatBytes(b int64) string {
 	const gb = 1024 * 1024 * 1024
 	return fmt.Sprintf("%.2f GB", float64(b)/float64(gb))
 }
-
-

@@ -14,12 +14,12 @@ import (
 
 // RipLog is the data written to rip.json in the destination directory.
 type RipLog struct {
-	Title     string    `json:"title"`
-	DiscName  string    `json:"disc_name"`
-	RippedAt  time.Time `json:"ripped_at"`
-	Files     []string  `json:"files"`
-	StagingDir string   `json:"staging_dir"`
-	DestDir   string    `json:"dest_dir"`
+	Title      string    `json:"title"`
+	DiscName   string    `json:"disc_name"`
+	RippedAt   time.Time `json:"ripped_at"`
+	Files      []string  `json:"files"`
+	StagingDir string    `json:"staging_dir"`
+	DestDir    string    `json:"dest_dir"`
 }
 
 // DeliverResult is returned by Deliver after a successful rsync.
