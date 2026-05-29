@@ -95,7 +95,7 @@ func checkDevice(ctx context.Context, device string) bool {
 			if len(parts) == 2 {
 				if count, err := strconv.Atoi(parts[1]); err == nil {
 					tcount = count
-					break
+					// Continue draining stdout to avoid pipe deadlock
 				}
 			}
 		}

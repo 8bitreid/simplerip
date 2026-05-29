@@ -21,17 +21,23 @@ var indexHTML []byte
 
 // Server wraps the Echo HTTP server and provides WebSocket progress streaming.
 type Server struct {
-	e        *echo.Echo
-	svc      *service.RipService
-	mu       sync.RWMutex
-	curState service.ProgressEvent
+	e           *echo.Echo
+	svc         *service.RipService
+	mu          sync.RWMutex
+	curState    service.ProgressEvent
+	ctx         context.Context
+	cancel      context.CancelFunc
+	shutdownWg  sync.WaitGroup
 }
 
 // New creates a new Server with the given RipService.
 func New(svc *service.RipService) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
-		e:   echo.New(),
-		svc: svc,
+		e:      echo.New(),
+		svc:    svc,
+		ctx:    ctx,
+		cancel: cancel,
 		curState: service.ProgressEvent{
 			Stage:   "idle",
 			Title:   "",
@@ -59,6 +65,7 @@ func New(svc *service.RipService) *Server {
 	_ = ws // Future: additional WebSocket endpoints
 
 	// Start background goroutine to track latest state from EventBus
+	s.shutdownWg.Add(1)
 	go s.trackProgress()
 
 	return s
@@ -73,6 +80,10 @@ func (s *Server) Start(port int) error {
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Cancel background goroutines
+	s.cancel()
+	// Wait for trackProgress to finish
+	s.shutdownWg.Wait()
 	return s.e.Shutdown(ctx)
 }
 
@@ -124,22 +135,29 @@ func (s *Server) handleProgressWS(c echo.Context) error {
 // trackProgress subscribes to the EventBus and maintains the latest state
 // so that /api/status and new WebSocket connections always have current data.
 func (s *Server) trackProgress() {
+	defer s.shutdownWg.Done()
 	subID, eventCh := s.svc.EventBus().Subscribe()
 	defer s.svc.EventBus().Unsubscribe(subID)
 
-	for event := range eventCh {
-		s.mu.Lock()
-		s.curState = event
-		s.mu.Unlock()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case event := <-eventCh:
+			s.mu.Lock()
+			s.curState = event
+			s.mu.Unlock()
+		}
 	}
 }
 
 // upgrader is the WebSocket upgrader with default options.
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		// Allow all origins for local development
-		// In production, restrict to your domain
-		return true
+		// Only allow same-origin by default for security.
+		// This prevents cross-site WebSocket hijacking.
+		// If you need cross-origin access, configure explicitly.
+		return r.Header.Get("Origin") == ""
 	},
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,

@@ -257,7 +257,8 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 
 		// Start disc polling if devices are configured
 		if len(cfg.MakeMKV.Devices) > 0 {
-			ctx := context.Background()
+			// Use command context so polling stops on cancellation
+			ctx := cmd.Context()
 			discCh := disc.Poll(ctx, cfg.MakeMKV.Devices, 5*time.Second)
 
 			// Handle detected discs in background
@@ -265,7 +266,15 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 				for device := range discCh {
 					fmt.Fprintf(os.Stderr, "Disc detected on %s, starting rip...\n", device)
 					go func(dev string) {
-						if err := svc.RipDisc(context.Background(), dev); err != nil {
+						// Apply timeout from config to rip job
+						timeout := time.Duration(cfg.MakeMKV.TimeoutMinutes) * time.Minute
+						if timeout == 0 {
+							timeout = 120 * time.Minute // Default 2 hours
+						}
+						ripCtx, cancel := context.WithTimeout(ctx, timeout)
+						defer cancel()
+
+						if err := svc.RipDisc(ripCtx, dev); err != nil {
 							fmt.Fprintf(os.Stderr, "Rip failed for %s: %v\n", dev, err)
 						}
 					}(device)
