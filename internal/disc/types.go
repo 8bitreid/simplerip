@@ -26,17 +26,17 @@ func (d DiscType) String() string {
 
 // MKVTitle is a single title as reported by `makemkvcon -r info`.
 type MKVTitle struct {
-	Index          int
-	Name           string
-	Duration       time.Duration
-	ChapterCount   int
+	Index           int
+	Name            string
+	Duration        time.Duration
+	ChapterCount    int
 	AudioTrackCount int
 	// SizeGB is the estimated output size in gigabytes; 0 means not reported.
-	SizeGB         float64
+	SizeGB float64
 	// SourceFileName is the source segment map reported by makemkvcon.
 	SourceFileName string
 	// AngleNumber is the camera angle number for multi-angle discs; 0 means not an angle.
-	AngleNumber    int
+	AngleNumber int
 }
 
 // ClassifiedDisc is the result of scanning + classifying titles on a disc.

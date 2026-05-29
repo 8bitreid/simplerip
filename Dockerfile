@@ -1,5 +1,5 @@
 # ── Stage 1: build the simplerip Go binary ──────────────────────────────────
-FROM golang:1.22-alpine AS gobuilder
+FROM golang:1.25-alpine AS gobuilder
 
 WORKDIR /src
 
@@ -99,3 +99,4 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
+CMD ["serve"]

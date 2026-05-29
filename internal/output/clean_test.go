@@ -203,10 +203,10 @@ func TestFlattenSubdirs(t *testing.T) {
 
 func TestRenameToTitle(t *testing.T) {
 	tests := []struct {
-		name      string
-		folder    string
-		fileName  string
-		wantPath  string
+		name     string
+		folder   string
+		fileName string
+		wantPath string
 	}{
 		{name: "basic rename", folder: "Oppenheimer (2023)", fileName: "title.mkv", wantPath: filepath.Join("Oppenheimer (2023)", "Oppenheimer (2023).mkv")},
 		{name: "spaces preserved", folder: "Blade Runner (1982)", fileName: "movie.mkv", wantPath: filepath.Join("Blade Runner (1982)", "Blade Runner (1982).mkv")},
@@ -236,11 +236,11 @@ func TestRenameToTitle(t *testing.T) {
 
 func TestExecuteDedupe(t *testing.T) {
 	tests := []struct {
-		name       string
-		makeFiles  func(t *testing.T, dir string) CleanAnalysis
-		wantMoved  []string
-		wantKept   string
-		wantErr    string
+		name      string
+		makeFiles func(t *testing.T, dir string) CleanAnalysis
+		wantMoved []string
+		wantKept  string
+		wantErr   string
 	}{
 		{
 			name: "moves duplicates into _duplicates",
@@ -274,7 +274,7 @@ func TestExecuteDedupe(t *testing.T) {
 					t.Fatal(err)
 				}
 				return CleanAnalysis{
-					Keeper: FileReport{Path: keeper},
+					Keeper:     FileReport{Path: keeper},
 					Duplicates: []FileReport{{Path: filepath.Join(dir, "missing.mkv")}},
 				}
 			},
@@ -316,10 +316,10 @@ func TestExecuteDedupe(t *testing.T) {
 
 func TestVerifyFileAndWriteLog(t *testing.T) {
 	tests := []struct {
-		name       string
-		setup      func(t *testing.T, dir string) (src, dst string)
-		wantErr    string
-		writeLog   bool
+		name     string
+		setup    func(t *testing.T, dir string) (src, dst string)
+		wantErr  string
+		writeLog bool
 	}{
 		{
 			name: "verify file ok",

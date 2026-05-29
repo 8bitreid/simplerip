@@ -24,7 +24,7 @@ func postCallback(t *testing.T, handler http.Handler, resp server.Response) *htt
 }
 
 func TestAwaitReceivesResponse(t *testing.T) {
-	s := server.New(0) // port 0 — we'll use httptest directly via ServeHTTP
+	s := server.NewCallbackServer(0) // port 0 — we'll use httptest directly via ServeHTTP
 	ready, err := s.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestAwaitReceivesResponse(t *testing.T) {
 }
 
 func TestAwaitTimeout(t *testing.T) {
-	s := server.New(0)
+	s := server.NewCallbackServer(0)
 	ready, err := s.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestAwaitTimeout(t *testing.T) {
 }
 
 func TestCallbackUnknownJob(t *testing.T) {
-	s := server.New(0)
+	s := server.NewCallbackServer(0)
 	ready, err := s.Start()
 	if err != nil {
 		t.Fatal(err)

@@ -8,20 +8,20 @@ import (
 
 // MovieDetails is the merged result from TMDB + OMDb.
 type MovieDetails struct {
-	TMDbID    int
-	ImdbID    string
-	Title     string
-	Year      string
-	Director  string
-	Actors    string
-	Genre     string
+	TMDbID     int
+	ImdbID     string
+	Title      string
+	Year       string
+	Director   string
+	Actors     string
+	Genre      string
 	ImdbRating string
-	RTRating  string
+	RTRating   string
 
 	// Runtime from each source and the reconciled value used for edition matching.
-	TMDbRuntime     int // minutes
-	OMDbRuntime     int // minutes
-	RuntimeMinutes  int // reconciled: average if sources agree, flagged if they diverge
+	TMDbRuntime     int  // minutes
+	OMDbRuntime     int  // minutes
+	RuntimeMinutes  int  // reconciled: average if sources agree, flagged if they diverge
 	RuntimeConflict bool // true if TMDB and OMDb differ by more than 3 min
 }
 
@@ -74,11 +74,11 @@ func Enrich(ctx context.Context, tmdbClient *Client, omdbClient *OMDbClient, res
 	if omdbClient != nil && detail.ImdbID != "" {
 		omdb, err := omdbClient.GetByIMDbID(ctx, detail.ImdbID)
 		if err == nil {
-			d.Director   = omdb.Director
-			d.Actors     = omdb.Actors
-			d.Genre      = omdb.Genre
+			d.Director = omdb.Director
+			d.Actors = omdb.Actors
+			d.Genre = omdb.Genre
 			d.ImdbRating = omdb.ImdbRating
-			d.RTRating   = omdb.RottenTomatoes()
+			d.RTRating = omdb.RottenTomatoes()
 			d.OMDbRuntime = omdb.RuntimeMinutes()
 
 			// Reconcile runtimes.

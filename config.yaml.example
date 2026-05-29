@@ -48,6 +48,12 @@ notification:
   # Port that simplerip's HTTP server listens on for n8n callbacks.
   callback_port: 8090
 
+# ── HTTP Server ──────────────────────────────────────────────────────────────
+server:
+  # Port for the HTTP server with WebSocket progress streaming.
+  # The web UI is available at http://localhost:{port}/
+  port: 8080
+
 # ── MakeMKV ──────────────────────────────────────────────────────────────────
 makemkv:
   # MakeMKV licence key: Set via MAKEMKV_KEY environment variable

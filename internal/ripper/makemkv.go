@@ -43,14 +43,14 @@ import (
 //	1 = Stream type text ("Video", "Audio", "Subtitles")
 
 const (
-	attrName        = 2
-	attrChapters    = 8
-	attrDuration    = 9
-	attrSourceFile  = 27
-	attrSizeBytes   = 11
-	attrDiscName    = 30
-	attrTitleDesc   = 30
-	attrStreamType  = 1
+	attrName       = 2
+	attrChapters   = 8
+	attrDuration   = 9
+	attrSourceFile = 27
+	attrSizeBytes  = 11
+	attrDiscName   = 30
+	attrTitleDesc  = 30
+	attrStreamType = 1
 )
 
 // writeKey ensures the MakeMKV licence key is present in ~/.MakeMKV/settings.conf.

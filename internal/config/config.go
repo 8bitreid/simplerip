@@ -11,6 +11,7 @@ type Config struct {
 	Detection    DetectionConfig    `yaml:"detection"`
 	Output       OutputConfig       `yaml:"output"`
 	Notification NotificationConfig `yaml:"notification"`
+	Server       ServerConfig       `yaml:"server"`
 	MakeMKV      MakeMKVConfig      `yaml:"makemkv"`
 	Metadata     MetadataConfig     `yaml:"metadata"`
 }
@@ -32,6 +33,10 @@ type NotificationConfig struct {
 	WebhookURL         string `yaml:"webhook_url"`
 	ResponseTimeoutMin int    `yaml:"response_timeout_minutes"`
 	CallbackPort       int    `yaml:"callback_port"`
+}
+
+type ServerConfig struct {
+	Port int `yaml:"port"`
 }
 
 type MakeMKVConfig struct {
@@ -90,6 +95,9 @@ func defaults() Config {
 		Notification: NotificationConfig{
 			ResponseTimeoutMin: 30,
 			CallbackPort:       8090,
+		},
+		Server: ServerConfig{
+			Port: 8080,
 		},
 		MakeMKV: MakeMKVConfig{
 			TimeoutMinutes: 120,

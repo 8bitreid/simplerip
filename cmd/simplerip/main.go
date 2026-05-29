@@ -19,6 +19,7 @@ import (
 	"github.com/8bitreid/simplerip/internal/metadata"
 	"github.com/8bitreid/simplerip/internal/output"
 	"github.com/8bitreid/simplerip/internal/ripper"
+	"github.com/8bitreid/simplerip/internal/server"
 	"github.com/8bitreid/simplerip/internal/service"
 )
 
@@ -54,7 +55,7 @@ func init() {
 	cleanCmd.Flags().Bool("dry-run", false,
 		"show what would happen without moving or renaming anything")
 
-	rootCmd.AddCommand(scanCmd, ripCmd, cleanCmd, versionCmd)
+	rootCmd.AddCommand(scanCmd, ripCmd, cleanCmd, serveCmd, versionCmd)
 }
 
 // ── root (full rip pipeline) ──────────────────────────────────────────────
@@ -225,6 +226,78 @@ Exits with code 3 on timeout (distinct from other errors).`,
 
 // ── version ───────────────────────────────────────────────────────────────
 
+var serveCmd = &cobra.Command{
+	Use:   "serve",
+	Short: "Start the HTTP server with WebSocket progress streaming",
+	Long: `Starts the HTTP server on the configured port (default 8080).
+
+The server provides:
+  - Web UI at /
+  - WebSocket progress stream at /ws/progress
+  - JSON status endpoint at /api/status
+
+The server will stream real-time progress updates for any active rip jobs.
+
+If optical devices are configured in makemkv.devices, the server will
+automatically poll for disc insertion and start ripping when a disc is detected.`,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		svc := service.New(cfg)
+		srv := server.New(svc)
+
+		port := cfg.Server.Port
+		if port == 0 {
+			port = 8080
+		}
+
+		// Start disc polling if devices are configured
+		if len(cfg.MakeMKV.Devices) > 0 {
+			// Use command context so polling stops on cancellation
+			ctx := cmd.Context()
+			discCh := disc.Poll(ctx, cfg.MakeMKV.Devices, 5*time.Second)
+
+			// Handle detected discs in background
+			go func() {
+				for device := range discCh {
+					fmt.Fprintf(os.Stderr, "Disc detected on %s, starting rip...\n", device)
+					go func(dev string) {
+						// Apply timeout from config to rip job
+						timeout := time.Duration(cfg.MakeMKV.TimeoutMinutes) * time.Minute
+						if timeout == 0 {
+							timeout = 120 * time.Minute // Default 2 hours
+						}
+						ripCtx, cancel := context.WithTimeout(ctx, timeout)
+						defer cancel()
+
+						if err := svc.RipDisc(ripCtx, dev); err != nil {
+							fmt.Fprintf(os.Stderr, "Rip failed for %s: %v\n", dev, err)
+						}
+					}(device)
+				}
+			}()
+
+			fmt.Fprintf(os.Stderr, "Polling devices: %v (interval: 5s)\n", cfg.MakeMKV.Devices)
+		}
+
+		fmt.Fprintf(os.Stderr, "Starting HTTP server on port %d...\n", port)
+		fmt.Fprintf(os.Stderr, "Web UI: http://localhost:%d/\n", port)
+		fmt.Fprintf(os.Stderr, "WebSocket: ws://localhost:%d/ws/progress\n", port)
+
+		if err := srv.Start(port); err != nil {
+			return fmt.Errorf("serve: %w", err)
+		}
+
+		return nil
+	},
+}
+
+// ── version ───────────────────────────────────────────────────────────────
+
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the simplerip version",
@@ -254,6 +327,7 @@ func loadConfig() (*config.Config, error) {
 	}
 	return cfg, nil
 }
+
 // titleJSON is the JSON shape for a single disc title.
 type titleJSON struct {
 	Index        int     `json:"index"`
@@ -296,8 +370,6 @@ func fmtDuration(d time.Duration) string {
 func roundGB(gb float64) float64 {
 	return float64(int(gb*100+0.5)) / 100
 }
-
-
 
 // ── clean ─────────────────────────────────────────────────────────────────
 
@@ -554,5 +626,3 @@ func formatBytes(b int64) string {
 	const gb = 1024 * 1024 * 1024
 	return fmt.Sprintf("%.2f GB", float64(b)/float64(gb))
 }
-
-

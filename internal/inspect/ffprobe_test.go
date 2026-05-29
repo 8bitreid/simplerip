@@ -27,10 +27,10 @@ func installFakeFFProbe(t *testing.T, jsonOut string, fail bool) {
 
 func TestAudioTrackDisplayAndString(t *testing.T) {
 	tests := []struct {
-		name         string
-		track        AudioTrack
-		wantDisplay  string
-		wantString   string
+		name        string
+		track       AudioTrack
+		wantDisplay string
+		wantString  string
 	}{
 		{name: "dts profile", track: AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Layout: "5.1", Language: "eng"}, wantDisplay: "DTS-HD MA", wantString: "DTS-HD MA 5.1 (eng)"},
 		{name: "truehd", track: AudioTrack{Codec: "truehd", Layout: "7.1", Language: "eng"}, wantDisplay: "TrueHD", wantString: "TrueHD 7.1 (eng)"},

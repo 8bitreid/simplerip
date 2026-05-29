@@ -104,7 +104,7 @@ func Score(info *FileInfo, sizeBytes int64) QualityScore {
 
 	// Size tiebreaker — normalise to 0–5 range (avoids swamping codec score).
 	// We use GB units: every 10 GB = 1 point, capped at 5.
-	sizePoints := int(sizeBytes/(10*1024*1024*1024))
+	sizePoints := int(sizeBytes / (10 * 1024 * 1024 * 1024))
 	if sizePoints > 5 {
 		sizePoints = 5
 	}

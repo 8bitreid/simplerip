@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,11 +23,71 @@ import (
 	"github.com/8bitreid/simplerip/internal/ripper"
 )
 
+// ProgressEvent represents a state update during the rip process.
+type ProgressEvent struct {
+	Stage   string `json:"stage"`   // scanning, ripping, delivering, done, idle, error
+	Title   string `json:"title"`   // e.g. "Revenge of the Sith"
+	Percent int    `json:"percent"` // 0-100
+	Message string `json:"message"` // human-readable status message
+}
+
+// EventBus is a simple channel-based fan-out for broadcasting progress events.
+// Subscribers receive events on their individual channels.
+type EventBus struct {
+	mu          sync.RWMutex
+	subscribers map[int]chan ProgressEvent
+	nextID      int
+}
+
+// NewEventBus creates a new EventBus ready for use.
+func NewEventBus() *EventBus {
+	return &EventBus{
+		subscribers: make(map[int]chan ProgressEvent),
+	}
+}
+
+// Subscribe returns a channel that receives all future events.
+// The caller must call Unsubscribe when done to avoid memory leaks.
+func (bus *EventBus) Subscribe() (id int, ch <-chan ProgressEvent) {
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	id = bus.nextID
+	bus.nextID++
+	c := make(chan ProgressEvent, 10) // buffered to prevent blocking
+	bus.subscribers[id] = c
+	return id, c
+}
+
+// Unsubscribe removes a subscriber and closes its channel.
+func (bus *EventBus) Unsubscribe(id int) {
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	if ch, ok := bus.subscribers[id]; ok {
+		close(ch)
+		delete(bus.subscribers, id)
+	}
+}
+
+// Emit sends an event to all active subscribers.
+// Non-blocking — if a subscriber's channel is full, the event is dropped for that subscriber.
+func (bus *EventBus) Emit(event ProgressEvent) {
+	bus.mu.RLock()
+	defer bus.mu.RUnlock()
+	for _, ch := range bus.subscribers {
+		select {
+		case ch <- event:
+		default:
+			// Drop event if subscriber is slow
+		}
+	}
+}
+
 // RipService orchestrates disc scanning, ripping, and delivery workflows.
 // It is stateless and contains no CLI dependencies — all I/O is explicit.
 type RipService struct {
-	cfg    *config.Config
-	notify *notify.Client
+	cfg      *config.Config
+	notify   *notify.Client
+	eventBus *EventBus
 }
 
 var (
@@ -38,9 +99,15 @@ var (
 // The notification client is initialized from cfg.Notification.WebhookURL.
 func New(cfg *config.Config) *RipService {
 	return &RipService{
-		cfg:    cfg,
-		notify: notify.NewClient(cfg.Notification.WebhookURL),
+		cfg:      cfg,
+		notify:   notify.NewClient(cfg.Notification.WebhookURL),
+		eventBus: NewEventBus(),
 	}
+}
+
+// EventBus returns the service's EventBus for subscribing to progress updates.
+func (s *RipService) EventBus() *EventBus {
+	return s.eventBus
 }
 
 // ScanDisc scans a physical disc device and classifies its titles.
@@ -70,8 +137,21 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 // Returns an error if scan/rip/delivery steps fail. Notification is best-effort.
 func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	// Step 1: Scan and classify.
+	s.eventBus.Emit(ProgressEvent{
+		Stage:   "scanning",
+		Title:   "",
+		Percent: 0,
+		Message: fmt.Sprintf("Scanning disc in %s", device),
+	})
+
 	scanned, err := ripper.ScanInfo(ctx, "makemkvcon", device, s.cfg.MakeMKV.Key)
 	if err != nil {
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "error",
+			Title:   "",
+			Percent: 0,
+			Message: fmt.Sprintf("Scan failed: %v", err),
+		})
 		return fmt.Errorf("scan device %q: %w", device, err)
 	}
 	result := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
@@ -80,6 +160,12 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	// In daemon mode, we always rip MainTitles immediately.
 	// For now, skip extras — future enhancement will integrate Discord callbacks.
 	if len(result.MainTitles) == 0 {
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "error",
+			Title:   "",
+			Percent: 0,
+			Message: "No main titles found on disc",
+		})
 		return fmt.Errorf("no main titles found on disc %q", device)
 	}
 
@@ -89,17 +175,38 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		stagingDir = "/tmp/simplerip-staging"
 	}
 	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "error",
+			Title:   "",
+			Percent: 0,
+			Message: fmt.Sprintf("Failed to create staging dir: %v", err),
+		})
 		return fmt.Errorf("create staging dir: %w", err)
 	}
 
 	jobID := fmt.Sprintf("rip-%d", time.Now().UnixNano())
 	ripOutputDir := filepath.Join(stagingDir, jobID)
 	if err := os.MkdirAll(ripOutputDir, 0o755); err != nil {
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "error",
+			Title:   "",
+			Percent: 0,
+			Message: fmt.Sprintf("Failed to create output dir: %v", err),
+		})
 		return fmt.Errorf("create rip output dir: %w", err)
 	}
 
 	var rippedFiles []string
-	for _, title := range result.MainTitles {
+	totalTitles := len(result.MainTitles)
+	for idx, title := range result.MainTitles {
+		titleName := fmt.Sprintf("Title %d", title.Index)
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "ripping",
+			Title:   titleName,
+			Percent: (idx * 100) / totalTitles,
+			Message: fmt.Sprintf("Ripping title %d of %d", idx+1, totalTitles),
+		})
+
 		files, err := ripper.RipTitle(
 			ctx,
 			device,
@@ -109,18 +216,37 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			s.cfg.MakeMKV.TimeoutMinutes,
 		)
 		if err != nil {
+			s.eventBus.Emit(ProgressEvent{
+				Stage:   "error",
+				Title:   titleName,
+				Percent: (idx * 100) / totalTitles,
+				Message: fmt.Sprintf("Rip failed: %v", err),
+			})
 			return fmt.Errorf("rip title %d: %w", title.Index, err)
 		}
 		rippedFiles = append(rippedFiles, files...)
 	}
 
 	if len(rippedFiles) == 0 {
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "error",
+			Title:   "",
+			Percent: 0,
+			Message: "No files ripped from disc",
+		})
 		return fmt.Errorf("no files ripped from disc %q", device)
 	}
 
 	// Step 4: Deliver to NAS if configured.
 	destDir := s.cfg.Output.NASPath
 	if destDir != "" {
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "delivering",
+			Title:   "",
+			Percent: 90,
+			Message: "Delivering files to NAS",
+		})
+
 		// Deliver files to NAS using rsync.
 		// Use job ID as subdirectory name (future enhancement: TMDB-enriched names).
 		deliverResult, err := output.Deliver(
@@ -133,6 +259,12 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			device,        // disc name is device path for now
 		)
 		if err != nil {
+			s.eventBus.Emit(ProgressEvent{
+				Stage:   "error",
+				Title:   "",
+				Percent: 90,
+				Message: fmt.Sprintf("Delivery failed: %v", err),
+			})
 			return fmt.Errorf("deliver to NAS: %w", err)
 		}
 		// Update rippedFiles to point to destination paths for notification.
@@ -173,8 +305,21 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 
 	if err := s.notify.Send(ctx, payload); err != nil {
 		// Notification failure is not fatal — the rip succeeded.
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "done",
+			Title:   "",
+			Percent: 100,
+			Message: "Rip completed (notification failed)",
+		})
 		return nil
 	}
+
+	s.eventBus.Emit(ProgressEvent{
+		Stage:   "done",
+		Title:   "",
+		Percent: 100,
+		Message: "Rip completed successfully",
+	})
 
 	return nil
 }
