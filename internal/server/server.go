@@ -121,11 +121,21 @@ func (s *Server) handleProgressWS(c echo.Context) error {
 		return err
 	}
 
-	// Stream events until disconnect
-	for event := range eventCh {
-		if err := ws.WriteJSON(event); err != nil {
-			// Client disconnected
+	// Stream events until disconnect or shutdown
+	for {
+		select {
+		case <-s.ctx.Done():
+			// Server shutting down
 			return nil
+		case event, ok := <-eventCh:
+			if !ok {
+				// Channel closed
+				return nil
+			}
+			if err := ws.WriteJSON(event); err != nil {
+				// Client disconnected
+				return nil
+			}
 		}
 	}
 
@@ -154,10 +164,19 @@ func (s *Server) trackProgress() {
 // upgrader is the WebSocket upgrader with default options.
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		// Only allow same-origin by default for security.
+		// Allow same-origin requests for security.
 		// This prevents cross-site WebSocket hijacking.
-		// If you need cross-origin access, configure explicitly.
-		return r.Header.Get("Origin") == ""
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// Non-browser clients (e.g., curl, wscat)
+			return true
+		}
+		// Check if origin matches the request host
+		host := "http://" + r.Host
+		if r.TLS != nil {
+			host = "https://" + r.Host
+		}
+		return origin == host
 	},
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
