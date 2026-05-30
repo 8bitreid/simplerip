@@ -4,6 +4,7 @@ package disc
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -47,6 +48,7 @@ func checkDevices(ctx context.Context, devices []string, state map[string]bool, 
 
 		if hasDisc && !wasPresent {
 			// Disc newly inserted
+			fmt.Fprintf(os.Stderr, "Disc detected on %s, triggering rip...\n", device)
 			select {
 			case ch <- device:
 			case <-ctx.Done():
@@ -70,8 +72,8 @@ func SetMakemkvPathForTest(path string) {
 // checkDevice runs makemkvcon to check if a disc is present in the device.
 // Returns true if TCOUNT > 0, false otherwise (no disc, timeout, or error).
 func checkDevice(ctx context.Context, device string) bool {
-	// 5 second timeout for the check
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// 60 second timeout for the check (Blu-ray drives can be very slow to respond)
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, makemkvPath, "-r", "--cache=1", "info", "dev:"+device)

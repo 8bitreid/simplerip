@@ -87,13 +87,16 @@ COPY --from=gobuilder /simplerip /usr/local/bin/simplerip
 
 # makemkvcon binary and the makemkv shared library it links against.
 COPY --from=makemkv /usr/bin/makemkvcon        /usr/local/bin/makemkvcon
+COPY --from=makemkv /usr/bin/mmgplsrv          /usr/local/bin/mmgplsrv
+COPY --from=makemkv /usr/bin/mmccextr          /usr/local/bin/mmccextr
 COPY --from=makemkv /usr/lib/libdriveio.so.0   /usr/lib/libdriveio.so.0
 COPY --from=makemkv /usr/lib/libmakemkv.so.1   /usr/lib/libmakemkv.so.1
 COPY --from=makemkv /usr/lib/libmmbd.so.0      /usr/lib/libmmbd.so.0
-COPY --from=makemkv /usr/share/MakeMKV/        /usr/share/MakeMKV/
+COPY --from=makemkv /usr/share/MakeMKV         /usr/share/MakeMKV
 RUN ldconfig
 
 RUN mkdir -p /root/.MakeMKV
+RUN mkdir -p /staging && chmod 777 /staging
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

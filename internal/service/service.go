@@ -207,6 +207,16 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			Message: fmt.Sprintf("Ripping title %d of %d", idx+1, totalTitles),
 		})
 
+		// Create progress callback that emits to EventBus
+		progressCb := func(titleIdx int, percent int) {
+			s.eventBus.Emit(ProgressEvent{
+				Stage:   "ripping",
+				Title:   fmt.Sprintf("Title %d", titleIdx),
+				Percent: percent,
+				Message: fmt.Sprintf("Ripping title %d of %d (%d%%)", idx+1, totalTitles, percent),
+			})
+		}
+
 		files, err := ripper.RipTitle(
 			ctx,
 			device,
@@ -214,6 +224,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			ripOutputDir,
 			s.cfg.MakeMKV.Key,
 			s.cfg.MakeMKV.TimeoutMinutes,
+			progressCb,
 		)
 		if err != nil {
 			s.eventBus.Emit(ProgressEvent{

@@ -209,6 +209,7 @@ Exits with code 3 on timeout (distinct from other errors).`,
 			outputDir,
 			cfg.MakeMKV.Key,
 			cfg.MakeMKV.TimeoutMinutes,
+			nil, // No progress callback in CLI mode
 		)
 		if err != nil {
 			if errors.Is(err, ripper.ErrRipTimeout) {
