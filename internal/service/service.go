@@ -128,15 +128,19 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 }
 
 // RipDisc executes the full automated pipeline:
-//  1. Scan the disc and classify titles
-//  2. Rip main titles + extras (if configured to auto-rip)
-//  3. Deliver files to NAS via rsync
-//  4. Send Discord notification on completion
+//  1. Scan the disc with makemkvcon to get raw disc data (DiscName, titles, durations)
+//  2. Classify titles according to detection rules (TV/Movie/Ambiguous patterns)
+//  3. TMDB metadata lookup using DiscName (auto-selects best runtime match for daemon mode)
+//  4. Rip main titles with enriched metadata (progress shows actual movie title)
+//  5. Deliver files to NAS with proper folder naming (e.g. "Title (Year)/Title (Year).mkv")
+//  6. Clean up staging directory after successful delivery
+//  7. Send Discord notification on completion
 //
-// This method is intended for unattended daemon mode.
+// This method is intended for unattended daemon mode. TMDB lookup is optional — if
+// the API key is not configured or lookup fails, the raw DiscName is used instead.
 // Returns an error if scan/rip/delivery steps fail. Notification is best-effort.
 func (s *RipService) RipDisc(ctx context.Context, device string) error {
-	// Step 1: Scan and classify.
+	// Step 1: Scan disc.
 	s.eventBus.Emit(ProgressEvent{
 		Stage:   "scanning",
 		Title:   "",
@@ -154,9 +158,52 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		})
 		return fmt.Errorf("scan device %q: %w", device, err)
 	}
+
+	// Step 2: Classify titles.
 	result := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
 
-	// Step 2: Determine which titles to rip.
+	// Step 3: TMDB metadata lookup.
+	mediaTitle := scanned.DiscName
+	if s.cfg.Metadata.TMDBApiKey != "" && scanned.DiscName != "" {
+		s.eventBus.Emit(ProgressEvent{
+			Stage:   "scanning",
+			Title:   "",
+			Percent: 20,
+			Message: fmt.Sprintf("Looking up metadata for %q", scanned.DiscName),
+		})
+
+		query := metadata.QueryFromDirName(scanned.DiscName)
+		movies, err := s.SearchMovie(ctx, query)
+		if err == nil && len(movies) > 0 {
+			// Use runtime-based matching if we have a main title with duration.
+			var mainDuration time.Duration
+			if len(result.MainTitles) > 0 {
+				mainDuration = result.MainTitles[0].Duration
+			}
+
+			// Get TMDB client for BestMatch
+			tmdbClient := newTMDBClient(s.cfg.Metadata.TMDBApiKey)
+			chosen, runtimeWinner, logMsg, err := metadata.BestMatch(ctx, tmdbClient, movies, mainDuration)
+			if err == nil {
+				if runtimeWinner && logMsg != "" {
+					// Log runtime match override
+					fmt.Fprintln(os.Stderr, logMsg)
+				}
+				details, err := s.EnrichMovie(ctx, chosen)
+				if err == nil {
+					mediaTitle = details.FolderName()
+				}
+			} else {
+				// Fall back to first result if BestMatch fails
+				details, err := s.EnrichMovie(ctx, movies[0])
+				if err == nil {
+					mediaTitle = details.FolderName()
+				}
+			}
+		}
+	}
+
+	// Step 4: Determine which titles to rip.
 	// In daemon mode, we always rip MainTitles immediately.
 	// For now, skip extras — future enhancement will integrate Discord callbacks.
 	if len(result.MainTitles) == 0 {
@@ -169,7 +216,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		return fmt.Errorf("no main titles found on disc %q", device)
 	}
 
-	// Step 3: Rip each main title to staging.
+	// Step 5: Rip each main title to staging.
 	stagingDir := s.cfg.Output.StagingDir
 	if stagingDir == "" {
 		stagingDir = "/tmp/simplerip-staging"
@@ -199,13 +246,25 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	var rippedFiles []string
 	totalTitles := len(result.MainTitles)
 	for idx, title := range result.MainTitles {
-		titleName := fmt.Sprintf("Title %d", title.Index)
 		s.eventBus.Emit(ProgressEvent{
 			Stage:   "ripping",
-			Title:   titleName,
+			Title:   mediaTitle,
 			Percent: (idx * 100) / totalTitles,
-			Message: fmt.Sprintf("Ripping title %d of %d", idx+1, totalTitles),
+			Message: fmt.Sprintf("Ripping %s (title %d of %d)", mediaTitle, idx+1, totalTitles),
 		})
+
+		// Create progress callback that emits to EventBus, normalizing per-title
+		// progress (0-100) to overall progress across all titles.
+		titleIdx := idx // capture for closure
+		progressCb := func(_ int, percent int) {
+			overall := (titleIdx*100 + percent) / totalTitles
+			s.eventBus.Emit(ProgressEvent{
+				Stage:   "ripping",
+				Title:   mediaTitle,
+				Percent: overall,
+				Message: fmt.Sprintf("Ripping %s (%d%%)", mediaTitle, overall),
+			})
+		}
 
 		files, err := ripper.RipTitle(
 			ctx,
@@ -214,11 +273,13 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			ripOutputDir,
 			s.cfg.MakeMKV.Key,
 			s.cfg.MakeMKV.TimeoutMinutes,
+			s.cfg.MakeMKV.CacheMB,
+			progressCb,
 		)
 		if err != nil {
 			s.eventBus.Emit(ProgressEvent{
 				Stage:   "error",
-				Title:   titleName,
+				Title:   mediaTitle,
 				Percent: (idx * 100) / totalTitles,
 				Message: fmt.Sprintf("Rip failed: %v", err),
 			})
@@ -237,31 +298,30 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		return fmt.Errorf("no files ripped from disc %q", device)
 	}
 
-	// Step 4: Deliver to NAS if configured.
+	// Step 6: Deliver to NAS if configured.
 	destDir := s.cfg.Output.NASPath
 	if destDir != "" {
 		s.eventBus.Emit(ProgressEvent{
 			Stage:   "delivering",
-			Title:   "",
+			Title:   mediaTitle,
 			Percent: 90,
-			Message: "Delivering files to NAS",
+			Message: fmt.Sprintf("Delivering %s to NAS", mediaTitle),
 		})
 
-		// Deliver files to NAS using rsync.
-		// Use job ID as subdirectory name (future enhancement: TMDB-enriched names).
+		// Deliver files to NAS using proper folder name from metadata.
 		deliverResult, err := output.Deliver(
 			ctx,
 			rippedFiles,
 			ripOutputDir,
 			destDir,
-			jobID,
-			"Ripped Disc", // title placeholder
-			device,        // disc name is device path for now
+			mediaTitle,
+			mediaTitle,
+			scanned.DiscName,
 		)
 		if err != nil {
 			s.eventBus.Emit(ProgressEvent{
 				Stage:   "error",
-				Title:   "",
+				Title:   mediaTitle,
 				Percent: 90,
 				Message: fmt.Sprintf("Delivery failed: %v", err),
 			})
@@ -269,9 +329,28 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		}
 		// Update rippedFiles to point to destination paths for notification.
 		rippedFiles = deliverResult.Files
+
+		// Clean up staging directory after successful delivery.
+		// Deliver() has already verified all files exist at destination with matching sizes,
+		// so it's safe to delete the staging copies. Use cleaned paths and a strict prefix
+		// check (rather than a substring match) to guard against path traversal accidents.
+		cleanedRipDir := filepath.Clean(ripOutputDir)
+		cleanedStaging := filepath.Clean(stagingDir)
+		ripPrefix := cleanedStaging + string(filepath.Separator)
+		if cleanedRipDir != "" &&
+			cleanedRipDir != cleanedStaging &&
+			strings.HasPrefix(cleanedRipDir, ripPrefix) &&
+			strings.HasPrefix(filepath.Base(cleanedRipDir), "rip-") {
+			if err := os.RemoveAll(cleanedRipDir); err != nil {
+				// Log warning but don't fail — delivery succeeded.
+				fmt.Fprintf(os.Stderr, "Warning: failed to clean up staging dir %s: %v\n", cleanedRipDir, err)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: skipping cleanup, path validation failed: %s\n", cleanedRipDir)
+		}
 	}
 
-	// Step 5: Send completion notification.
+	// Step 7: Send completion notification.
 	// Build minimal metadata for Discord.
 	var media []notify.MKVMeta
 	for _, file := range rippedFiles {
@@ -296,8 +375,8 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 
 	payload := notify.RipCompletePayload(
 		jobID,
-		"Ripped Disc", // title placeholder — future enhancement can use TMDB lookup
-		device,
+		mediaTitle,
+		scanned.DiscName,
 		destDir,
 		rippedFiles,
 		media,

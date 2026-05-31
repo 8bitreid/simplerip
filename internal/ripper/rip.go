@@ -19,33 +19,48 @@ import (
 // Use errors.Is to detect it distinctly from other failures.
 var ErrRipTimeout = errors.New("makemkvcon: rip timed out")
 
+// ProgressCallback is called with percentage updates during ripping (0-100).
+type ProgressCallback func(titleIndex int, percent int)
+
 // RipTitle runs:
 //
-//	makemkvcon mkv --noscan -r --messages=-stdout --progress=-stdout
-//	             dev:<device> <title.Index> <outputDir>
+//	makemkvcon --cache=<cacheMB> --noscan -r --messages=-stdout --progress=-stdout
+//	             mkv dev:<device> <title.Index> <outputDir>
 //
 // key is exported to the subprocess as MAKEMKV_KEY so the licence is available
 // without being visible in the process list.
 //
 // Progress lines are logged to stdout as "title <index>: <pct>%".
+// If progressCb is non-nil, it is called with each percentage update.
 // On success the paths of *.mkv files written to outputDir are returned.
 // On deadline-exceeded ErrRipTimeout is returned (wrapping the error so
 // errors.Is works).
-func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir string, key string, timeoutMinutes int) ([]string, error) {
+func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir string, key string, timeoutMinutes int, cacheMB int, progressCb ProgressCallback) ([]string, error) {
 	timeout := time.Duration(timeoutMinutes) * time.Minute
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
 
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("create output dir: %w", err)
+	}
+
 	if err := writeKey(key); err != nil {
 		return nil, fmt.Errorf("write makemkv key: %w", err)
 	}
+
+	if cacheMB <= 0 {
+		cacheMB = 256 // default to 256 MB if not set or invalid
+	}
 	cmd := exec.CommandContext(ctx,
-		"makemkvcon", "mkv",
-		"--noscan", "-r",
+		"makemkvcon",
+		fmt.Sprintf("--cache=%d", cacheMB),
+		"--noscan",
+		"-r",
 		"--messages=-stdout",
 		"--progress=-stdout",
+		"mkv",
 		"dev:"+device,
 		strconv.Itoa(title.Index),
 		outputDir,
@@ -79,16 +94,21 @@ loop:
 			if !ok {
 				break loop
 			}
-			if !strings.HasPrefix(line, "PRGV:") {
-				continue
-			}
-			prog, ok := parsePRGV(line[len("PRGV:"):])
-			if !ok {
-				continue
-			}
-			if pct := prog.percent(); pct != lastPct {
-				lastPct = pct
-				fmt.Printf("title %d: %d%%\n", title.Index, pct)
+			if strings.HasPrefix(line, "PRGV:") {
+				prog, ok := parsePRGV(line[len("PRGV:"):])
+				if !ok {
+					continue
+				}
+				if pct := prog.percent(); pct != lastPct {
+					lastPct = pct
+					fmt.Printf("title %d: %d%%\n", title.Index, pct)
+					if progressCb != nil {
+						progressCb(title.Index, pct)
+					}
+				}
+			} else if strings.HasPrefix(line, "MSG:") {
+				// Log error and warning messages from makemkvcon
+				fmt.Fprintln(os.Stderr, line)
 			}
 		case <-ctx.Done():
 			break loop

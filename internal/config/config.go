@@ -42,6 +42,7 @@ type ServerConfig struct {
 type MakeMKVConfig struct {
 	Key            string   `yaml:"key"`
 	TimeoutMinutes int      `yaml:"timeout_minutes"`
+	CacheMB        int      `yaml:"cache_mb"`
 	Devices        []string `yaml:"devices"`
 }
 
@@ -101,6 +102,7 @@ func defaults() Config {
 		},
 		MakeMKV: MakeMKVConfig{
 			TimeoutMinutes: 120,
+			CacheMB:        256,
 		},
 		Metadata: MetadataConfig{
 			PreferredLanguage: "eng",

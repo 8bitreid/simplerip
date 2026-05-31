@@ -70,6 +70,7 @@ func installFakeMakeMKVCon(t *testing.T) {
 	binDir := t.TempDir()
 	script := filepath.Join(binDir, "makemkvcon")
 	content := `#!/bin/sh
+# Handle scan/info command: makemkvcon -r info dev:/dev/sr0
 if [ "$1" = "-r" ] && [ "$2" = "info" ]; then
 	if [ "$INFO_MODE" = "short" ]; then
 		cat <<'EOF'
@@ -92,7 +93,17 @@ EOF
 	exit 0
 fi
 
-if [ "$1" = "mkv" ]; then
+# Handle rip command: makemkvcon --cache=N --noscan -r --messages=-stdout --progress=-stdout mkv dev:/dev/sr0 <title> <outdir>
+# Check if "mkv" appears anywhere in the arguments
+found_mkv=0
+for arg in "$@"; do
+	if [ "$arg" = "mkv" ]; then
+		found_mkv=1
+		break
+	fi
+done
+
+if [ "$found_mkv" = "1" ]; then
 	for last; do :; done
 	outdir="$last"
 	printf 'PRGV:0,0,10000\n'
