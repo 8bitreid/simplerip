@@ -375,6 +375,8 @@ func roundGB(gb float64) float64 {
 
 // ── organize ──────────────────────────────────────────────────────────────
 
+const organizeErrFmt = "organize: %w"
+
 var organizeCmd = &cobra.Command{
 	Use:   "organize",
 	Short: "Identify, deduplicate, and rename MKVs to Title (Year) format",
@@ -395,7 +397,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 
 		absDir, err := filepath.Abs(dir)
 		if err != nil {
-			return fmt.Errorf("organize: %w", err)
+			return fmt.Errorf(organizeErrFmt, err)
 		}
 
 		cfg, err := loadConfig()
@@ -411,7 +413,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 
 		// ── Step 1: flatten extras/ into parent dir ─────────────────────────
 		if moved, err := output.FlattenSubdirs(absDir); err != nil {
-			return fmt.Errorf("organize: %w", err)
+			return fmt.Errorf(organizeErrFmt, err)
 		} else if len(moved) > 0 {
 			fmt.Fprintf(os.Stderr, "Flattened %d file(s) from extras/\n", len(moved))
 			for _, f := range moved {
@@ -423,7 +425,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		fmt.Fprintf(os.Stderr, "Scanning %s...\n", absDir)
 		analyses, err := output.AnalyzeDir(ctx, absDir)
 		if err != nil {
-			return fmt.Errorf("organize: %w", err)
+			return fmt.Errorf(organizeErrFmt, err)
 		}
 
 		var keptFile string
@@ -465,7 +467,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 
 			results, err := output.ExecuteDedupe(absDir, analyses)
 			if err != nil {
-				return fmt.Errorf("organize: %w", err)
+				return fmt.Errorf(organizeErrFmt, err)
 			}
 			for _, dup := range results[0].Duplicates {
 				fmt.Fprintf(os.Stderr, "Moved: %s → _duplicates/\n", filepath.Base(dup))
@@ -513,7 +515,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		fmt.Fprintf(os.Stderr, "\nSearching TMDB for %q...\n", searchQuery)
 		movies, err := svc.SearchMovie(ctx, searchQuery)
 		if err != nil {
-			return fmt.Errorf("organize: %w", err)
+			return fmt.Errorf(organizeErrFmt, err)
 		}
 
 		fmt.Fprintln(os.Stderr, "")
@@ -555,7 +557,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		fmt.Fprintln(os.Stderr, "\nFetching metadata...")
 		details, err := svc.EnrichMovie(ctx, chosen)
 		if err != nil {
-			return fmt.Errorf("organize: %w", err)
+			return fmt.Errorf(organizeErrFmt, err)
 		}
 
 		fmt.Fprintf(os.Stderr, "\n── Runtime cross-reference ──────────────────────────\n")
@@ -600,7 +602,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		plans := service.PlanRename(keepers, details, edition)
 		renamed, err := service.ExecuteRename(plans, baseDir)
 		if err != nil {
-			return fmt.Errorf("organize: %w", err)
+			return fmt.Errorf(organizeErrFmt, err)
 		}
 		for _, f := range renamed {
 			fmt.Printf("%s\n", f)
