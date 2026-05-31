@@ -189,17 +189,19 @@ func createMockMakemkv(t *testing.T, tcounts map[string][]int) string {
 	}
 
 	// Generate the mock script content
-	script := "#!/bin/bash\n"
+	script := "#!/bin/sh\n"
 	script += "set -e\n"
 	script += fmt.Sprintf("STATE_DIR=%q\n", stateDir)
 	script += `
 # Parse device from args
 DEVICE=""
 for arg in "$@"; do
-    if [[ "$arg" == dev:* ]]; then
-        DEVICE="${arg#dev:}"
-        break
-    fi
+    case "$arg" in
+        dev:*)
+            DEVICE="${arg#dev:}"
+            break
+            ;;
+    esac
 done
 
 if [ -z "$DEVICE" ]; then

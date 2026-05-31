@@ -7,10 +7,11 @@ services:
       - ./config.yaml:/config/config.yaml:ro
       - ./makemkv-config:/root/.MakeMKV
       - /tmp/staging:/staging
-      - /output:/output
+      - /mnt/nas-simplerip/Dev Movies:/output
     devices:
       - /dev/sr0:/dev/sr0
       - /dev/sr1:/dev/sr1
     privileged: true
+    user: root
     environment:
       - MAKEMKV_KEY=${MAKEMKV_KEY:-}

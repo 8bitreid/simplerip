@@ -15,10 +15,11 @@ const tmdbBase = "https://api.themoviedb.org/3"
 
 // MovieResult is a single TMDB search result.
 type MovieResult struct {
-	ID          int    `json:"id"`
-	Title       string `json:"title"`
-	ReleaseDate string `json:"release_date"` // "YYYY-MM-DD"
-	Overview    string `json:"overview"`
+	ID          int     `json:"id"`
+	Title       string  `json:"title"`
+	ReleaseDate string  `json:"release_date"` // "YYYY-MM-DD"
+	Overview    string  `json:"overview"`
+	Popularity  float64 `json:"popularity"`
 }
 
 // Year returns the four-digit release year, or "" if unavailable.

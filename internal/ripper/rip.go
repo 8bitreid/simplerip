@@ -24,8 +24,8 @@ type ProgressCallback func(titleIndex int, percent int)
 
 // RipTitle runs:
 //
-//	makemkvcon mkv --noscan -r --messages=-stdout --progress=-stdout
-//	             dev:<device> <title.Index> <outputDir>
+//	makemkvcon --cache=<cacheMB> --noscan -r --messages=-stdout --progress=-stdout
+//	             mkv dev:<device> <title.Index> <outputDir>
 //
 // key is exported to the subprocess as MAKEMKV_KEY so the licence is available
 // without being visible in the process list.
@@ -35,7 +35,7 @@ type ProgressCallback func(titleIndex int, percent int)
 // On success the paths of *.mkv files written to outputDir are returned.
 // On deadline-exceeded ErrRipTimeout is returned (wrapping the error so
 // errors.Is works).
-func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir string, key string, timeoutMinutes int, progressCb ProgressCallback) ([]string, error) {
+func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir string, key string, timeoutMinutes int, cacheMB int, progressCb ProgressCallback) ([]string, error) {
 	timeout := time.Duration(timeoutMinutes) * time.Minute
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -53,10 +53,13 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 		return nil, fmt.Errorf("write makemkv key: %w", err)
 	}
 	cmd := exec.CommandContext(ctx,
-		"makemkvcon", "mkv",
-		"--noscan", "-r",
+		"makemkvcon",
+		fmt.Sprintf("--cache=%d", cacheMB),
+		"--noscan",
+		"-r",
 		"--messages=-stdout",
 		"--progress=-stdout",
+		"mkv",
 		"dev:"+device,
 		strconv.Itoa(title.Index),
 		outputDir,

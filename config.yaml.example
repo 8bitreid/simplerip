@@ -64,6 +64,10 @@ makemkv:
   # Blu-ray rips typically take 20–60 min; 120 gives a comfortable margin.
   timeout_minutes: 120
 
+  # Read buffer size in MB. Larger values improve performance with slow or
+  # uneven disc reads. Default is 256. Increase for faster drives.
+  cache_mb: 256
+
   # Optical drives to monitor for disc insertions.
   devices:
     - /dev/sr0

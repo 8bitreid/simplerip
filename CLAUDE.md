@@ -9,7 +9,7 @@ all transcoding is delegated to Tdarr. SimpleRip's own logic covers:
 - Disc scanning and title classification
 - Duplicate detection and audio quality scoring
 - rsync delivery with size verification
-- Discord notifications via n8n (post-delivery only)
+- Notifications via webhook
 
 ## Key design decisions
 - MKV output is lossless and untouched — all video, audio, and subtitle
@@ -41,11 +41,18 @@ Rips a single title from a disc to an output directory.
 Flags: `-device`, `-title` (index), `-output`.
 Exits with code 3 on timeout (distinct from other errors).
 
-### clean
-Post-rip deduplication and rename workflow. Reads an already-ripped directory,
-removes duplicate MKVs (keeping the highest audio quality), looks up TMDB/OMDb
-metadata, and renames files to `Title (Year)/Title (Year).mkv`.
+### organize
+Post-rip deduplication and rename workflow for manual rips. Reads an already-ripped
+directory, removes duplicate MKVs (keeping the highest audio quality), looks up
+TMDB/OMDb metadata, and renames files to `Title (Year)/Title (Year).mkv`.
 Flags: `-dir` (required), `-query`, `-edition`, `-dry-run`, `-yes`.
+
+**Note:** The organize command is optional when using daemon mode (`simplerip serve`),
+as the automated pipeline performs TMDB lookup before ripping and delivers files
+with proper names immediately. Organize is primarily useful for:
+- Manual rips via `simplerip rip` command
+- Re-processing old rips from other tools
+- Correcting metadata after manual TMDB query override
 
 ## Title classification logic
 Scan all titles with `makemkvcon -r info` first, then:
@@ -72,7 +79,7 @@ rule 0.5, highest priority). The scan JSON output includes `multi_angle: true` a
 `angle_count: N` fields to indicate multi-angle disc structure.
 
 ## Duplicate detection and quality scoring
-`simplerip clean` groups MKVs by duration (±30s = same version), scores each by
+`simplerip organize` groups MKVs by duration (±30s = same version), scores each by
 audio quality, keeps the best, moves the rest to `_duplicates/`. A file with no
 English audio is disqualified entirely.
 
@@ -94,16 +101,25 @@ others get an `Alternate (Xmin)` label.
 search queries automatically, with progressive retry (drops last word until results
 are found).
 
-## n8n / Discord interaction model
-- SimpleRip POSTs a JSON payload to an n8n webhook when input is needed
-- n8n formats it as a Discord message with action buttons
-- User responds in Discord
-- n8n POSTs the response back to SimpleRip's HTTP server at :8090
-- SimpleRip holds a response channel per job with a configurable timeout
-  (default 30 min) — if no response, skip extras and continue
+## Webhook / Discord notification model
+SimpleRip POSTs JSON payloads to a configurable webhook URL (`notification.webhook_url`).
+This can be either:
+
+**Direct Discord webhook** (simple, one-way notifications):
+- Set `webhook_url` to your Discord webhook URL
+- Receives rip completion notifications with file metadata
+- No interactive features (extras, ambiguous disc handling)
+
+**n8n webhook** (interactive workflow):
+- Set `webhook_url` to your n8n webhook endpoint  
+- n8n formats payloads as Discord messages with action buttons
+- User responds in Discord for extras/ambiguous disc decisions
+- n8n POSTs response back to SimpleRip's HTTP server at :8090
+- SimpleRip holds a response channel per job with configurable timeout (default 30 min)
 - Job ID ties the callback to the right in-flight rip
-- Webhook payload includes full MKV metadata (codec, resolution, audio tracks,
-  size) so Discord displays it without a second lookup
+
+Webhook payload includes full MKV metadata (codec, resolution, audio tracks, size)
+so Discord displays it without a second lookup.
 
 ## Subprocess handling
 makemkvcon can hang (known Linux issue, especially with Blu-ray drives).
@@ -114,7 +130,7 @@ timeout from other failures. Progress lines (PRGV) are parsed and logged as
 
 ## Project structure
 ```
-cmd/simplerip/main.go          scan, rip, clean subcommands + entrypoint
+cmd/simplerip/main.go          scan, rip, organize subcommands + entrypoint
 internal/disc/types.go         DiscType enum, MKVTitle, ClassifiedDisc structs
 internal/ripper/makemkv.go     exec makemkvcon -r info, parse robot-mode stdout
 internal/ripper/rip.go         exec makemkvcon mkv, parse progress, return ErrRipTimeout
@@ -145,9 +161,9 @@ output:
   folder_format: "{{.Title}} ({{.Year}})"
 
 notification:
-  webhook_url: ""              # n8n webhook URL
-  response_timeout_minutes: 30
-  callback_port: 8090
+  webhook_url: ""              # Discord webhook URL or n8n endpoint
+  response_timeout_minutes: 30  # Only used with n8n interactive workflows
+  callback_port: 8090           # Only used with n8n interactive workflows
 
 makemkv:
   # key: use MAKEMKV_KEY env var instead
@@ -196,12 +212,53 @@ Optical drives passed through as devices (/dev/sr0, /dev/sr1).
 Requires cap_add: SYS_RAWIO for drive access.
 MAKEMKV_KEY set as environment variable.
 
+## Automated daemon workflow
+The daemon mode (`simplerip serve`) implements the full automated pipeline:
+
+1. **Disc detection** - Polls optical devices every 5 seconds for disc insertion
+2. **Scan** - Reads disc metadata (DiscName, titles, durations) via makemkvcon
+3. **TMDB lookup** - Searches for movie using DiscName, auto-selects first result
+4. **Classify** - Determines MainTitles vs Extras using duration patterns + multi-angle detection
+5. **Rip** - Executes makemkvcon with real-time progress (shows actual movie title in UI)
+6. **Deliver** - rsyncs files to NAS with proper folder structure: `Title (Year)/Title (Year).mkv`
+7. **Cleanup** - Removes staging directory after successful delivery
+8. **Notify** - Sends webhook notification (Discord direct or via n8n, if configured)
+
+Progress updates stream to the web UI via WebSocket at `ws://localhost:8080/ws/progress`.
+The UI displays the actual movie title during ripping (e.g. "Ripping Star Wars - Episode III
+- Revenge of the Sith (2005): 45%") instead of generic "title 0" labels.
+
+If TMDB API key is not configured or lookup fails, the raw DiscName is used for naming.
+The organize command is no longer required in the automated workflow — metadata enrichment
+happens before ripping so files are delivered with final names immediately.
+
 ## What still needs building
-- udev / polling disc detection (internal/disc/detect.go referenced but not built)
-- Daemon mode tying scan → rip → deliver → notify into a full automated pipeline
-- Integration between `rip` command and Discord extras flow (currently separate)
+- TV show episode detection and naming (TMDB API doesn't provide per-episode disc metadata)
+- Interactive extras selection workflow (Discord → n8n → SimpleRip callback integration)
+- Ambiguous disc handling workflow (requires n8n callback system)
 
 ## Recent fixes (May 2026)
+**Fixed duplicate rip detection (May 31, 2026):**
+The disc polling logic was re-triggering rips on the same disc after the first rip completed.
+Root cause: During active ripping, makemkvcon holds the drive exclusively. When Poll() ran
+`checkDevice()` while the drive was busy, the check would timeout/fail and update state to
+"no disc present". When the rip finished and the drive became available again, the disc
+appeared as "newly inserted" and triggered another rip.
+
+Fix: Modified `checkDevice()` to return `(hasDisc, ok)` tuple distinguishing between "no disc"
+and "check failed". When `ok=false` (drive busy, timeout, error), state is not updated,
+preventing false "disc removed" events during active rips. The same disc will only trigger
+one rip until it's physically removed and reinserted.
+
+**Automated workflow with TMDB integration (May 31, 2026):**
+Integrated TMDB metadata lookup into the automated daemon pipeline:
+- TMDB lookup now happens immediately after disc scan, before ripping
+- Movie title and year are resolved early and used throughout the pipeline
+- Progress updates show actual movie title instead of "title 0" labels
+- Files are delivered to NAS with proper folder names: `Title (Year)/Title (Year).mkv`
+- No separate "organize" step required for automated rips
+- Falls back to raw DiscName if TMDB API key not configured or lookup fails
+
 **makemkvcon v1.18.3 attribute ID corrections:**
 The makemkvcon robot-mode output format changed between versions. Fixed attribute ID
 mappings in `internal/ripper/makemkv.go`:
@@ -223,4 +280,5 @@ Added `detectMultiAngle()` in `internal/ripper/classify.go` that:
 **Test fixture updates:**
 Updated `testdata/movie.txt`, `testdata/tvshow.txt`, and added
 `testdata/missing-metadata.txt` to match makemkvcon v1.18.3 output format
-with corrected attribute positions.
+with corrected attribute positions. Fixed all test mock scripts to use `#!/bin/sh`
+instead of `#!/bin/bash` for Alpine Linux compatibility.

@@ -101,25 +101,25 @@ Start the disc-ripping daemon. Watches configured devices and rips automatically
 simplerip rip
 ```
 
-### `simplerip clean`
+### `simplerip organize`
 
-Deduplicate and rename an already-ripped directory. Useful for cleaning up multi-playlist Blu-ray artifacts (where makemkvcon produces several near-identical MKVs from the same disc).
+Identify, deduplicate, and rename MKVs to Title (Year) format. Useful for organizing multi-playlist Blu-ray artifacts (where makemkvcon produces several near-identical MKVs from the same disc).
 
 ```bash
-simplerip clean -dir /path/to/movie/dir [flags]
+simplerip organize -dir /path/to/movie/dir [flags]
 ```
 
 **Flags:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-dir` | required | Directory containing MKV files to clean |
+| `-dir` | required | Directory containing MKV files to organize |
 | `-query` | derived from dir name | Override the TMDB search query |
 | `-edition` | `""` | Label alternate cuts (e.g. `"Director's Cut"`) |
 | `-dry-run` | false | Show what would happen without moving files |
 | `-yes` | false | Skip confirmation prompts |
 
-**What clean does:**
+**What organize does:**
 
 1. **Flatten subdirs** — moves MKVs from any subdirectory (extras, bonus, etc.) up into the parent, then removes the now-empty subdirectory
 2. **Deduplicate** — groups files by duration (±30 s = same version), scores each group by audio quality, keeps the best, moves the rest to `_duplicates/`
@@ -130,9 +130,9 @@ simplerip clean -dir /path/to/movie/dir [flags]
 **Example:**
 
 ```bash
-simplerip clean -dir "/mnt/nas/Dev Movies/Pitch-Black (2000)"
-simplerip clean -dir "/mnt/nas/Dev Movies/Pitch-Black (2000)" -edition "Director's Cut" -yes
-simplerip clean -dir "/mnt/nas/Dev Movies/Pitch-Black (2000)" -dry-run
+simplerip organize -dir "/mnt/nas/Dev Movies/Pitch-Black (2000)"
+simplerip organize -dir "/mnt/nas/Dev Movies/Pitch-Black (2000)" -edition "Director's Cut" -yes
+simplerip organize -dir "/mnt/nas/Dev Movies/Pitch-Black (2000)" -dry-run
 ```
 
 ---
@@ -186,7 +186,7 @@ If no response is received within `response_timeout_minutes`, extras are skipped
 ## Project structure
 
 ```
-cmd/simplerip/main.go          daemon entrypoint + clean subcommand
+cmd/simplerip/main.go          daemon entrypoint + organize subcommand
 internal/disc/                 disc type detection
 internal/ripper/               makemkvcon wrapper + title classification
 internal/inspect/              ffprobe wrapper + quality scoring

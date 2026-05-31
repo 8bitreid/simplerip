@@ -49,7 +49,7 @@ exit 0
 	t.Logf("outDir: %s", outDir)
 
 	title := disc.MKVTitle{Index: 0, Name: "Inception"}
-	files, err := RipTitle(context.Background(), "/dev/sr0", title, outDir, "test-key", 2, nil)
+	files, err := RipTitle(context.Background(), "/dev/sr0", title, outDir, "test-key", 2, 256, nil)
 	if err != nil {
 		t.Fatalf("RipTitle returned error: %v", err)
 	}
@@ -79,7 +79,7 @@ exit 3
 	}
 	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
 
-	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 1}, outDir, "test-key", 1, nil)
+	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 1}, outDir, "test-key", 1, 256, nil)
 	if err == nil {
 		t.Fatal("expected RipTitle to fail")
 	}

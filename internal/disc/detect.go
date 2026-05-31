@@ -43,7 +43,14 @@ func Poll(ctx context.Context, devices []string, interval time.Duration) <-chan 
 // checkDevices polls each device and sends events for newly inserted discs.
 func checkDevices(ctx context.Context, devices []string, state map[string]bool, ch chan<- string) {
 	for _, device := range devices {
-		hasDisc := checkDevice(ctx, device)
+		hasDisc, ok := checkDevice(ctx, device)
+		
+		// If check failed (drive busy, timeout, error), don't update state.
+		// This prevents false "disc removed" events during active rips.
+		if !ok {
+			continue
+		}
+		
 		wasPresent := state[device]
 
 		if hasDisc && !wasPresent {
@@ -70,8 +77,10 @@ func SetMakemkvPathForTest(path string) {
 }
 
 // checkDevice runs makemkvcon to check if a disc is present in the device.
-// Returns true if TCOUNT > 0, false otherwise (no disc, timeout, or error).
-func checkDevice(ctx context.Context, device string) bool {
+// Returns (hasDisc=true, ok=true) if TCOUNT > 0.
+// Returns (hasDisc=false, ok=true) if TCOUNT == 0 (confirmed no disc).
+// Returns (hasDisc=false, ok=false) if check failed (timeout, error, drive busy).
+func checkDevice(ctx context.Context, device string) (hasDisc bool, ok bool) {
 	// 60 second timeout for the check (Blu-ray drives can be very slow to respond)
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -80,19 +89,21 @@ func checkDevice(ctx context.Context, device string) bool {
 	cmd.Stderr = nil // Suppress error output
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return false
+		return false, false
 	}
 
 	if err := cmd.Start(); err != nil {
-		return false
+		return false, false
 	}
 
 	// Parse output for TCOUNT line
 	scanner := bufio.NewScanner(stdout)
 	tcount := 0
+	foundTCOUNT := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "TCOUNT:") {
+			foundTCOUNT = true
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
 				if count, err := strconv.Atoi(parts[1]); err == nil {
@@ -104,9 +115,17 @@ func checkDevice(ctx context.Context, device string) bool {
 	}
 
 	// Wait for command to finish
-	_ = cmd.Wait()
+	if err := cmd.Wait(); err != nil {
+		// Command failed - might be drive busy, timeout, or error
+		return false, false
+	}
 
-	return tcount > 0
+	// If we didn't find TCOUNT line, treat as check failure
+	if !foundTCOUNT {
+		return false, false
+	}
+
+	return tcount > 0, true
 }
 
 // init allows tests to override the makemkvcon binary path.

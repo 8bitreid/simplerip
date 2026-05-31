@@ -48,14 +48,14 @@ func init() {
 	ripCmd.Flags().Int("title", 0, "title index to rip (from scan output)")
 	ripCmd.Flags().String("output", "", "directory to write .mkv files into")
 
-	cleanCmd.Flags().String("dir", "", "directory containing MKV files to clean")
-	cleanCmd.Flags().String("query", "", "TMDB search query (defaults to directory name)")
-	cleanCmd.Flags().String("edition", "", `edition label for alternate cuts (e.g. "Director's Cut")`)
-	cleanCmd.Flags().Bool("yes", false, "skip confirmation prompts (TMDB selection only)")
-	cleanCmd.Flags().Bool("dry-run", false,
+	organizeCmd.Flags().String("dir", "", "directory containing MKV files to organize")
+	organizeCmd.Flags().String("query", "", "TMDB search query (defaults to directory name)")
+	organizeCmd.Flags().String("edition", "", `edition label for alternate cuts (e.g. "Director's Cut")`)
+	organizeCmd.Flags().Bool("yes", false, "skip confirmation prompts (TMDB selection only)")
+	organizeCmd.Flags().Bool("dry-run", false,
 		"show what would happen without moving or renaming anything")
 
-	rootCmd.AddCommand(scanCmd, ripCmd, cleanCmd, serveCmd, versionCmd)
+	rootCmd.AddCommand(scanCmd, ripCmd, organizeCmd, serveCmd, versionCmd)
 }
 
 // ── root (full rip pipeline) ──────────────────────────────────────────────
@@ -209,6 +209,7 @@ Exits with code 3 on timeout (distinct from other errors).`,
 			outputDir,
 			cfg.MakeMKV.Key,
 			cfg.MakeMKV.TimeoutMinutes,
+			cfg.MakeMKV.CacheMB,
 			nil, // No progress callback in CLI mode
 		)
 		if err != nil {
@@ -372,11 +373,11 @@ func roundGB(gb float64) float64 {
 	return float64(int(gb*100+0.5)) / 100
 }
 
-// ── clean ─────────────────────────────────────────────────────────────────
+// ── organize ──────────────────────────────────────────────────────────────
 
-var cleanCmd = &cobra.Command{
-	Use:   "clean",
-	Short: "Deduplicate and rename MKVs in a staging directory",
+var organizeCmd = &cobra.Command{
+	Use:   "organize",
+	Short: "Identify, deduplicate, and rename MKVs to Title (Year) format",
 	Long: `Reads an already-ripped directory, removes duplicate MKVs (keeping the
 highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 "Title (Year)/Title (Year).mkv".`,
@@ -389,12 +390,12 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 		if dir == "" {
-			return fmt.Errorf("clean: --dir is required")
+			return fmt.Errorf("organize: --dir is required")
 		}
 
 		absDir, err := filepath.Abs(dir)
 		if err != nil {
-			return fmt.Errorf("clean: %w", err)
+			return fmt.Errorf("organize: %w", err)
 		}
 
 		cfg, err := loadConfig()
@@ -402,7 +403,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 			return err
 		}
 		if cfg.Metadata.TMDBApiKey == "" {
-			return fmt.Errorf("clean: metadata.tmdb_api_key not set in config")
+			return fmt.Errorf("organize: metadata.tmdb_api_key not set in config")
 		}
 		svc := service.New(cfg)
 		ctx := context.Background()
@@ -410,7 +411,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 
 		// ── Step 1: flatten extras/ into parent dir ─────────────────────────
 		if moved, err := output.FlattenSubdirs(absDir); err != nil {
-			return fmt.Errorf("clean: %w", err)
+			return fmt.Errorf("organize: %w", err)
 		} else if len(moved) > 0 {
 			fmt.Fprintf(os.Stderr, "Flattened %d file(s) from extras/\n", len(moved))
 			for _, f := range moved {
@@ -422,14 +423,14 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		fmt.Fprintf(os.Stderr, "Scanning %s...\n", absDir)
 		analyses, err := output.AnalyzeDir(ctx, absDir)
 		if err != nil {
-			return fmt.Errorf("clean: %w", err)
+			return fmt.Errorf("organize: %w", err)
 		}
 
 		var keptFile string
 		if len(analyses) == 0 {
 			matches, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
 			if len(matches) == 0 {
-				return fmt.Errorf("clean: no MKV files found in %q", absDir)
+				return fmt.Errorf("organize: no MKV files found in %q", absDir)
 			}
 			keptFile = matches[0]
 			fmt.Fprintf(os.Stderr, "No duplicates found. File: %s\n", filepath.Base(keptFile))
@@ -464,7 +465,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 
 			results, err := output.ExecuteDedupe(absDir, analyses)
 			if err != nil {
-				return fmt.Errorf("clean: %w", err)
+				return fmt.Errorf("organize: %w", err)
 			}
 			for _, dup := range results[0].Duplicates {
 				fmt.Fprintf(os.Stderr, "Moved: %s → _duplicates/\n", filepath.Base(dup))
@@ -493,7 +494,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		for _, p := range keepPaths {
 			info, err := inspect.Probe(ctx, p)
 			if err != nil {
-				return fmt.Errorf("clean: probe %q: %w", filepath.Base(p), err)
+				return fmt.Errorf("organize: probe %q: %w", filepath.Base(p), err)
 			}
 			keepers = append(keepers, service.RenameEntry{Path: p, Dur: info.Duration})
 			fmt.Fprintf(os.Stderr, "  %s  %d:%02d:%02d\n",
@@ -512,7 +513,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		fmt.Fprintf(os.Stderr, "\nSearching TMDB for %q...\n", searchQuery)
 		movies, err := svc.SearchMovie(ctx, searchQuery)
 		if err != nil {
-			return fmt.Errorf("clean: %w", err)
+			return fmt.Errorf("organize: %w", err)
 		}
 
 		fmt.Fprintln(os.Stderr, "")
@@ -521,9 +522,23 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		}
 
 		var chosen metadata.MovieResult
+		var runtimeOverride bool
+		var logMsg string
 		if yes {
-			chosen = movies[0]
-			fmt.Fprintf(os.Stderr, "\nAuto-selecting [1] %s (%s)\n", chosen.Title, chosen.Year())
+			// Use runtime-based matching with the kept file's duration
+			tmdbClient := metadata.NewClient(cfg.Metadata.TMDBApiKey)
+			var mainDuration time.Duration
+			if len(keepers) > 0 {
+				mainDuration = keepers[0].Dur
+			}
+			chosen, runtimeOverride, logMsg, err = metadata.BestMatch(ctx, tmdbClient, movies, mainDuration)
+			if err != nil {
+				// Fall back to first result
+				chosen = movies[0]
+			} else if runtimeOverride && logMsg != "" {
+				fmt.Fprintf(os.Stderr, "\n%s\n", logMsg)
+			}
+			fmt.Fprintf(os.Stderr, "\nAuto-selecting: %s (%s)\n", chosen.Title, chosen.Year())
 		} else {
 			fmt.Fprint(os.Stderr, "\nSelect [1]: ")
 			stdin.Scan()
@@ -531,7 +546,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 			idx := 1
 			if input != "" {
 				if _, err := fmt.Sscanf(input, "%d", &idx); err != nil || idx < 1 || idx > len(movies) {
-					return fmt.Errorf("clean: invalid selection %q", input)
+					return fmt.Errorf("organize: invalid selection %q", input)
 				}
 			}
 			chosen = movies[idx-1]
@@ -540,7 +555,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		fmt.Fprintln(os.Stderr, "\nFetching metadata...")
 		details, err := svc.EnrichMovie(ctx, chosen)
 		if err != nil {
-			return fmt.Errorf("clean: %w", err)
+			return fmt.Errorf("organize: %w", err)
 		}
 
 		fmt.Fprintf(os.Stderr, "\n── Runtime cross-reference ──────────────────────────\n")
@@ -585,7 +600,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		plans := service.PlanRename(keepers, details, edition)
 		renamed, err := service.ExecuteRename(plans, baseDir)
 		if err != nil {
-			return fmt.Errorf("clean: %w", err)
+			return fmt.Errorf("organize: %w", err)
 		}
 		for _, f := range renamed {
 			fmt.Printf("%s\n", f)
