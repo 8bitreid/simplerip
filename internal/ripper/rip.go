@@ -42,11 +42,8 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 
 	start := time.Now()
 
-	if err := os.MkdirAll(outputDir, 0777); err != nil {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
-	}
-	if err := os.Chmod(outputDir, 0777); err != nil {
-		return nil, fmt.Errorf("chmod output dir: %w", err)
 	}
 
 	if err := writeKey(key); err != nil {
