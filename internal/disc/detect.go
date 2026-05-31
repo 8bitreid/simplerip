@@ -4,7 +4,6 @@ package disc
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -17,6 +16,8 @@ import (
 // When a disc is newly inserted, the device path is sent on the returned channel.
 // The same disc will not fire twice until it's been removed and reinserted.
 // Context cancellation stops the poll loop cleanly and closes the channel.
+// The per-device check timeout equals the poll interval, keeping total check
+// time bounded to interval × device count.
 func Poll(ctx context.Context, devices []string, interval time.Duration) <-chan string {
 	ch := make(chan string)
 	go func() {
@@ -26,14 +27,14 @@ func Poll(ctx context.Context, devices []string, interval time.Duration) <-chan 
 		defer ticker.Stop()
 
 		// Initial check before first tick
-		checkDevices(ctx, devices, state, ch)
+		checkDevices(ctx, devices, state, ch, interval)
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				checkDevices(ctx, devices, state, ch)
+				checkDevices(ctx, devices, state, ch, interval)
 			}
 		}
 	}()
@@ -41,9 +42,9 @@ func Poll(ctx context.Context, devices []string, interval time.Duration) <-chan 
 }
 
 // checkDevices polls each device and sends events for newly inserted discs.
-func checkDevices(ctx context.Context, devices []string, state map[string]bool, ch chan<- string) {
+func checkDevices(ctx context.Context, devices []string, state map[string]bool, ch chan<- string, timeout time.Duration) {
 	for _, device := range devices {
-		hasDisc, ok := checkDevice(ctx, device)
+		hasDisc, ok := checkDevice(ctx, device, timeout)
 		
 		// If check failed (drive busy, timeout, error), don't update state.
 		// This prevents false "disc removed" events during active rips.
@@ -55,7 +56,6 @@ func checkDevices(ctx context.Context, devices []string, state map[string]bool, 
 
 		if hasDisc && !wasPresent {
 			// Disc newly inserted
-			fmt.Fprintf(os.Stderr, "Disc detected on %s, triggering rip...\n", device)
 			select {
 			case ch <- device:
 			case <-ctx.Done():
@@ -80,9 +80,8 @@ func SetMakemkvPathForTest(path string) {
 // Returns (hasDisc=true, ok=true) if TCOUNT > 0.
 // Returns (hasDisc=false, ok=true) if TCOUNT == 0 (confirmed no disc).
 // Returns (hasDisc=false, ok=false) if check failed (timeout, error, drive busy).
-func checkDevice(ctx context.Context, device string) (hasDisc bool, ok bool) {
-	// 60 second timeout for the check (Blu-ray drives can be very slow to respond)
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+func checkDevice(ctx context.Context, device string, timeout time.Duration) (hasDisc bool, ok bool) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, makemkvPath, "-r", "--cache=1", "info", "dev:"+device)

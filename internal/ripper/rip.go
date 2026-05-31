@@ -49,6 +49,10 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 	if err := writeKey(key); err != nil {
 		return nil, fmt.Errorf("write makemkv key: %w", err)
 	}
+
+	if cacheMB <= 0 {
+		cacheMB = 256 // default to 256 MB if not set or invalid
+	}
 	cmd := exec.CommandContext(ctx,
 		"makemkvcon",
 		fmt.Sprintf("--cache=%d", cacheMB),

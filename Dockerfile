@@ -96,7 +96,7 @@ COPY --from=makemkv /usr/share/MakeMKV         /usr/share/MakeMKV
 RUN ldconfig
 
 RUN mkdir -p /root/.MakeMKV
-RUN mkdir -p /staging && chmod 777 /staging
+RUN mkdir -p /staging && chmod 755 /staging
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

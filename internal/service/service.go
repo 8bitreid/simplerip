@@ -129,8 +129,8 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 
 // RipDisc executes the full automated pipeline:
 //  1. Scan the disc with makemkvcon to get raw disc data (DiscName, titles, durations)
-//  2. TMDB metadata lookup using DiscName (auto-selects first result for daemon mode)
-//  3. Classify titles according to detection rules (TV/Movie/Ambiguous patterns)
+//  2. Classify titles according to detection rules (TV/Movie/Ambiguous patterns)
+//  3. TMDB metadata lookup using DiscName (auto-selects best runtime match for daemon mode)
 //  4. Rip main titles with enriched metadata (progress shows actual movie title)
 //  5. Deliver files to NAS with proper folder naming (e.g. "Title (Year)/Title (Year).mkv")
 //  6. Clean up staging directory after successful delivery
@@ -187,7 +187,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			if err == nil {
 				if runtimeWinner && logMsg != "" {
 					// Log runtime match override
-					fmt.Println(logMsg)
+					fmt.Fprintln(os.Stderr, logMsg)
 				}
 				details, err := s.EnrichMovie(ctx, chosen)
 				if err == nil {
@@ -253,13 +253,16 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			Message: fmt.Sprintf("Ripping %s (title %d of %d)", mediaTitle, idx+1, totalTitles),
 		})
 
-		// Create progress callback that emits to EventBus
-		progressCb := func(titleIdx int, percent int) {
+		// Create progress callback that emits to EventBus, normalizing per-title
+		// progress (0-100) to overall progress across all titles.
+		titleIdx := idx // capture for closure
+		progressCb := func(_ int, percent int) {
+			overall := (titleIdx*100 + percent) / totalTitles
 			s.eventBus.Emit(ProgressEvent{
 				Stage:   "ripping",
 				Title:   mediaTitle,
-				Percent: percent,
-				Message: fmt.Sprintf("Ripping %s (%d%%)", mediaTitle, percent),
+				Percent: overall,
+				Message: fmt.Sprintf("Ripping %s (%d%%)", mediaTitle, overall),
 			})
 		}
 
@@ -329,16 +332,21 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 
 		// Clean up staging directory after successful delivery.
 		// Deliver() has already verified all files exist at destination with matching sizes,
-		// so it's safe to delete the staging copies. Add safety checks to prevent accidents.
-		if ripOutputDir != "" && ripOutputDir != stagingDir && 
-		   filepath.Dir(ripOutputDir) == stagingDir && 
-		   strings.Contains(filepath.Base(ripOutputDir), "rip-") {
-			if err := os.RemoveAll(ripOutputDir); err != nil {
+		// so it's safe to delete the staging copies. Use cleaned paths and a strict prefix
+		// check (rather than a substring match) to guard against path traversal accidents.
+		cleanedRipDir := filepath.Clean(ripOutputDir)
+		cleanedStaging := filepath.Clean(stagingDir)
+		ripPrefix := cleanedStaging + string(filepath.Separator)
+		if cleanedRipDir != "" &&
+			cleanedRipDir != cleanedStaging &&
+			strings.HasPrefix(cleanedRipDir, ripPrefix) &&
+			strings.HasPrefix(filepath.Base(cleanedRipDir), "rip-") {
+			if err := os.RemoveAll(cleanedRipDir); err != nil {
 				// Log warning but don't fail — delivery succeeded.
-				fmt.Fprintf(os.Stderr, "Warning: failed to clean up staging dir %s: %v\n", ripOutputDir, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to clean up staging dir %s: %v\n", cleanedRipDir, err)
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "Warning: skipping cleanup, path validation failed: %s\n", ripOutputDir)
+			fmt.Fprintf(os.Stderr, "Warning: skipping cleanup, path validation failed: %s\n", cleanedRipDir)
 		}
 	}
 

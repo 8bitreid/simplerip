@@ -204,19 +204,28 @@ func BestMatch(ctx context.Context, tmdbClient *Client, results []MovieResult, d
 		return MovieResult{}, false, "", fmt.Errorf("no results to score")
 	}
 
-	// Fetch runtime for each result and score it
+	// The first search result is the popularity winner (TMDB sorts by relevance/popularity).
+	popularityWinner := results[0]
+
+	// Score each result. When discDuration == 0, scoring uses popularity only and
+	// fetching full movie details is unnecessary — all needed data is already in
+	// MovieResult.Popularity from the search response.
 	var scored []ScoredResult
 	for _, r := range results {
-		detail, err := tmdbClient.GetMovie(ctx, r.ID)
-		if err != nil {
-			// Skip results we can't fetch details for
-			continue
+		var tmdbRuntime int
+		if discDuration != 0 {
+			detail, err := tmdbClient.GetMovie(ctx, r.ID)
+			if err != nil {
+				// Skip results we can't fetch details for
+				continue
+			}
+			tmdbRuntime = detail.Runtime
 		}
-		score := ScoreResult(r, discDuration, detail.Runtime)
+		score := ScoreResult(r, discDuration, tmdbRuntime)
 		scored = append(scored, ScoredResult{
 			Result:      r,
 			Score:       score,
-			TMDBRuntime: detail.Runtime,
+			TMDBRuntime: tmdbRuntime,
 		})
 	}
 
@@ -232,15 +241,25 @@ func BestMatch(ctx context.Context, tmdbClient *Client, results []MovieResult, d
 		}
 	}
 
-	// Check if runtime winner differs from popularity winner (first result)
-	runtimeWinner := best.Result.ID != scored[0].Result.ID
+	// Check if runtime winner differs from the original popularity winner (results[0]).
+	// Using results[0] rather than scored[0] is correct: scored may skip entries when
+	// GetMovie fails, so scored[0] is not necessarily the top search result.
+	runtimeWinner := best.Result.ID != popularityWinner.ID
 
 	// Build log message if runtime winner differs from popularity winner
 	logMsg := ""
 	if runtimeWinner {
+		// Find popularity winner's runtime from scored results (if we fetched it)
+		popWinnerRuntime := 0
+		for _, s := range scored {
+			if s.Result.ID == popularityWinner.ID {
+				popWinnerRuntime = s.TMDBRuntime
+				break
+			}
+		}
 		logMsg = fmt.Sprintf("runtime match: %s (%s) %dmin — overrides top result: %s (%s) %dmin",
 			best.Result.Title, best.Result.Year(), best.TMDBRuntime,
-			scored[0].Result.Title, scored[0].Result.Year(), scored[0].TMDBRuntime)
+			popularityWinner.Title, popularityWinner.Year(), popWinnerRuntime)
 	}
 
 	return best.Result, runtimeWinner, logMsg, nil
