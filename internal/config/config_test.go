@@ -36,6 +36,10 @@ notification:
 makemkv:
   key: BETA_KEY_ABCDEF
   timeout_minutes: 180
+  cache_mb: 768
+  read_error_limit: 140
+  no_progress_minutes: 20
+  max_rip_retries: 2
   devices:
     - /dev/sr0
     - /dev/sr1
@@ -83,6 +87,18 @@ metadata:
 	if cfg.MakeMKV.TimeoutMinutes != 180 {
 		t.Errorf("TimeoutMinutes = %d, want 180", cfg.MakeMKV.TimeoutMinutes)
 	}
+	if cfg.MakeMKV.CacheMB != 768 {
+		t.Errorf("CacheMB = %d, want 768", cfg.MakeMKV.CacheMB)
+	}
+	if cfg.MakeMKV.ReadErrorLimit != 140 {
+		t.Errorf("ReadErrorLimit = %d, want 140", cfg.MakeMKV.ReadErrorLimit)
+	}
+	if cfg.MakeMKV.NoProgressMin != 20 {
+		t.Errorf("NoProgressMin = %d, want 20", cfg.MakeMKV.NoProgressMin)
+	}
+	if cfg.MakeMKV.MaxRipRetries != 2 {
+		t.Errorf("MaxRipRetries = %d, want 2", cfg.MakeMKV.MaxRipRetries)
+	}
 	if len(cfg.MakeMKV.Devices) != 2 || cfg.MakeMKV.Devices[0] != "/dev/sr0" {
 		t.Errorf("Devices = %v", cfg.MakeMKV.Devices)
 	}
@@ -127,6 +143,18 @@ output:
 	}
 	if cfg.MakeMKV.TimeoutMinutes != 120 {
 		t.Errorf("default TimeoutMinutes = %d, want 120", cfg.MakeMKV.TimeoutMinutes)
+	}
+	if cfg.MakeMKV.CacheMB != 0 {
+		t.Errorf("default CacheMB = %d, want 0 (auto)", cfg.MakeMKV.CacheMB)
+	}
+	if cfg.MakeMKV.ReadErrorLimit != 100 {
+		t.Errorf("default ReadErrorLimit = %d, want 100", cfg.MakeMKV.ReadErrorLimit)
+	}
+	if cfg.MakeMKV.NoProgressMin != 15 {
+		t.Errorf("default NoProgressMin = %d, want 15", cfg.MakeMKV.NoProgressMin)
+	}
+	if cfg.MakeMKV.MaxRipRetries != 1 {
+		t.Errorf("default MaxRipRetries = %d, want 1", cfg.MakeMKV.MaxRipRetries)
 	}
 	if cfg.Metadata.PreferredLanguage != "eng" {
 		t.Errorf("default PreferredLanguage = %q, want \"eng\"", cfg.Metadata.PreferredLanguage)
@@ -211,6 +239,9 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.MakeMKV.TimeoutMinutes != 120 {
 		t.Fatalf("TimeoutMinutes = %d, want 120", cfg.MakeMKV.TimeoutMinutes)
+	}
+	if cfg.MakeMKV.CacheMB != 0 || cfg.MakeMKV.ReadErrorLimit != 100 || cfg.MakeMKV.NoProgressMin != 15 || cfg.MakeMKV.MaxRipRetries != 1 {
+		t.Fatalf("unexpected makemkv defaults: %+v", cfg.MakeMKV)
 	}
 	if cfg.Metadata.PreferredLanguage != "eng" {
 		t.Fatalf("PreferredLanguage = %q, want %q", cfg.Metadata.PreferredLanguage, "eng")

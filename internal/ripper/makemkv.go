@@ -40,23 +40,36 @@ import (
 //
 // Attribute IDs for SINFO:
 //
-//	1 = Stream type text ("Video", "Audio", "Subtitles")
+//	1  = Stream type text ("Video", "Audio", "Subtitles")
+//	5  = Short codec tag ("A_TRUEHD", "A_DTS", etc.)
+//	6  = Long codec name ("DTS-HD Master Audio", etc.)
+//	19 = Audio layout ("7.1", "5.1", "stereo")
+//	28 = ISO language code ("eng", "fra", etc.)
 
 const (
-	attrName       = 2
-	attrChapters   = 8
-	attrDuration   = 9
-	attrSourceFile = 27
-	attrSizeBytes  = 11
-	attrDiscName   = 30
-	attrTitleDesc  = 30
-	attrStreamType = 1
+	tinfoName       = 2
+	tinfoChapters   = 8
+	tinfoDuration   = 9
+	tinfoSizeBytes  = 11
+	tinfoSourceFile = 27
+	tinfoDesc       = 30
+
+	cinfoDiscType = 1
+	cinfoDiscName = 30
+
+	sinfoStreamType  = 1
+	sinfoCodecName   = 5
+	sinfoCodecLong   = 6
+	sinfoAudioLayout = 19
+	sinfoLanguage    = 28
 )
 
-// writeKey ensures the MakeMKV licence key is present in ~/.MakeMKV/settings.conf.
-// If settings.conf already contains the key it is left untouched so that any
-// extra fields written by `makemkvcon reg` (sdf_Stop, etc.) are preserved.
-func writeKey(key string) error {
+// writeTunedConfig writes a performance-tuned ~/.MakeMKV/settings.conf.
+// It injects the licence key alongside hardware-optimisation parameters suited
+// for high-bitrate 4K UHD and Blu-ray ripping. If the file already contains
+// the exact key it is left untouched so that fields written by `makemkvcon reg`
+// (sdf_Stop, etc.) are preserved.
+func writeTunedConfig(key string) error {
 	if key == "" {
 		return nil
 	}
@@ -70,18 +83,31 @@ func writeKey(key string) error {
 		fmt.Fprintf(os.Stderr, "scan: key already in settings.conf, skipping write\n")
 		return nil
 	}
-	content := fmt.Sprintf("app_Key = %q\n", key)
+	content := fmt.Sprintf(
+		"# Advanced Hardware Optimization Profile\n"+
+			"app_Key = %q\n"+
+			"\n"+
+			"# Maximize RAM cache to handle high-bitrate 4K UHD and Blu-ray layer transitions smoothly\n"+
+			"io_MaxReadCacheMb = \"1024\"\n"+
+			"\n"+
+			"# Fail fast on scratched discs/bad sectors instead of letting the drive controller lock up indefinitely\n"+
+			"io_RetryCount = \"5\"\n"+
+			"\n"+
+			"# Enable internal Java support to accurately decode structural BD-J playlist obfuscation protections\n"+
+			"app_JavaType = \"internal\"\n",
+		key,
+	)
 	return os.WriteFile(conf, []byte(content), 0o600)
 }
 
 // ScanInfo runs `makemkvcon -r info dev:<device>` and returns the parsed titles.
 func ScanInfo(ctx context.Context, makemkvBin, device, key string) (*disc.ClassifiedDisc, error) {
-	fmt.Fprintf(os.Stderr, "scan: writing key to settings.conf (len=%d)\n", len(key))
-	if err := writeKey(key); err != nil {
-		return nil, fmt.Errorf("write makemkv key: %w", err)
+	fmt.Fprintf(os.Stderr, "scan: writing tuned config to settings.conf (len=%d)\n", len(key))
+	if err := writeTunedConfig(key); err != nil {
+		return nil, fmt.Errorf("write makemkv config: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "scan: running %s -r info dev:%s\n", makemkvBin, device)
-	cmd := exec.CommandContext(ctx, makemkvBin, "-r", "info", "dev:"+device)
+	cmd := exec.CommandContext(ctx, makemkvBin, "--cache=128", "-r", "info", "dev:"+device)
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -92,6 +118,13 @@ func ScanInfo(ctx context.Context, makemkvBin, device, key string) (*disc.Classi
 	}
 
 	result, parseErr := ScanInfoFromReader(io.TeeReader(stdout, os.Stderr), device)
+
+	if result.Type == disc.DiscTypeUnknown && device != "" {
+		if t := disc.ProbeDiscType(ctx, device); t != disc.DiscTypeUnknown {
+			fmt.Fprintf(os.Stderr, "scan: CINFO:1 absent, disc type from raw probe: %s\n", t)
+			result.Type = t
+		}
+	}
 
 	if werr := cmd.Wait(); werr != nil {
 		if ctx.Err() != nil {
@@ -118,7 +151,6 @@ func ScanInfoFromReader(r io.Reader, device string) (*disc.ClassifiedDisc, error
 func parseInfoOutput(r io.Reader) (*disc.ClassifiedDisc, error) {
 	result := &disc.ClassifiedDisc{}
 	titleMap := map[int]*disc.MKVTitle{}
-	audioCount := map[int]int{}
 
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -129,7 +161,7 @@ func parseInfoOutput(r io.Reader) (*disc.ClassifiedDisc, error) {
 		case strings.HasPrefix(line, "TINFO:"):
 			parseTitleInfo(line[len("TINFO:"):], titleMap)
 		case strings.HasPrefix(line, "SINFO:"):
-			parseStreamInfo(line[len("SINFO:"):], audioCount)
+			parseStreamInfo(line[len("SINFO:"):], titleMap)
 		case strings.HasPrefix(line, "MSG:"):
 			parseMsg(line[len("MSG:"):], result)
 		case strings.HasPrefix(line, "TCOUNT:"), strings.HasPrefix(line, "PRGV:"):
@@ -138,13 +170,6 @@ func parseInfoOutput(r io.Reader) (*disc.ClassifiedDisc, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return result, fmt.Errorf("reading makemkvcon output: %w", err)
-	}
-
-	// Copy audio counts into title structs before flattening.
-	for idx, count := range audioCount {
-		if t, ok := titleMap[idx]; ok {
-			t.AudioTrackCount = count
-		}
 	}
 
 	// Flatten titleMap into an ordered slice.
@@ -172,8 +197,17 @@ func parseDiscInfo(payload string, result *disc.ClassifiedDisc) {
 	if err != nil {
 		return
 	}
-	if attrID == attrDiscName {
+	if attrID == cinfoDiscName {
 		result.DiscName = unquote(parts[2])
+	}
+	if attrID == cinfoDiscType {
+		val := strings.ToLower(unquote(parts[2]))
+		switch {
+		case strings.Contains(val, "blu-ray"):
+			result.Type = disc.DiscTypeBluRay
+		case strings.Contains(val, "dvd"):
+			result.Type = disc.DiscTypeDVD
+		}
 	}
 }
 
@@ -200,23 +234,23 @@ func parseTitleInfo(payload string, titleMap map[int]*disc.MKVTitle) {
 	}
 
 	switch attrID {
-	case attrName:
+	case tinfoName:
 		t.Name = val
-	case attrChapters:
+	case tinfoChapters:
 		if n, err := strconv.Atoi(val); err == nil {
 			t.ChapterCount = n
 		}
-	case attrDuration:
+	case tinfoDuration:
 		if d, err := parseDuration(val); err == nil {
 			t.Duration = d
 		}
-	case attrSourceFile:
+	case tinfoSourceFile:
 		t.SourceFileName = val
-	case attrSizeBytes:
-		if b, err := strconv.ParseFloat(val, 64); err == nil {
-			t.SizeGB = b / (1024 * 1024 * 1024)
+	case tinfoSizeBytes:
+		if b, err := strconv.ParseInt(val, 10, 64); err == nil {
+			t.SizeGB = float64(b) / (1024 * 1024 * 1024)
 		}
-	case attrTitleDesc:
+	case tinfoDesc:
 		// Extract angle number from "(angle N)" in description
 		t.AngleNumber = parseAngleNumber(val)
 	}
@@ -224,8 +258,7 @@ func parseTitleInfo(payload string, titleMap map[int]*disc.MKVTitle) {
 
 // parseStreamInfo handles one SINFO payload (everything after "SINFO:").
 // Format: <titleIdx>,<streamIdx>,<attrID>,<code>,"<value>"
-// We only care about attrID 22 (stream type) to count audio tracks.
-func parseStreamInfo(payload string, audioCount map[int]int) {
+func parseStreamInfo(payload string, titleMap map[int]*disc.MKVTitle) {
 	parts := splitRobotLine(payload)
 	if len(parts) < 5 {
 		return
@@ -234,12 +267,41 @@ func parseStreamInfo(payload string, audioCount map[int]int) {
 	if err != nil {
 		return
 	}
+	streamIdx, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return
+	}
 	attrID, err := strconv.Atoi(parts[2])
 	if err != nil {
 		return
 	}
-	if attrID == attrStreamType && unquote(parts[4]) == "Audio" {
-		audioCount[titleIdx]++
+	val := unquote(parts[4])
+
+	t := titleMap[titleIdx]
+	if t == nil {
+		t = &disc.MKVTitle{Index: titleIdx}
+		titleMap[titleIdx] = t
+	}
+
+	for len(t.Tracks) <= streamIdx {
+		t.Tracks = append(t.Tracks, disc.Track{Index: len(t.Tracks)})
+	}
+
+	track := &t.Tracks[streamIdx]
+	switch attrID {
+	case sinfoStreamType:
+		track.Type = val
+		if val == "Audio" {
+			t.AudioTrackCount++
+		}
+	case sinfoCodecName:
+		track.CodecID = val
+	case sinfoCodecLong:
+		track.CodecLong = val
+	case sinfoAudioLayout:
+		track.AudioLayout = val
+	case sinfoLanguage:
+		track.Language = val
 	}
 }
 

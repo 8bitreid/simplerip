@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,8 +16,10 @@ import (
 	"time"
 
 	"github.com/8bitreid/simplerip/internal/config"
+	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/metadata"
 	"github.com/8bitreid/simplerip/internal/ripper"
+	"github.com/8bitreid/simplerip/internal/store"
 )
 
 type hostRewriteTransport struct {
@@ -70,8 +73,12 @@ func installFakeMakeMKVCon(t *testing.T) {
 	binDir := t.TempDir()
 	script := filepath.Join(binDir, "makemkvcon")
 	content := `#!/bin/sh
-# Handle scan/info command: makemkvcon -r info dev:/dev/sr0
-if [ "$1" = "-r" ] && [ "$2" = "info" ]; then
+# Handle scan/info command: makemkvcon [--cache=N] -r info dev:/dev/sr0
+found_info=0
+for arg in "$@"; do
+	if [ "$arg" = "info" ]; then found_info=1; break; fi
+done
+if [ "$found_info" = "1" ]; then
 	if [ "$INFO_MODE" = "short" ]; then
 		cat <<'EOF'
 CINFO:30,0,"TEST_DISC"
@@ -121,6 +128,59 @@ exit 1
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 }
 
+func installFakeMakeMKVConFailOnce(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "rip-once-marker")
+	script := filepath.Join(binDir, "makemkvcon")
+	content := `#!/bin/sh
+found_info=0
+for arg in "$@"; do
+	if [ "$arg" = "info" ]; then found_info=1; break; fi
+done
+if [ "$found_info" = "1" ]; then
+	cat <<'EOF'
+CINFO:30,0,"TEST_DISC"
+TCOUNT:1
+TINFO:0,2,0,"Main Feature"
+TINFO:0,8,0,"10"
+TINFO:0,9,0,"1:45:00"
+SINFO:0,0,1,6202,"Audio"
+EOF
+	exit 0
+fi
+
+found_mkv=0
+for arg in "$@"; do
+	if [ "$arg" = "mkv" ]; then
+		found_mkv=1
+		break
+	fi
+done
+
+if [ "$found_mkv" = "1" ]; then
+	if [ ! -f "` + marker + `" ]; then
+		touch "` + marker + `"
+		printf 'MSG:2003,0,3,"Read error"\n'
+		exit 1
+	fi
+	for last; do :; done
+	outdir="$last"
+	printf 'PRGV:0,0,10000\n'
+	printf 'PRGV:10000,10000,10000\n'
+	touch "$outdir/title_t00.mkv"
+	exit 0
+fi
+
+exit 1
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake makemkvcon fail-once: %v", err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+}
+
 func installFakeFFProbeForClean(t *testing.T) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -155,7 +215,7 @@ esac
 
 func TestRipService_ScanDisc_Movie(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	// Open the movie fixture.
 	fixturePath := filepath.Join("..", "..", "testdata", "movie.txt")
@@ -188,7 +248,7 @@ func TestRipService_ScanDisc_Movie(t *testing.T) {
 
 func TestRipService_ScanDisc_TV(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	// Open the TV show fixture.
 	fixturePath := filepath.Join("..", "..", "testdata", "tvshow.txt")
@@ -216,7 +276,7 @@ func TestRipService_ScanDisc_TV(t *testing.T) {
 
 func TestRipService_ScanDisc_MissingMetadata(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	// Open the missing metadata fixture.
 	fixturePath := filepath.Join("..", "..", "testdata", "missing-metadata.txt")
@@ -408,7 +468,7 @@ func findCrossDeviceDir(t *testing.T, srcDir string) (string, bool) {
 
 func TestEnrichMovie_NoAPIKey(t *testing.T) {
 	cfg := config.Defaults() // TMDBApiKey is empty
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	_, err := svc.EnrichMovie(context.Background(), metadata.MovieResult{ID: 1, Title: "Oppenheimer"})
 	if err == nil {
@@ -418,7 +478,7 @@ func TestEnrichMovie_NoAPIKey(t *testing.T) {
 
 func TestSearchMovie_NoAPIKey(t *testing.T) {
 	cfg := config.Defaults() // TMDBApiKey is empty
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	_, err := svc.SearchMovie(context.Background(), "Oppenheimer")
 	if err == nil {
@@ -431,7 +491,7 @@ func TestScanDiscWithFakeMakeMKV(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	result, err := svc.ScanDisc("/dev/sr0")
 	if err != nil {
@@ -453,7 +513,7 @@ func TestRipDiscWithFakeMakeMKV(t *testing.T) {
 	cfg.Output.StagingDir = t.TempDir()
 	cfg.Output.NASPath = ""
 
-	svc := New(cfg)
+	svc := New(cfg, nil)
 	if err := svc.RipDisc(context.Background(), "/dev/sr0"); err != nil {
 		t.Fatalf("RipDisc() error = %v", err)
 	}
@@ -472,16 +532,91 @@ func TestRipDiscNoMainTitles(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Output.StagingDir = t.TempDir()
 
-	svc := New(cfg)
+	svc := New(cfg, nil)
 	err := svc.RipDisc(context.Background(), "/dev/sr0")
 	if err == nil || !strings.Contains(err.Error(), "no main titles found") {
 		t.Fatalf("RipDisc() error = %v, want no-main-titles error", err)
 	}
 }
 
+func TestRipDiscRetriesThenSucceeds(t *testing.T) {
+	installFakeMakeMKVConFailOnce(t)
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = ""
+	cfg.MakeMKV.MaxRipRetries = 1
+
+	svc := New(cfg, nil)
+	if err := svc.RipDisc(context.Background(), "/dev/sr0"); err != nil {
+		t.Fatalf("RipDisc() error = %v", err)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(cfg.Output.StagingDir, "*", "*.mkv"))
+	if len(matches) == 0 {
+		t.Fatal("expected a ripped mkv file after retry")
+	}
+}
+
+func TestRipDiscRetryDisabledFails(t *testing.T) {
+	installFakeMakeMKVConFailOnce(t)
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = ""
+	cfg.MakeMKV.MaxRipRetries = 0
+
+	svc := New(cfg, nil)
+	err := svc.RipDisc(context.Background(), "/dev/sr0")
+	if err == nil {
+		t.Fatal("expected rip to fail with retries disabled")
+	}
+}
+
+func TestFindManualCorrection(t *testing.T) {
+	now := time.Now().UTC()
+	manualPayload, _ := json.Marshal(map[string]any{
+		"correction": true,
+		"title":      "Anne of Green Gables",
+		"year":       1985,
+	})
+
+	events := []store.JobEvent{
+		{Stage: "scan", CreatedAt: now.Add(-2 * time.Minute)},
+		{Stage: "identify", CreatedAt: now.Add(-1 * time.Minute), Data: manualPayload},
+	}
+
+	title, year, ok := findManualCorrection(events, now.Add(-90*time.Second))
+	if !ok {
+		t.Fatal("expected manual correction to be detected")
+	}
+	if title != "Anne of Green Gables" {
+		t.Fatalf("title = %q, want %q", title, "Anne of Green Gables")
+	}
+	if year != 1985 {
+		t.Fatalf("year = %d, want %d", year, 1985)
+	}
+}
+
+func TestPickLongest(t *testing.T) {
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 95 * time.Minute},
+		{Index: 1, Duration: 98 * time.Minute},
+		{Index: 2, Duration: 96 * time.Minute},
+	}
+
+	got, ok := pickLongest(titles)
+	if !ok {
+		t.Fatal("expected a title")
+	}
+	if got.Index != 1 {
+		t.Fatalf("picked index = %d, want %d", got.Index, 1)
+	}
+}
+
 func TestCleanDirNoMKVFiles(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	err := svc.CleanDir(t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "analyze dir") {
@@ -502,7 +637,7 @@ func TestCleanDirSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := New(config.Defaults())
+	svc := New(config.Defaults(), nil)
 	if err := svc.CleanDir(dir); err != nil {
 		t.Fatalf("CleanDir() error = %v", err)
 	}
@@ -587,7 +722,7 @@ func TestSearchMovie_RetryTable(t *testing.T) {
 
 			cfg := config.Defaults()
 			cfg.Metadata.TMDBApiKey = "tmdb-key"
-			svc := New(cfg)
+			svc := New(cfg, nil)
 
 			got, err := svc.SearchMovie(context.Background(), tc.input)
 			if tc.wantErr != "" {
@@ -687,7 +822,7 @@ func TestEnrichMovie_Table(t *testing.T) {
 			cfg := config.Defaults()
 			cfg.Metadata.TMDBApiKey = "tmdb-key"
 			cfg.Metadata.OMDbApiKey = tc.omdbKey
-			svc := New(cfg)
+			svc := New(cfg, nil)
 
 			got, err := svc.EnrichMovie(context.Background(), metadata.MovieResult{ID: 7, ReleaseDate: "2000-02-18"})
 			if tc.wantErr != "" {
@@ -928,7 +1063,7 @@ func TestQueryFromMKVPath(t *testing.T) {
 
 func TestNew(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	if svc == nil {
 		t.Fatal("New returned nil")

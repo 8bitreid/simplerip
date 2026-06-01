@@ -157,8 +157,8 @@ func TestWriteKey(t *testing.T) {
 	t.Setenv("HOME", tmp)
 
 	const key = "T-testkey123"
-	if err := writeKey(key); err != nil {
-		t.Fatalf("writeKey: %v", err)
+	if err := writeTunedConfig(key); err != nil {
+		t.Fatalf("writeTunedConfig: %v", err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(tmp, ".MakeMKV", "settings.conf"))
@@ -166,9 +166,11 @@ func TestWriteKey(t *testing.T) {
 		t.Fatalf("settings.conf not written: %v", err)
 	}
 	got := string(data)
-	want := `app_Key = "T-testkey123"` + "\n"
-	if got != want {
-		t.Errorf("settings.conf content:\ngot:  %q\nwant: %q", got, want)
+	if !strings.Contains(got, `app_Key = "T-testkey123"`) {
+		t.Errorf("settings.conf missing app_Key line:\n%s", got)
+	}
+	if !strings.Contains(got, `io_MaxReadCacheMb`) {
+		t.Errorf("settings.conf missing io_MaxReadCacheMb line:\n%s", got)
 	}
 }
 
@@ -176,8 +178,8 @@ func TestWriteKeyEmpty(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	if err := writeKey(""); err != nil {
-		t.Fatalf("writeKey empty: %v", err)
+	if err := writeTunedConfig(""); err != nil {
+		t.Fatalf("writeTunedConfig empty: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(tmp, ".MakeMKV", "settings.conf")); !os.IsNotExist(err) {
 		t.Error("settings.conf should not be written for empty key")

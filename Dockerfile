@@ -79,6 +79,7 @@ RUN apt-get update \
         libexpat1 \
         ffmpeg \
         rsync \
+        eject \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

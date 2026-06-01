@@ -1,6 +1,7 @@
 services:
   simplerip:
-    image: ghcr.io/8bitreid/simplerip:latest
+    build: .
+    image: simplerip:local
     ports:
       - "8080:8080"
     volumes:
@@ -15,3 +16,24 @@ services:
     user: root
     environment:
       - MAKEMKV_KEY=${MAKEMKV_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: simplerip
+      POSTGRES_USER: simplerip
+      POSTGRES_PASSWORD: simplerip
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simplerip -d simplerip"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

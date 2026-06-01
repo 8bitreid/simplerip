@@ -21,6 +21,7 @@ import (
 	"github.com/8bitreid/simplerip/internal/ripper"
 	"github.com/8bitreid/simplerip/internal/server"
 	"github.com/8bitreid/simplerip/internal/service"
+	"github.com/8bitreid/simplerip/internal/store"
 )
 
 const version = "0.1.0-dev"
@@ -82,7 +83,7 @@ Environment variables:
 		if err != nil {
 			return err
 		}
-		svc := service.New(cfg)
+		svc := service.New(cfg, nil)
 		fmt.Fprintf(os.Stderr, "Starting automated rip pipeline for %s...\n", device)
 		if err := svc.RipDisc(context.Background(), device); err != nil {
 			return fmt.Errorf("rip pipeline: %w", err)
@@ -114,7 +115,7 @@ Use --fixture to replay captured makemkvcon output without a physical disc.`,
 		if err != nil {
 			return err
 		}
-		svc := service.New(cfg)
+		svc := service.New(cfg, nil)
 
 		var result *ripper.ClassificationResult
 		if fixture != "" {
@@ -210,6 +211,8 @@ Exits with code 3 on timeout (distinct from other errors).`,
 			cfg.MakeMKV.Key,
 			cfg.MakeMKV.TimeoutMinutes,
 			cfg.MakeMKV.CacheMB,
+			cfg.MakeMKV.ReadErrorLimit,
+			cfg.MakeMKV.NoProgressMin,
 			nil, // No progress callback in CLI mode
 		)
 		if err != nil {
@@ -249,8 +252,17 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 			return err
 		}
 
-		svc := service.New(cfg)
-		srv := server.New(svc)
+		var st *store.Store
+		if cfg.Database.URL != "" {
+			var stErr error
+			st, stErr = store.New(cmd.Context(), cfg.Database.URL)
+			if stErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: database unavailable, running without persistence: %v\n", stErr)
+			}
+		}
+
+		svc := service.New(cfg, st)
+		srv := server.New(svc, st, cfg.MakeMKV.Devices)
 
 		port := cfg.Server.Port
 		if port == 0 {
@@ -261,13 +273,36 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 		if len(cfg.MakeMKV.Devices) > 0 {
 			// Use command context so polling stops on cancellation
 			ctx := cmd.Context()
-			discCh := disc.Poll(ctx, cfg.MakeMKV.Devices, 5*time.Second)
+			busyDevices := &disc.BusyDeviceTracker{}
+			discCh := disc.PollEventsWithBusy(ctx, cfg.MakeMKV.Devices, 5*time.Second, busyDevices.IsBusy)
 
-			// Handle detected discs in background
+			// Handle disc insertion/removal events in background.
 			go func() {
-				for device := range discCh {
-					fmt.Fprintf(os.Stderr, "Disc detected on %s, starting rip...\n", device)
+				for ev := range discCh {
+					if !ev.Present {
+						// Ignore removals for a device that's mid-rip — the disc
+						// hasn't really left; the busy drive just failed a probe.
+						if busyDevices.IsBusy(ev.Device) {
+							fmt.Fprintf(os.Stderr, "Ignoring disc-removed on %s: rip in progress\n", ev.Device)
+							continue
+						}
+						// Disc removed — reset the drive card to idle.
+						fmt.Fprintf(os.Stderr, "Disc removed from %s\n", ev.Device)
+						svc.MarkDeviceIdle(ev.Device)
+						continue
+					}
+
+					// Don't start a second rip on a device that's already ripping.
+					if busyDevices.IsBusy(ev.Device) {
+						fmt.Fprintf(os.Stderr, "Ignoring disc-detected on %s: rip already in progress\n", ev.Device)
+						continue
+					}
+					busyDevices.MarkBusy(ev.Device)
+
+					fmt.Fprintf(os.Stderr, "Disc detected on %s, starting rip...\n", ev.Device)
 					go func(dev string) {
+						defer busyDevices.MarkIdle(dev)
+
 						// Apply timeout from config to rip job
 						timeout := time.Duration(cfg.MakeMKV.TimeoutMinutes) * time.Minute
 						if timeout == 0 {
@@ -279,7 +314,7 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 						if err := svc.RipDisc(ripCtx, dev); err != nil {
 							fmt.Fprintf(os.Stderr, "Rip failed for %s: %v\n", dev, err)
 						}
-					}(device)
+					}(ev.Device)
 				}
 			}()
 
@@ -407,7 +442,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		if cfg.Metadata.TMDBApiKey == "" {
 			return fmt.Errorf("organize: metadata.tmdb_api_key not set in config")
 		}
-		svc := service.New(cfg)
+		svc := service.New(cfg, nil)
 		ctx := context.Background()
 		stdin := bufio.NewScanner(os.Stdin)
 

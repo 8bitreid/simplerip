@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -173,6 +174,154 @@ done:
 	if events["/dev/sr1"] != 1 {
 		t.Errorf("sr1: got %d events, want 1", events["/dev/sr1"])
 	}
+}
+
+func TestPollTreatsParsedTCOUNTAsSuccessEvenOnExitError(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockPath := filepath.Join(tmpDir, "mock-makemkvcon")
+	// checkDevice runs: makemkvcon -r --cache=1 info dev:/dev/sr0
+	// so the device argument is $4. A case pattern cannot contain unquoted
+	// spaces, so match on the device arg alone rather than the whole arg list.
+	script := `#!/bin/sh
+case "$4" in
+  dev:/dev/sr0)
+    echo 'TCOUNT:1'
+    exit 1
+    ;;
+esac
+echo 'TCOUNT:0'
+exit 0
+`
+	if err := os.WriteFile(mockPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	disc.SetMakemkvPathForTest(mockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	ch := disc.Poll(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+
+	select {
+	case device := <-ch:
+		if device != "/dev/sr0" {
+			t.Fatalf("got device %q, want /dev/sr0", device)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("timeout waiting for disc detection event")
+	}
+}
+
+// TestPollEventsReportsRemoval verifies that PollEvents emits a Present=false
+// event when a disc is removed, after the initial Present=true insertion.
+func TestPollEventsReportsRemoval(t *testing.T) {
+	mockPath := createMockMakemkv(t, map[string][]int{
+		"/dev/sr0": {1, 1, 0, 0}, // disc present, then removed
+	})
+	defer os.Remove(mockPath)
+
+	disc.SetMakemkvPathForTest(mockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	ch := disc.PollEvents(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+
+	// First: insertion.
+	select {
+	case ev := <-ch:
+		if ev.Device != "/dev/sr0" || !ev.Present {
+			t.Fatalf("first event = %+v, want {/dev/sr0 true}", ev)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for insertion event")
+	}
+
+	// Then: removal.
+	select {
+	case ev := <-ch:
+		if ev.Device != "/dev/sr0" || ev.Present {
+			t.Fatalf("second event = %+v, want {/dev/sr0 false}", ev)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for removal event")
+	}
+}
+
+func TestPollEventsWithBusySkipsProbeWhileActive(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockPath := filepath.Join(tmpDir, "mock-makemkvcon")
+	stateFile := filepath.Join(tmpDir, "calls.txt")
+
+	script := fmt.Sprintf(`#!/bin/sh
+COUNT=0
+if [ -f %q ]; then
+  COUNT=$(cat %q)
+fi
+COUNT=$((COUNT + 1))
+echo "$COUNT" > %q
+echo 'TCOUNT:1'
+exit 0
+`, stateFile, stateFile, stateFile)
+	if err := os.WriteFile(mockPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	disc.SetMakemkvPathForTest(mockPath)
+
+	var busy int32
+	isBusy := func(string) bool {
+		return atomic.LoadInt32(&busy) == 1
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ch := disc.PollEventsWithBusy(ctx, []string{"/dev/sr0"}, 100*time.Millisecond, isBusy)
+	defer func() {
+		cancel()
+		for range ch {
+		}
+	}()
+
+	// Initial probe should happen and emit insertion.
+	select {
+	case ev := <-ch:
+		if ev.Device != "/dev/sr0" || !ev.Present {
+			t.Fatalf("first event = %+v, want {/dev/sr0 true}", ev)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for initial insertion event")
+	}
+
+	atomic.StoreInt32(&busy, 1)
+	time.Sleep(300 * time.Millisecond)
+
+	callsDuringBusy := readCallCount(t, stateFile)
+	time.Sleep(300 * time.Millisecond)
+	if got := readCallCount(t, stateFile); got != callsDuringBusy {
+		t.Fatalf("probe count changed while busy: start=%d end=%d", callsDuringBusy, got)
+	}
+
+	// Clear busy flag and verify polling resumes.
+	atomic.StoreInt32(&busy, 0)
+	time.Sleep(300 * time.Millisecond)
+	if got := readCallCount(t, stateFile); got <= callsDuringBusy {
+		t.Fatalf("expected probes to resume after idle; busyCount=%d resumedCount=%d", callsDuringBusy, got)
+	}
+}
+
+func readCallCount(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read call count: %v", err)
+	}
+	s := string(data)
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		t.Fatalf("parse call count %q: %v", s, err)
+	}
+	return n
 }
 
 // createMockMakemkv creates a mock makemkvcon script that returns different

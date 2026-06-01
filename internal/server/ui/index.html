@@ -1,300 +1,848 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SimpleRip</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleRip</title>
+<style>
+:root {
+  --bg:           #0f1117;
+  --surface:      #1a1d27;
+  --surface2:     #252836;
+  --border:       #2d3148;
+  --text:         #e2e8f0;
+  --text-muted:   #8892a4;
+  --accent:       #6366f1;
+  --accent-hover: #818cf8;
+  --green:        #22c55e;
+  --yellow:       #f59e0b;
+  --red:          #ef4444;
+  --blue:         #3b82f6;
+  --radius:       8px;
+  --radius-sm:    4px;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg:           #f8fafc;
+    --surface:      #ffffff;
+    --surface2:     #f1f5f9;
+    --border:       #e2e8f0;
+    --text:         #1e293b;
+    --text-muted:   #64748b;
+    --accent:       #6366f1;
+    --accent-hover: #4f46e5;
+    --green:        #16a34a;
+    --yellow:       #d97706;
+    --red:          #dc2626;
+    --blue:         #2563eb;
+  }
+}
 
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: #1a1b26;
-            color: #c0caf5;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 2rem;
-        }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-        .container {
-            max-width: 800px;
-            width: 100%;
-        }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
 
-        header {
-            text-align: center;
-            margin-bottom: 3rem;
-        }
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px 16px 48px;
+}
 
-        h1 {
-            color: #7aa2f7;
-            font-size: 2.5rem;
-            font-weight: 300;
-            margin-bottom: 0.5rem;
-        }
+header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 24px;
+}
+header h1 {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
 
-        .subtitle {
-            color: #565f89;
-            font-size: 1rem;
-        }
+/* ── Drive grid ── */
 
-        .status-card {
-            background: #24283b;
-            border-radius: 12px;
-            padding: 2rem;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-            margin-bottom: 2rem;
-        }
+.drives-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+  margin-bottom: 28px;
+}
 
-        .status-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1.5rem;
-        }
+.drive-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
 
-        .stage {
-            font-size: 0.875rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            padding: 0.25rem 0.75rem;
-            border-radius: 6px;
-            font-weight: 600;
-        }
+.drive-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
 
-        .stage.idle { background: #565f89; color: #c0caf5; }
-        .stage.scanning { background: #7aa2f7; color: #1a1b26; }
-        .stage.ripping { background: #bb9af7; color: #1a1b26; }
-        .stage.delivering { background: #9ece6a; color: #1a1b26; }
-        .stage.done { background: #9ece6a; color: #1a1b26; }
-        .stage.error { background: #f7768e; color: #1a1b26; }
+.drive-device {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 
-        .title {
-            font-size: 1.5rem;
-            color: #c0caf5;
-            font-weight: 500;
-        }
+.drive-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
-        .message {
-            color: #a9b1d6;
-            font-size: 0.95rem;
-            margin-bottom: 1.5rem;
-            min-height: 1.5rem;
-        }
+.drive-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
-        .progress-container {
-            position: relative;
-            background: #1a1b26;
-            border-radius: 8px;
-            height: 32px;
-            overflow: hidden;
-        }
+.drive-idle {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 8px 0 4px;
+}
 
-        .progress-bar {
-            height: 100%;
-            background: linear-gradient(90deg, #7aa2f7 0%, #bb9af7 100%);
-            transition: width 0.3s ease;
-            display: flex;
-            align-items: center;
-            justify-content: flex-end;
-            padding-right: 1rem;
-        }
+/* ── Stage list ── */
 
-        .progress-text {
-            color: #1a1b26;
-            font-weight: 600;
-            font-size: 0.875rem;
-            position: absolute;
-            right: 1rem;
-            top: 50%;
-            transform: translateY(-50%);
-            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-        }
+.stages { display: flex; flex-direction: column; gap: 5px; }
 
-        .connection-status {
-            text-align: center;
-            padding: 1rem;
-            border-radius: 8px;
-            font-size: 0.875rem;
-            margin-bottom: 2rem;
-        }
+.stage-row {
+  display: grid;
+  grid-template-columns: 14px 68px 1fr 64px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
 
-        .connection-status.connected {
-            background: rgba(158, 206, 106, 0.1);
-            color: #9ece6a;
-        }
+.stage-icon { text-align: center; font-size: 10px; color: var(--text-muted); }
+.stage-icon.done  { color: var(--green); font-size: 11px; }
+.stage-icon.active { color: var(--accent); font-size: 12px; }
 
-        .connection-status.disconnected {
-            background: rgba(247, 118, 142, 0.1);
-            color: #f7768e;
-        }
+.stage-name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+.stage-name.active { color: var(--text); font-weight: 600; }
+.stage-name.done   { color: var(--green); }
 
-        .footer {
-            text-align: center;
-            color: #565f89;
-            font-size: 0.875rem;
-            margin-top: auto;
-            padding-top: 2rem;
-        }
+.stage-msg { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stage-msg.active { color: var(--text); }
 
-        .footer a {
-            color: #7aa2f7;
-            text-decoration: none;
-        }
+.prog-wrap { position: relative; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+.prog-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; background: var(--accent); }
+.prog-fill.done { background: var(--green); }
 
-        .footer a:hover {
-            text-decoration: underline;
-        }
+/* Indeterminate sweep for stages with no measurable progress (scan, identify):
+   a back-and-forth "radar" pass instead of a misleading static bar. */
+.prog-fill.indeterminate {
+  position: absolute;
+  width: 35%;
+  left: 0;
+  transition: none;
+  animation: prog-sweep 1.1s ease-in-out infinite alternate;
+}
+@keyframes prog-sweep {
+  from { left: 0%; }
+  to   { left: 65%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prog-fill.indeterminate { animation: none; width: 100%; opacity: 0.4; }
+}
 
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
+.eject-btn {
+  display: block;
+  width: 100%;
+  margin-top: 14px;
+  padding: 5px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.eject-btn:hover { background: var(--surface2); color: var(--text); }
 
-        .stage.scanning,
-        .stage.ripping,
-        .stage.delivering {
-            animation: pulse 2s ease-in-out infinite;
-        }
-    </style>
+/* ── Badges ── */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.badge-idle       { background: var(--surface2); color: var(--text-muted); }
+.badge-scan,
+.badge-scanning   { background: rgba(59,130,246,0.15); color: var(--blue); }
+.badge-score,
+.badge-scoring    { background: rgba(99,102,241,0.12); color: var(--accent); }
+.badge-identify,
+.badge-identifying { background: rgba(245,158,11,0.15); color: var(--yellow); }
+.badge-waiting { background: rgba(239,68,68,0.14); color: var(--red); }
+.badge-rip,
+.badge-ripping    { background: rgba(99,102,241,0.15); color: var(--accent); }
+.badge-deliver,
+.badge-delivering { background: rgba(245,158,11,0.15); color: var(--yellow); }
+.badge-done       { background: rgba(34,197,94,0.15); color: var(--green); }
+.badge-error      { background: rgba(239,68,68,0.15); color: var(--red); }
+.badge-pending    { background: var(--surface2); color: var(--text-muted); }
+.badge-disc-type  { background: rgba(59,130,246,0.12); color: var(--blue); }
+
+.spin-inline {
+  display: inline-block;
+  animation: spin-forever 1s linear infinite;
+  margin-right: 4px;
+}
+@keyframes spin-forever {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin-inline { animation: none; }
+}
+
+/* ── Jobs list ── */
+
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.jobs-table {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.jobs-empty {
+  padding: 28px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.job-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.12s;
+  min-width: 0;
+}
+.job-row:last-child { border-bottom: none; }
+.job-row:hover    { background: var(--surface2); }
+.job-row.selected { background: var(--surface2); }
+
+.job-title-col { min-width: 0; }
+.job-title-text {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.job-meta { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+
+/* ── Detail panel ── */
+
+.detail-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 10px;
+  padding: 20px;
+}
+
+.detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 12px;
+}
+.detail-title { font-size: 17px; font-weight: 700; }
+.detail-meta  { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 5px; }
+.detail-meta span { font-size: 12px; color: var(--text-muted); }
+
+.close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.close-btn:hover { color: var(--text); background: var(--surface2); }
+
+/* ── Timeline ── */
+
+.timeline { display: flex; flex-direction: column; gap: 1px; margin-bottom: 18px; }
+
+.tl-event {
+  display: grid;
+  grid-template-columns: 110px 80px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+}
+.tl-event:hover { background: var(--surface2); }
+
+.tl-time { color: var(--text-muted); font-family: monospace; font-size: 11px; white-space: nowrap; }
+.tl-msg  { color: var(--text); }
+
+.tl-data {
+  grid-column: 1 / -1;
+  margin: 4px 0 2px 198px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  display: none;
+}
+.tl-data.open { display: block; }
+
+/* ── Re-identify ── */
+
+.reid-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.reid-heading {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.search-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.search-input {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.search-input:focus { border-color: var(--accent); }
+
+.btn {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.15s, opacity 0.15s;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:disabled { opacity: 0.45; cursor: default; }
+
+.search-results { display: flex; flex-direction: column; gap: 4px; }
+
+.sr-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--surface2);
+  border-radius: var(--radius-sm);
+}
+.sr-title { font-size: 13px; font-weight: 500; }
+.sr-meta  { font-size: 11px; color: var(--text-muted); }
+.sr-apply {
+  padding: 3px 10px;
+  font-size: 11px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sr-apply:hover { background: var(--accent-hover); }
+
+.msg-error   { color: var(--red);   font-size: 12px; margin-top: 6px; }
+.msg-success { color: var(--green); font-size: 12px; margin-top: 6px; }
+.msg-info    { color: var(--text-muted); font-size: 12px; margin-top: 6px; }
+</style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>SimpleRip</h1>
-            <div class="subtitle">Minimal disc ripper</div>
-        </header>
+<div class="app">
+  <header><h1>SimpleRip</h1></header>
+  <div id="drives-grid" class="drives-grid"></div>
+  <div>
+    <div class="section-title">Recent Rips</div>
+    <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
+    <div id="detail-panel" style="display:none"></div>
+  </div>
+</div>
 
-        <div id="connection" class="connection-status disconnected">
-            Connecting to server...
+<script>
+// Checklist order, matching the real backend pipeline.
+const STAGES = ['scan', 'identify', 'score', 'rip', 'deliver'];
+
+// The backend emits progressive ("-ing") stage names; map them to checklist keys.
+const STAGE_ALIASES = {
+  scanning:    'scan',
+  identifying: 'identify',
+  scoring:     'score',
+  ripping:     'rip',
+  delivering:  'deliver',
+};
+function canonStage(stage) { return STAGE_ALIASES[stage] || stage; }
+
+// Stages with no measurable progress — show an indeterminate sweep, not a bar.
+const INDETERMINATE_STAGES = new Set(['scan', 'identify']);
+
+// device → ProgressEvent (stage, percent, message, title, device)
+const driveStates = {};
+const knownDevices = new Set();
+
+let jobs = [];
+let selectedJobId = null;
+let jobsRefreshTimer = null;
+
+// ── Rendering helpers ────────────────────────────────────────────────────
+
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function escAttr(s) {
+  return String(s ?? '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function isManualSearchWait(stage, message) {
+  const canon = canonStage(stage || '');
+  const msg = String(message || '').toLowerCase();
+  return canon === 'identify' && (
+    msg.includes('waiting for manual movie search') ||
+    msg.includes('no main title detected')
+  );
+}
+
+function badgeHTML(status, message = '') {
+  if (isManualSearchWait(status, message)) {
+    return '<span class="badge badge-waiting"><span class="spin-inline">⟳</span>⚠ awaiting title</span>';
+  }
+  const s = (status || 'idle').toLowerCase();
+  return `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+    ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtJSON(raw) {
+  try { return JSON.stringify(typeof raw === 'string' ? JSON.parse(raw) : raw, null, 2); }
+  catch (_) { return String(raw ?? ''); }
+}
+
+function fmtDiscType(t) {
+  switch (t) {
+    case 'bluray': return 'Blu-ray';
+    case 'dvd':    return 'DVD';
+    case 'cd':     return 'CD';
+    default:       return t;
+  }
+}
+
+// ── Drive cards ──────────────────────────────────────────────────────────
+
+function ensureDevice(device) {
+  if (!device || knownDevices.has(device)) return;
+  knownDevices.add(device);
+  if (!driveStates[device]) {
+    driveStates[device] = { device, stage: 'idle', percent: 0, message: 'no disc — waiting', title: '' };
+  }
+  renderDrives();
+}
+
+function applyProgressEvent(ev) {
+  const dev = ev.device;
+  if (dev) {
+    ensureDevice(dev);
+    driveStates[dev] = { ...driveStates[dev], ...ev, device: dev };
+  }
+  renderDrives();
+  scheduleJobsRefresh();
+}
+
+function scheduleJobsRefresh() {
+  if (jobsRefreshTimer) return;
+  jobsRefreshTimer = setTimeout(async () => {
+    jobsRefreshTimer = null;
+    await loadJobs();
+  }, 700);
+}
+
+function renderDrives() {
+  const grid = document.getElementById('drives-grid');
+  const devices = knownDevices.size > 0 ? [...knownDevices] : [];
+  if (!devices.length) {
+    grid.innerHTML = '<div class="jobs-empty">Loading drives…</div>';
+    return;
+  }
+  grid.innerHTML = devices.map(d => {
+    const st = driveStates[d] || { device: d, stage: 'idle', percent: 0, message: 'no disc — waiting', title: '' };
+    return driveCardHTML(st);
+  }).join('');
+  grid.querySelectorAll('.eject-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      fetch('/api/eject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device: btn.dataset.device }),
+      }).catch(() => {});
+    });
+  });
+}
+
+function driveCardHTML(st) {
+  const { stage, percent, message, title } = st;
+  const device = st.device;
+  const isIdle = !stage || stage === 'idle';
+  const discTypeChip = st.disc_type && st.disc_type !== 'unknown'
+    ? `<span class="badge badge-disc-type">${esc(fmtDiscType(st.disc_type))}</span>` : '';
+
+  const header = `
+    <div class="drive-card-header">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span class="drive-device">${esc(device)}</span>
+        ${discTypeChip}
+      </div>
+      ${badgeHTML(stage, message)}
+    </div>`;
+
+  if (isIdle) {
+    return `<div class="drive-card">${header}<div class="drive-idle">no disc — waiting</div></div>`;
+  }
+
+  const titleLine  = title   ? `<div class="drive-title">${esc(title)}</div>` : '';
+  const msgLine    = message ? `<div class="drive-subtitle">${esc(message)}</div>` : '';
+
+  // "done" means every stage completed; otherwise locate the active stage.
+  const finished = stage === 'done';
+  const canon = canonStage(stage);
+  const curIdx = finished ? STAGES.length : STAGES.indexOf(canon);
+  const stagesHTML = STAGES.map((s, idx) => {
+    const isDone   = idx < curIdx;
+    const isCurrent = s === canon;
+    const pct      = isDone ? 100 : (isCurrent ? (percent || 0) : 0);
+    const iconClass = isDone ? 'done' : (isCurrent ? 'active' : '');
+    const waitingIdentify = isCurrent && isManualSearchWait(stage, message) && s === 'identify';
+    const icon      = isDone ? '✓' : (waitingIdentify ? '⚠' : (isCurrent ? '●' : '○'));
+    const nameClass = isDone ? 'done' : (isCurrent ? 'active' : '');
+    const msgClass  = isCurrent ? 'active' : '';
+    const stageMsg  = isCurrent ? (message || '') : '';
+    const fillClass = isDone ? 'done' : '';
+    // The active scan/identify stage has no real percentage — sweep instead of
+    // showing a stuck 0% bar that implies a known end time.
+    const indeterminate = isCurrent && INDETERMINATE_STAGES.has(s);
+    const fill = indeterminate
+      ? `<div class="prog-fill indeterminate"></div>`
+      : `<div class="prog-fill ${fillClass}" style="width:${pct}%"></div>`;
+    return `
+      <div class="stage-row">
+        <span class="stage-icon ${iconClass}">${icon}</span>
+        <span class="stage-name ${nameClass}">${esc(s)}</span>
+        <span class="stage-msg  ${msgClass}">${esc(stageMsg)}</span>
+        <div class="prog-wrap">${fill}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="drive-card">
+      ${header}
+      ${titleLine}
+      ${msgLine}
+      <div class="stages">${stagesHTML}</div>
+      <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
+    </div>`;
+}
+
+// ── Jobs list ────────────────────────────────────────────────────────────
+
+async function loadJobs() {
+  try {
+    const r = await fetch('/api/jobs');
+    if (!r.ok) return;
+    jobs = await r.json() || [];
+    renderJobs();
+    jobs.forEach(j => { if (j.Device) ensureDevice(j.Device); });
+  } catch (_) {}
+}
+
+async function loadDevices() {
+  try {
+    const r = await fetch('/api/devices');
+    if (!r.ok) return;
+    const devices = await r.json() || [];
+    devices.forEach(ensureDevice);
+  } catch (_) {}
+}
+
+function renderJobs() {
+  const el = document.getElementById('jobs-table');
+  if (!jobs.length) {
+    el.innerHTML = '<div class="jobs-empty">No rips yet.</div>';
+    return;
+  }
+  el.innerHTML = jobs.map(j => {
+    const title = j.Title || j.DiscLabel || '—';
+    const year  = j.Year ? ` (${j.Year})` : '';
+    const sel   = j.ID === selectedJobId ? ' selected' : '';
+
+    return `
+      <div class="job-row${sel}" data-id="${escAttr(j.ID)}">
+        <div class="job-title-col">
+          <div class="job-title-text">${esc(title)}${esc(year)}</div>
         </div>
+        <span class="job-meta">${esc(j.Device || '')}</span>
+        <span class="job-meta">${j.DiscType && j.DiscType !== 'unknown' ? esc(fmtDiscType(j.DiscType)) : ''}</span>
+        <span class="job-meta">${fmtDate(j.CreatedAt)}</span>
+        ${badgeHTML(j.Status)}
+      </div>`;
+  }).join('');
+  el.querySelectorAll('.job-row').forEach(row => {
+    row.addEventListener('click', () => openJob(row.dataset.id));
+  });
+}
 
-        <div class="status-card">
-            <div class="status-header">
-                <span id="stage" class="stage idle">idle</span>
-                <div id="title" class="title">No active job</div>
-            </div>
-            <div id="message" class="message">Waiting for disc...</div>
-            <div class="progress-container">
-                <div id="progress-bar" class="progress-bar" style="width: 0%">
-                </div>
-                <div id="progress-text" class="progress-text">0%</div>
-            </div>
+// ── Detail panel ─────────────────────────────────────────────────────────
+
+async function openJob(id) {
+  const panel = document.getElementById('detail-panel');
+  if (selectedJobId === id) {
+    selectedJobId = null;
+    panel.style.display = 'none';
+    renderJobs();
+    return;
+  }
+  selectedJobId = id;
+  renderJobs();
+  panel.style.display = 'block';
+  panel.innerHTML = '<div style="padding:20px;color:var(--text-muted)">Loading…</div>';
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
+    if (!r.ok) throw new Error('not found');
+    const { job, events } = await r.json();
+    renderDetail(job, events || []);
+  } catch (_) {
+    panel.innerHTML = `<div class="detail-panel"><div style="color:var(--red);padding:4px">Failed to load job.</div></div>`;
+  }
+}
+
+function renderDetail(job, events) {
+  const panel = document.getElementById('detail-panel');
+  const title = job.Title || job.DiscLabel || '—';
+  const year  = job.Year ? ` (${job.Year})` : '';
+
+  const timelineHTML = events.length === 0
+    ? '<div style="color:var(--text-muted);font-size:12px;padding:4px 0">No events recorded.</div>'
+    : events.map((e, i) => {
+        const rawData = e.Data;
+        const hasData = rawData && rawData !== 'null' && rawData !== '{}' && rawData !== 'undefined';
+        return `
+          <div class="tl-event" data-i="${i}">
+            <span class="tl-time">${esc(fmtTime(e.CreatedAt))}</span>
+            ${badgeHTML(e.Stage)}
+            <span class="tl-msg">${esc(e.Message)}</span>
+            ${hasData ? `<div class="tl-data" id="tdata-${i}">${esc(fmtJSON(rawData))}</div>` : ''}
+          </div>`;
+      }).join('');
+
+  panel.innerHTML = `
+    <div class="detail-panel">
+      <div class="detail-header">
+        <div>
+          <div class="detail-title">${esc(title)}${esc(year)}</div>
+          <div class="detail-meta">
+            ${badgeHTML(job.Status)}
+            <span>${esc(job.Device || '')}</span>
+            ${job.DiscType && job.DiscType !== 'unknown' ? `<span class="badge badge-disc-type">${esc(fmtDiscType(job.DiscType))}</span>` : ''}
+            <span>${fmtDate(job.CreatedAt)}</span>
+          </div>
         </div>
-
-        <div class="footer">
-            <a href="https://github.com/8bitreid/simplerip" target="_blank" rel="noopener noreferrer">github.com/8bitreid/simplerip</a>
+        <button class="close-btn" id="det-close">✕</button>
+      </div>
+      <div class="timeline">${timelineHTML}</div>
+      <div class="reid-section">
+        <div class="reid-heading">Re-identify</div>
+        <div class="search-row">
+          <input class="search-input" id="reid-q" type="text"
+            placeholder="Search TMDB…"
+            value="${escAttr(job.Title || job.DiscLabel || '')}" />
+          <button class="btn btn-primary" id="reid-btn">Search</button>
         </div>
-    </div>
+        <div id="reid-results" class="search-results"></div>
+        <div id="reid-msg"></div>
+      </div>
+    </div>`;
 
-    <script>
-        let ws = null;
-        let reconnectTimer = null;
-        const reconnectDelay = 3000;
+  document.getElementById('det-close').addEventListener('click', () => {
+    selectedJobId = null;
+    panel.style.display = 'none';
+    renderJobs();
+  });
 
-        const elements = {
-            connection: document.getElementById('connection'),
-            stage: document.getElementById('stage'),
-            title: document.getElementById('title'),
-            message: document.getElementById('message'),
-            progressBar: document.getElementById('progress-bar'),
-            progressText: document.getElementById('progress-text')
-        };
+  panel.querySelectorAll('.tl-event').forEach(row => {
+    row.addEventListener('click', () => {
+      const dd = document.getElementById(`tdata-${row.dataset.i}`);
+      if (dd) dd.classList.toggle('open');
+    });
+  });
 
-        function connect() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws/progress`;
-            
-            ws = new WebSocket(wsUrl);
+  const qInput  = document.getElementById('reid-q');
+  const btn     = document.getElementById('reid-btn');
+  const results = document.getElementById('reid-results');
+  const msg     = document.getElementById('reid-msg');
 
-            ws.onopen = () => {
-                console.log('WebSocket connected');
-                updateConnectionStatus(true);
-                if (reconnectTimer) {
-                    clearTimeout(reconnectTimer);
-                    reconnectTimer = null;
-                }
-            };
+  async function doSearch() {
+    const q = qInput.value.trim();
+    if (!q) return;
+    btn.disabled = true;
+    results.innerHTML = '<div class="msg-info">Searching…</div>';
+    msg.innerHTML = '';
+    try {
+      const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      const data = await r.json();
+      if (!r.ok) {
+        results.innerHTML = '';
+        msg.innerHTML = `<div class="msg-error">${esc(data.error || 'Search failed')}</div>`;
+        return;
+      }
+      if (!data.length) {
+        results.innerHTML = '<div class="msg-info">No results found.</div>';
+        return;
+      }
+      results.innerHTML = data.map(r => `
+        <div class="sr-row">
+          <div>
+            <div class="sr-title">${esc(r.title)}</div>
+            <div class="sr-meta">${r.year || '—'}${r.runtime ? ' · ' + r.runtime + ' min' : ''} · ${esc(r.media_type || 'movie')}</div>
+          </div>
+          <button class="sr-apply"
+            data-id="${r.id}"
+            data-title="${escAttr(r.title)}"
+            data-year="${r.year || 0}">Select</button>
+        </div>`).join('');
+      results.querySelectorAll('.sr-apply').forEach(applyBtn => {
+        applyBtn.addEventListener('click', () => applyReidentify(job.ID, {
+          tmdb_id: parseInt(applyBtn.dataset.id, 10),
+          title:   applyBtn.dataset.title,
+          year:    parseInt(applyBtn.dataset.year, 10),
+        }));
+      });
+    } catch (_) {
+      results.innerHTML = '';
+      msg.innerHTML = '<div class="msg-error">Search request failed.</div>';
+    } finally {
+      btn.disabled = false;
+    }
+  }
 
-            ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    updateProgress(data);
-                } catch (err) {
-                    console.error('Failed to parse message:', err);
-                }
-            };
+  btn.addEventListener('click', doSearch);
+  qInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+}
 
-            ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
-            };
+async function applyReidentify(jobId, payload) {
+  const msg = document.getElementById('reid-msg');
+  if (!msg) return;
+  msg.innerHTML = '<div class="msg-info">Applying…</div>';
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/reidentify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      msg.innerHTML = `<div class="msg-error">${esc(data.error || 'Failed')}</div>`;
+      return;
+    }
+    msg.innerHTML = `<div class="msg-success">Updated to "${esc(data.Title || payload.title)}".</div>`;
+    await loadJobs();
+    // Re-render the detail panel with fresh data
+    const selectedId = selectedJobId;
+    selectedJobId = null;
+    await openJob(selectedId);
+  } catch (_) {
+    msg.innerHTML = '<div class="msg-error">Request failed.</div>';
+  }
+}
 
-            ws.onclose = () => {
-                console.log('WebSocket disconnected');
-                updateConnectionStatus(false);
-                reconnectTimer = setTimeout(connect, reconnectDelay);
-            };
-        }
+// ── WebSocket ────────────────────────────────────────────────────────────
 
-        function updateConnectionStatus(connected) {
-            if (connected) {
-                elements.connection.className = 'connection-status connected';
-                elements.connection.textContent = '● Connected';
-            } else {
-                elements.connection.className = 'connection-status disconnected';
-                elements.connection.textContent = '○ Disconnected - reconnecting...';
-            }
-        }
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws/progress`);
+  ws.onmessage = e => {
+    try { applyProgressEvent(JSON.parse(e.data)); } catch (_) {}
+  };
+  ws.onclose = () => setTimeout(connectWS, 3000);
+}
 
-        function updateProgress(data) {
-            // Update stage badge
-            elements.stage.className = `stage ${data.stage}`;
-            elements.stage.textContent = data.stage;
+// ── Boot ─────────────────────────────────────────────────────────────────
 
-            // Update title
-            if (data.title) {
-                elements.title.textContent = data.title;
-            } else {
-                elements.title.textContent = 
-                    data.stage === 'idle' ? 'No active job' : 
-                    data.stage === 'error' ? 'Error occurred' : 
-                    'Processing...';
-            }
-
-            // Update message
-            elements.message.textContent = data.message || '';
-
-            // Update progress bar
-            const percent = Math.max(0, Math.min(100, data.percent || 0));
-            elements.progressBar.style.width = `${percent}%`;
-            elements.progressText.textContent = `${percent}%`;
-
-            // Update page title
-            if (data.stage === 'idle') {
-                document.title = 'SimpleRip';
-            } else {
-                document.title = `SimpleRip - ${data.stage} ${percent}%`;
-            }
-        }
-
-        // Initialize connection on page load
-        connect();
-
-        // Cleanup on page unload
-        window.addEventListener('beforeunload', () => {
-            if (ws) {
-                ws.close();
-            }
-            if (reconnectTimer) {
-                clearTimeout(reconnectTimer);
-            }
-        });
-    </script>
+loadDevices();
+loadJobs();
+connectWS();
+setInterval(loadJobs, 30_000);
+</script>
 </body>
 </html>
