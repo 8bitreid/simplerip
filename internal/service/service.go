@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/8bitreid/simplerip/internal/config"
+	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/inspect"
 	"github.com/8bitreid/simplerip/internal/metadata"
 	"github.com/8bitreid/simplerip/internal/notify"
@@ -27,11 +29,12 @@ import (
 
 // ProgressEvent represents a state update during the rip process.
 type ProgressEvent struct {
-	Device  string `json:"device,omitempty"` // e.g. /dev/sr0
-	Stage   string `json:"stage"`            // scanning, ripping, delivering, done, idle, error
-	Title   string `json:"title"`            // e.g. "Revenge of the Sith"
-	Percent int    `json:"percent"`          // 0-100
-	Message string `json:"message"`          // human-readable status message
+	Device   string `json:"device,omitempty"`    // e.g. /dev/sr0
+	Stage    string `json:"stage"`               // scanning, ripping, delivering, done, idle, error
+	Title    string `json:"title"`               // e.g. "Revenge of the Sith"
+	Percent  int    `json:"percent"`             // 0-100
+	Message  string `json:"message"`             // human-readable status message
+	DiscType string `json:"disc_type,omitempty"` // bluray, dvd, unknown
 }
 
 func describeScanError(err error) string {
@@ -42,6 +45,94 @@ func describeScanError(err error) string {
 		return "Drive region/RPC protection blocked disc authentication. Set the drive region or update firmware, then retry."
 	}
 	return fmt.Sprintf("Scan failed: %v", err)
+}
+
+func pickLongest(titles []disc.MKVTitle) (disc.MKVTitle, bool) {
+	if len(titles) == 0 {
+		return disc.MKVTitle{}, false
+	}
+	best := titles[0]
+	for _, t := range titles[1:] {
+		if t.Duration > best.Duration {
+			best = t
+		}
+	}
+	return best, true
+}
+
+func findManualCorrection(events []store.JobEvent, since time.Time) (string, int, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.CreatedAt.Before(since) {
+			continue
+		}
+		if ev.Stage != "identify" {
+			continue
+		}
+		if len(ev.Data) == 0 {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(ev.Data, &payload); err != nil {
+			continue
+		}
+		corr, ok := payload["correction"].(bool)
+		if !ok || !corr {
+			continue
+		}
+		title, _ := payload["title"].(string)
+		year := 0
+		switch v := payload["year"].(type) {
+		case float64:
+			year = int(v)
+		case int:
+			year = v
+		}
+		if strings.TrimSpace(title) == "" {
+			continue
+		}
+		return title, year, true
+	}
+	return "", 0, false
+}
+
+func (s *RipService) awaitManualReidentify(ctx context.Context, jobID string, timeoutMin int) (string, int, error) {
+	if s.store == nil {
+		return "", 0, errors.New("database not configured")
+	}
+
+	waitCtx := ctx
+	cancel := func() {}
+	if timeoutMin > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, time.Duration(timeoutMin)*time.Minute)
+	}
+	defer cancel()
+
+	start := time.Now().UTC().Add(-1 * time.Second)
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+
+	for {
+		job, events, err := s.store.GetJob(waitCtx, jobID)
+		if err == nil {
+			if title, year, ok := findManualCorrection(events, start); ok {
+				if strings.TrimSpace(job.Title) != "" {
+					title = job.Title
+					year = job.Year
+				}
+				return title, year, nil
+			}
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return "", 0, fmt.Errorf("manual title search timed out")
+			}
+			return "", 0, waitCtx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
 // EventBus is a simple channel-based fan-out for broadcasting progress events.
@@ -102,6 +193,16 @@ type RipService struct {
 	notify   *notify.Client
 	eventBus *EventBus
 	store    *store.Store
+
+	// ripMu guards the live per-device rip state below.
+	ripMu sync.Mutex
+	// ripTitles maps a device to the current display/folder title of its
+	// in-flight rip. A live re-identify updates this so both progress updates
+	// and the final delivered filename pick up the corrected name.
+	ripTitles map[string]string
+	// lastEvent holds the most recent progress event per device, so a live
+	// re-identify can re-emit it immediately with the new title.
+	lastEvent map[string]ProgressEvent
 }
 
 var (
@@ -113,11 +214,75 @@ var (
 // st may be nil — all store calls become no-ops, preserving existing behaviour.
 func New(cfg *config.Config, st *store.Store) *RipService {
 	return &RipService{
-		cfg:      cfg,
-		notify:   notify.NewClient(cfg.Notification.WebhookURL),
-		eventBus: NewEventBus(),
-		store:    st,
+		cfg:       cfg,
+		notify:    notify.NewClient(cfg.Notification.WebhookURL),
+		eventBus:  NewEventBus(),
+		store:     st,
+		ripTitles: make(map[string]string),
+		lastEvent: make(map[string]ProgressEvent),
 	}
+}
+
+// emit records the event as the device's latest state, then broadcasts it.
+// All progress emission inside RipService goes through here so a live
+// re-identify can re-emit the most recent event with a corrected title.
+func (s *RipService) emit(ev ProgressEvent) {
+	if ev.Device != "" {
+		s.ripMu.Lock()
+		s.lastEvent[ev.Device] = ev
+		s.ripMu.Unlock()
+	}
+	s.eventBus.Emit(ev)
+}
+
+// beginRipTitle registers (or updates) the live title for a device's rip.
+func (s *RipService) beginRipTitle(device, folder string) {
+	s.ripMu.Lock()
+	s.ripTitles[device] = folder
+	s.ripMu.Unlock()
+}
+
+// endRipTitle clears the live title once a rip finishes.
+func (s *RipService) endRipTitle(device string) {
+	s.ripMu.Lock()
+	delete(s.ripTitles, device)
+	s.ripMu.Unlock()
+}
+
+// currentTitle returns the live title for a device's rip, or fallback if none.
+func (s *RipService) currentTitle(device, fallback string) string {
+	s.ripMu.Lock()
+	defer s.ripMu.Unlock()
+	if v, ok := s.ripTitles[device]; ok && v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ReidentifyRip overrides the title of an in-flight rip on device so progress
+// updates and the final delivered filename use the corrected name. It returns
+// false when no rip is active on that device (re-identify only applies during a
+// rip — a delivered file is out of our control). On success it immediately
+// re-emits the device's latest progress event with the new title so connected
+// UIs update without waiting for the next progress tick.
+func (s *RipService) ReidentifyRip(device, folder string) bool {
+	s.ripMu.Lock()
+	if _, ok := s.ripTitles[device]; !ok {
+		s.ripMu.Unlock()
+		return false
+	}
+	s.ripTitles[device] = folder
+	last, hasLast := s.lastEvent[device]
+	s.ripMu.Unlock()
+
+	if hasLast {
+		last.Title = folder
+		if last.Stage == "ripping" {
+			last.Message = fmt.Sprintf("Ripping %s (%d%%)", folder, last.Percent)
+		}
+		s.emit(last)
+	}
+	return true
 }
 
 // EventBus returns the service's EventBus for subscribing to progress updates.
@@ -128,7 +293,7 @@ func (s *RipService) EventBus() *EventBus {
 // MarkDeviceIdle emits an idle progress event for a device, e.g. after its disc
 // has been removed, so subscribed UIs reset that drive's card to "no disc".
 func (s *RipService) MarkDeviceIdle(device string) {
-	s.eventBus.Emit(ProgressEvent{
+	s.emit(ProgressEvent{
 		Device:  device,
 		Stage:   "idle",
 		Percent: 0,
@@ -168,12 +333,9 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	// job tracks the DB record; zero value is safe when s.store == nil.
 	var job store.Job
-	// identifiedTitle/Year are populated after TMDB lookup and used in the final UpdateJob.
-	var identifiedTitle string
-	var identifiedYear int
 
 	// Step 1: Scan disc.
-	s.eventBus.Emit(ProgressEvent{
+	s.emit(ProgressEvent{
 		Device:  device,
 		Stage:   "scanning",
 		Title:   "",
@@ -184,7 +346,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	scanned, err := ripper.ScanInfo(ctx, "makemkvcon", device, s.cfg.MakeMKV.Key)
 	if err != nil {
 		friendlyMsg := describeScanError(err)
-		s.eventBus.Emit(ProgressEvent{
+		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "error",
 			Title:   "",
@@ -192,7 +354,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			Message: friendlyMsg,
 		})
 		if s.store != nil {
-			if failedJob, createErr := s.store.CreateJob(ctx, device, ""); createErr == nil {
+			if failedJob, createErr := s.store.CreateJob(ctx, device, "", ""); createErr == nil {
 				_ = s.store.AddEvent(ctx, failedJob.ID, "error", friendlyMsg,
 					map[string]any{"error": err.Error(), "device": device, "error_type": "scan"})
 				_ = s.store.UpdateStatus(ctx, failedJob.ID, "error")
@@ -201,58 +363,58 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		return fmt.Errorf("scan device %q: %w", device, err)
 	}
 
-	// Step 2: Classify titles.
-	result := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
+	discTypeStr := scanned.Type.String()
 
-	// Create a DB job record now that we have a disc label.
+	// Broadcast disc type to the drive card immediately after scan completes.
+	s.emit(ProgressEvent{
+		Device:   device,
+		Stage:    "scanning",
+		DiscType: discTypeStr,
+		Percent:  100,
+		Message:  fmt.Sprintf("Found %d titles (%s)", len(scanned.Titles), scanned.Type),
+	})
+
+	// Create the DB job record now so TMDB events have a job ID to attach to.
 	if s.store != nil {
-		job, _ = s.store.CreateJob(ctx, device, scanned.DiscName)
-		pattern := strings.ToLower(result.Pattern.String())
-		mainIndex := -1
-		if len(result.MainTitles) > 0 {
-			mainIndex = result.MainTitles[0].Index
-		}
-		_ = s.store.AddEvent(ctx, job.ID, "scan",
-			fmt.Sprintf("found %d titles, pattern: %s", len(scanned.Titles), pattern),
-			map[string]any{
-				"titles":     scanned.Titles,
-				"pattern":    pattern,
-				"main_index": mainIndex,
-			})
-		_ = s.store.UpdateJob(ctx, job.ID, "", 0, "scanning", pattern)
+		job, _ = s.store.CreateJob(ctx, device, scanned.DiscName, discTypeStr)
 	}
 
-	// Step 3: TMDB metadata lookup.
+	// Step 2: TMDB lookup — run before classification so the result can inform it.
+	// Use the longest title's duration as a proxy for the main feature runtime.
 	mediaTitle := scanned.DiscName
+	tmdbConfirmedMovie := false
 	if s.cfg.Metadata.TMDBApiKey != "" && scanned.DiscName != "" {
-		s.eventBus.Emit(ProgressEvent{
-			Device:  device,
-			Stage:   "identifying",
-			Title:   "",
-			Percent: 0,
-			Message: fmt.Sprintf("Looking up metadata for %q", scanned.DiscName),
+		s.emit(ProgressEvent{
+			Device:   device,
+			Stage:    "identifying",
+			DiscType: discTypeStr,
+			Title:    "",
+			Percent:  0,
+			Message:  fmt.Sprintf("Looking up metadata for %q", scanned.DiscName),
 		})
 
 		query := metadata.QueryFromDirName(scanned.DiscName)
 		movies, err := s.SearchMovie(ctx, query)
 		if err == nil && len(movies) > 0 {
-			// Use runtime-based matching if we have a main title with duration.
-			var mainDuration time.Duration
-			if len(result.MainTitles) > 0 {
-				mainDuration = result.MainTitles[0].Duration
+			// Use the longest title's duration for runtime matching (classification
+			// hasn't run yet, so we don't have a MainTitle to reference).
+			var longestDuration time.Duration
+			for _, t := range scanned.Titles {
+				if t.Duration > longestDuration {
+					longestDuration = t.Duration
+				}
 			}
 
-			// Get TMDB client for BestMatch
 			tmdbClient := newTMDBClient(s.cfg.Metadata.TMDBApiKey)
-			chosen, runtimeWinner, logMsg, err := metadata.BestMatch(ctx, tmdbClient, movies, mainDuration)
+			chosen, runtimeWinner, logMsg, err := metadata.BestMatch(ctx, tmdbClient, movies, longestDuration)
 			if err == nil {
 				if runtimeWinner && logMsg != "" {
-					// Log runtime match override
 					fmt.Fprintln(os.Stderr, logMsg)
 				}
 				details, err := s.EnrichMovie(ctx, chosen)
 				if err == nil {
 					mediaTitle = details.FolderName()
+					tmdbConfirmedMovie = true
 					if s.store != nil {
 						yr, _ := strconv.Atoi(details.Year)
 						matchReason := "best_match"
@@ -269,15 +431,14 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 								"match_reason":    matchReason,
 							})
 						_ = s.store.UpdateJob(ctx, job.ID, details.Title, yr, "identifying", "")
-						identifiedTitle = details.Title
-						identifiedYear = yr
 					}
 				}
 			} else {
-				// Fall back to first result if BestMatch fails
+				// Fall back to first result if BestMatch fails.
 				details, err := s.EnrichMovie(ctx, movies[0])
 				if err == nil {
 					mediaTitle = details.FolderName()
+					tmdbConfirmedMovie = true
 					if s.store != nil {
 						yr, _ := strconv.Atoi(details.Year)
 						_ = s.store.AddEvent(ctx, job.ID, "identify",
@@ -290,30 +451,110 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 								"match_reason":    "first_result",
 							})
 						_ = s.store.UpdateJob(ctx, job.ID, details.Title, yr, "identifying", "")
-						identifiedTitle = details.Title
-						identifiedYear = yr
 					}
 				}
 			}
 		}
 	}
 
+	// Step 3: Classify titles.
+	// If TMDB already confirmed this is a movie, suppress the TV-cluster rule
+	// so a disc with 3+ same-duration copies of the same film isn't misclassified.
+	detCfg := s.cfg.Detection
+	if tmdbConfirmedMovie {
+		detCfg.TVThreshold = 99
+	}
+	result := ripper.ClassifyTitles(scanned.Titles, detCfg)
+
+	// Create a DB job record now that we have a disc label.
+	if s.store != nil {
+		pattern := strings.ToLower(result.Pattern.String())
+		mainIndex := -1
+		if len(result.MainTitles) > 0 {
+			mainIndex = result.MainTitles[0].Index
+		}
+		_ = s.store.AddEvent(ctx, job.ID, "scan",
+			fmt.Sprintf("found %d titles, pattern: %s", len(scanned.Titles), pattern),
+			map[string]any{
+				"titles":     scanned.Titles,
+				"pattern":    pattern,
+				"main_index": mainIndex,
+			})
+		_ = s.store.UpdateJob(ctx, job.ID, "", 0, "scanning", pattern)
+	}
+
+	// Register the live title for this rip so a mid-rip re-identify can correct
+	// both the progress display and the final delivered filename. Cleared when
+	// the rip finishes (any return path below).
+	s.beginRipTitle(device, mediaTitle)
+	defer s.endRipTitle(device)
+
 	// Step 4: Determine which titles to rip.
 	// In daemon mode, we always rip MainTitles immediately.
 	// For now, skip extras — future enhancement will integrate Discord callbacks.
 	if len(result.MainTitles) == 0 {
-		s.eventBus.Emit(ProgressEvent{
+		s.emit(ProgressEvent{
 			Device:  device,
-			Stage:   "error",
-			Title:   "",
+			Stage:   "identifying",
+			Title:   s.currentTitle(device, mediaTitle),
 			Percent: 0,
-			Message: "No main titles found on disc",
+			Message: "No main title detected. Waiting for manual movie search...",
 		})
 		if s.store != nil {
-			_ = s.store.AddEvent(ctx, job.ID, "error", "no main titles found on disc", nil)
-			_ = s.store.UpdateStatus(ctx, job.ID, "error")
+			_ = s.store.AddEvent(ctx, job.ID, "identify", "no clear main title, waiting for manual movie search", map[string]any{"action": "await_manual_search"})
+			_ = s.store.UpdateStatus(ctx, job.ID, "identifying")
 		}
-		return fmt.Errorf("no main titles found on disc %q", device)
+
+		title, year, waitErr := s.awaitManualReidentify(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
+		if waitErr != nil {
+			s.emit(ProgressEvent{
+				Device:  device,
+				Stage:   "error",
+				Title:   s.currentTitle(device, mediaTitle),
+				Percent: 0,
+				Message: fmt.Sprintf("No main titles found and no manual selection received: %v", waitErr),
+			})
+			if s.store != nil {
+				_ = s.store.AddEvent(ctx, job.ID, "error", "manual movie search timed out after no main title", map[string]any{"error": waitErr.Error()})
+				_ = s.store.UpdateStatus(ctx, job.ID, "error")
+			}
+			return fmt.Errorf("no main titles found on disc %q", device)
+		}
+
+		if year > 0 {
+			mediaTitle = fmt.Sprintf("%s (%d)", title, year)
+		} else {
+			mediaTitle = title
+		}
+		s.beginRipTitle(device, mediaTitle)
+
+		fallbackMain, ok := pickLongest(result.AllTitles)
+		if !ok {
+			s.emit(ProgressEvent{
+				Device:  device,
+				Stage:   "error",
+				Title:   mediaTitle,
+				Percent: 0,
+				Message: "Manual title selected but no candidate titles available to rip",
+			})
+			if s.store != nil {
+				_ = s.store.AddEvent(ctx, job.ID, "error", "manual title selected but no candidate titles available", nil)
+				_ = s.store.UpdateStatus(ctx, job.ID, "error")
+			}
+			return fmt.Errorf("no candidate titles available to rip on disc %q", device)
+		}
+
+		result.MainTitles = []disc.MKVTitle{fallbackMain}
+		s.emit(ProgressEvent{
+			Device:  device,
+			Stage:   "identifying",
+			Title:   mediaTitle,
+			Percent: 0,
+			Message: fmt.Sprintf("Manual title selected. Continuing with longest title #%d", fallbackMain.Index),
+		})
+		if s.store != nil {
+			_ = s.store.AddEvent(ctx, job.ID, "identify", fmt.Sprintf("manual title selected; using longest title index %d", fallbackMain.Index), map[string]any{"selected_index": fallbackMain.Index, "selected_duration": fallbackMain.Duration.String()})
+		}
 	}
 
 	// Step 5: Rip each main title to staging.
@@ -322,7 +563,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		stagingDir = "/tmp/simplerip-staging"
 	}
 	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
-		s.eventBus.Emit(ProgressEvent{
+		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "error",
 			Title:   "",
@@ -339,7 +580,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	jobID := fmt.Sprintf("rip-%d", time.Now().UnixNano())
 	ripOutputDir := filepath.Join(stagingDir, jobID)
 	if err := os.MkdirAll(ripOutputDir, 0o755); err != nil {
-		s.eventBus.Emit(ProgressEvent{
+		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "error",
 			Title:   "",
@@ -355,13 +596,17 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 
 	var rippedFiles []string
 	totalTitles := len(result.MainTitles)
+	if s.store != nil {
+		_ = s.store.UpdateStatus(ctx, job.ID, "ripping")
+	}
 	for idx, title := range result.MainTitles {
-		s.eventBus.Emit(ProgressEvent{
+		cur := s.currentTitle(device, mediaTitle)
+		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "ripping",
-			Title:   mediaTitle,
+			Title:   cur,
 			Percent: (idx * 100) / totalTitles,
-			Message: fmt.Sprintf("Ripping %s (title %d of %d)", mediaTitle, idx+1, totalTitles),
+			Message: fmt.Sprintf("Ripping %s (title %d of %d)", cur, idx+1, totalTitles),
 		})
 
 		if s.store != nil {
@@ -383,12 +628,14 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		lastReportedPct := -10
 		progressCb := func(_ int, percent int) {
 			overall := (titleIdx*100 + percent) / totalTitles
-			s.eventBus.Emit(ProgressEvent{
+			// Read the live title each tick so a mid-rip re-identify is reflected.
+			cur := s.currentTitle(device, mediaTitle)
+			s.emit(ProgressEvent{
 				Device:  device,
 				Stage:   "ripping",
-				Title:   mediaTitle,
+				Title:   cur,
 				Percent: overall,
-				Message: fmt.Sprintf("Ripping %s (%d%%)", mediaTitle, overall),
+				Message: fmt.Sprintf("Ripping %s (%d%%)", cur, overall),
 			})
 			if s.store != nil && overall >= lastReportedPct+10 {
 				lastReportedPct = (overall / 10) * 10
@@ -397,21 +644,58 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			}
 		}
 
-		files, err := ripper.RipTitle(
-			ctx,
-			device,
-			title,
-			ripOutputDir,
-			s.cfg.MakeMKV.Key,
-			s.cfg.MakeMKV.TimeoutMinutes,
-			s.cfg.MakeMKV.CacheMB,
-			progressCb,
+		maxRetries := s.cfg.MakeMKV.MaxRipRetries
+		if maxRetries < 0 {
+			maxRetries = 0
+		}
+		attempts := maxRetries + 1
+
+		var (
+			files []string
+			err   error
 		)
+		for attempt := 1; attempt <= attempts; attempt++ {
+			files, err = ripper.RipTitle(
+				ctx,
+				device,
+				title,
+				ripOutputDir,
+				s.cfg.MakeMKV.Key,
+				s.cfg.MakeMKV.TimeoutMinutes,
+				cacheMBForDisc(s.cfg.MakeMKV.CacheMB, scanned.Type),
+				s.cfg.MakeMKV.ReadErrorLimit,
+				s.cfg.MakeMKV.NoProgressMin,
+				progressCb,
+			)
+			if err == nil {
+				break
+			}
+
+			retryable := !errors.Is(err, context.Canceled)
+
+			if !retryable || attempt == attempts {
+				break
+			}
+
+			cur := s.currentTitle(device, mediaTitle)
+			s.emit(ProgressEvent{
+				Device:  device,
+				Stage:   "ripping",
+				Title:   cur,
+				Percent: (idx * 100) / totalTitles,
+				Message: fmt.Sprintf("Read issues detected, retrying title %d (%d/%d)", title.Index, attempt+1, attempts),
+			})
+			if s.store != nil {
+				_ = s.store.AddEvent(ctx, job.ID, "rip",
+					fmt.Sprintf("retrying title %d: attempt %d/%d", title.Index, attempt+1, attempts),
+					map[string]any{"error": err.Error()})
+			}
+		}
 		if err != nil {
-			s.eventBus.Emit(ProgressEvent{
+			s.emit(ProgressEvent{
 				Device:  device,
 				Stage:   "error",
-				Title:   mediaTitle,
+				Title:   s.currentTitle(device, mediaTitle),
 				Percent: (idx * 100) / totalTitles,
 				Message: fmt.Sprintf("Rip failed: %v", err),
 			})
@@ -440,7 +724,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	}
 
 	if len(rippedFiles) == 0 {
-		s.eventBus.Emit(ProgressEvent{
+		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "error",
 			Title:   "",
@@ -457,12 +741,18 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	// Step 6: Deliver to NAS if configured.
 	destDir := s.cfg.Output.NASPath
 	if destDir != "" {
-		s.eventBus.Emit(ProgressEvent{
+		// Resolve the final title now (a mid-rip re-identify has already landed)
+		// and use it for both the folder/file name and progress.
+		deliverTitle := s.currentTitle(device, mediaTitle)
+		if s.store != nil {
+			_ = s.store.UpdateStatus(ctx, job.ID, "delivering")
+		}
+		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "delivering",
-			Title:   mediaTitle,
+			Title:   deliverTitle,
 			Percent: 90,
-			Message: fmt.Sprintf("Delivering %s to NAS", mediaTitle),
+			Message: fmt.Sprintf("Delivering %s to NAS", deliverTitle),
 		})
 
 		// Deliver files to NAS using proper folder name from metadata.
@@ -471,15 +761,15 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			rippedFiles,
 			ripOutputDir,
 			destDir,
-			mediaTitle,
-			mediaTitle,
+			deliverTitle,
+			deliverTitle,
 			scanned.DiscName,
 		)
 		if err != nil {
-			s.eventBus.Emit(ProgressEvent{
+			s.emit(ProgressEvent{
 				Device:  device,
 				Stage:   "error",
-				Title:   mediaTitle,
+				Title:   deliverTitle,
 				Percent: 90,
 				Message: fmt.Sprintf("Delivery failed: %v", err),
 			})
@@ -502,7 +792,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			_ = s.store.AddEvent(ctx, job.ID, "deliver",
 				fmt.Sprintf("rsync complete: %.1f GB verified on NAS", deliveredGB),
 				map[string]any{"nas_path": deliverResult.DestDir, "size_gb": deliveredGB})
-			_ = s.store.UpdateJob(ctx, job.ID, identifiedTitle, identifiedYear, "done", "")
+			_ = s.store.UpdateStatus(ctx, job.ID, "done")
 		}
 
 		// Clean up staging directory after successful delivery.
@@ -559,23 +849,29 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 
 	if err := s.notify.Send(ctx, payload); err != nil {
 		// Notification failure is not fatal — the rip succeeded.
-		s.eventBus.Emit(ProgressEvent{
+		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "done",
 			Title:   "",
 			Percent: 100,
 			Message: "Rip completed (notification failed)",
 		})
+		if s.store != nil {
+			_ = s.store.UpdateStatus(ctx, job.ID, "done")
+		}
 		return nil
 	}
 
-	s.eventBus.Emit(ProgressEvent{
+	s.emit(ProgressEvent{
 		Device:  device,
 		Stage:   "done",
 		Title:   "",
 		Percent: 100,
 		Message: "Rip completed successfully",
 	})
+	if s.store != nil {
+		_ = s.store.UpdateStatus(ctx, job.ID, "done")
+	}
 
 	return nil
 }
@@ -821,6 +1117,30 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return len(s) > 0
+}
+
+// cacheMBForDisc returns the read-cache size in MB to pass to makemkvcon for a
+// full rip. If the operator set an explicit value via config (> 0), that always
+// wins. Otherwise a sensible per-media-type default is chosen:
+//
+//	DVD     → 512 MB  (standard-definition sequential reads)
+//	Blu-ray → 1024 MB (dual-layer high-bitrate, ~40 Mbps peak)
+//	Unknown → 512 MB  (safe floor)
+//
+// 4K UHD discs are classified as Blu-ray by makemkvcon, so they receive the
+// 1024 MB budget which comfortably covers their ~128 Mbps peak bitrate.
+func cacheMBForDisc(cfgCacheMB int, discType disc.DiscType) int {
+	if cfgCacheMB > 0 {
+		return cfgCacheMB
+	}
+	switch discType {
+	case disc.DiscTypeBluRay:
+		return 1024
+	case disc.DiscTypeDVD:
+		return 512
+	default:
+		return 512
+	}
 }
 
 // ScanInfoFromReader scans a disc from a captured makemkvcon output fixture.

@@ -48,6 +48,9 @@ type MakeMKVConfig struct {
 	Key            string   `yaml:"key"`
 	TimeoutMinutes int      `yaml:"timeout_minutes"`
 	CacheMB        int      `yaml:"cache_mb"`
+	ReadErrorLimit int      `yaml:"read_error_limit"`
+	NoProgressMin  int      `yaml:"no_progress_minutes"`
+	MaxRipRetries  int      `yaml:"max_rip_retries"`
 	Devices        []string `yaml:"devices"`
 }
 
@@ -107,7 +110,10 @@ func defaults() Config {
 		},
 		MakeMKV: MakeMKVConfig{
 			TimeoutMinutes: 120,
-			CacheMB:        256,
+			CacheMB:        0, // 0 = auto-select by disc type (DVD→512, Blu-ray→1024)
+			ReadErrorLimit: 100,
+			NoProgressMin:  15,
+			MaxRipRetries:  1,
 		},
 		Metadata: MetadataConfig{
 			PreferredLanguage: "eng",

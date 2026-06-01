@@ -19,6 +19,12 @@ import (
 // Use errors.Is to detect it distinctly from other failures.
 var ErrRipTimeout = errors.New("makemkvcon: rip timed out")
 
+// ErrRipReadErrorLimit is returned when MakeMKV emits too many read errors.
+var ErrRipReadErrorLimit = errors.New("makemkvcon: read error limit reached")
+
+// ErrRipNoProgress is returned when the rip stalls for too long.
+var ErrRipNoProgress = errors.New("makemkvcon: no progress")
+
 // ProgressCallback is called with percentage updates during ripping (0-100).
 type ProgressCallback func(titleIndex int, percent int)
 
@@ -35,7 +41,7 @@ type ProgressCallback func(titleIndex int, percent int)
 // On success the paths of *.mkv files written to outputDir are returned.
 // On deadline-exceeded ErrRipTimeout is returned (wrapping the error so
 // errors.Is works).
-func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir string, key string, timeoutMinutes int, cacheMB int, progressCb ProgressCallback) ([]string, error) {
+func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir string, key string, timeoutMinutes int, cacheMB int, readErrorLimit int, noProgressMinutes int, progressCb ProgressCallback) ([]string, error) {
 	timeout := time.Duration(timeoutMinutes) * time.Minute
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -46,8 +52,8 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 
-	if err := writeKey(key); err != nil {
-		return nil, fmt.Errorf("write makemkv key: %w", err)
+	if err := writeTunedConfig(key); err != nil {
+		return nil, fmt.Errorf("write makemkv config: %w", err)
 	}
 
 	if cacheMB <= 0 {
@@ -87,6 +93,12 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 	}()
 
 	lastPct := -1
+	lastProgressAt := time.Now()
+	readErrors := 0
+	var abortErr error
+
+	watchdog := time.NewTicker(10 * time.Second)
+	defer watchdog.Stop()
 loop:
 	for {
 		select {
@@ -101,18 +113,38 @@ loop:
 				}
 				if pct := prog.percent(); pct != lastPct {
 					lastPct = pct
+					lastProgressAt = time.Now()
 					fmt.Printf("title %d: %d%%\n", title.Index, pct)
 					if progressCb != nil {
 						progressCb(title.Index, pct)
 					}
 				}
 			} else if strings.HasPrefix(line, "MSG:") {
+				if parseMSGCode(line[len("MSG:"):]) == 2003 {
+					readErrors++
+					if readErrorLimit > 0 && readErrors >= readErrorLimit {
+						abortErr = fmt.Errorf("%w: title %d on %s (%d read errors)", ErrRipReadErrorLimit, title.Index, device, readErrors)
+						cancel()
+						break loop
+					}
+				}
 				// Log error and warning messages from makemkvcon
 				fmt.Fprintln(os.Stderr, line)
+			}
+		case <-watchdog.C:
+			if noProgressMinutes > 0 && readErrors > 0 && time.Since(lastProgressAt) >= time.Duration(noProgressMinutes)*time.Minute {
+				abortErr = fmt.Errorf("%w: title %d on %s (%d min stalled, %d read errors)", ErrRipNoProgress, title.Index, device, noProgressMinutes, readErrors)
+				cancel()
+				break loop
 			}
 		case <-ctx.Done():
 			break loop
 		}
+	}
+
+	if abortErr != nil {
+		_ = cmd.Wait()
+		return nil, abortErr
 	}
 
 	if werr := cmd.Wait(); werr != nil {
@@ -126,6 +158,18 @@ loop:
 	}
 
 	return newMKVFiles(outputDir, start)
+}
+
+func parseMSGCode(payload string) int {
+	parts := strings.SplitN(payload, ",", 2)
+	if len(parts) == 0 {
+		return -1
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // newMKVFiles returns paths of *.mkv files in dir whose mtime is at or after

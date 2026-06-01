@@ -196,6 +196,7 @@ header h1 {
 .badge-scoring    { background: rgba(99,102,241,0.12); color: var(--accent); }
 .badge-identify,
 .badge-identifying { background: rgba(245,158,11,0.15); color: var(--yellow); }
+.badge-waiting { background: rgba(239,68,68,0.14); color: var(--red); }
 .badge-rip,
 .badge-ripping    { background: rgba(99,102,241,0.15); color: var(--accent); }
 .badge-deliver,
@@ -203,6 +204,20 @@ header h1 {
 .badge-done       { background: rgba(34,197,94,0.15); color: var(--green); }
 .badge-error      { background: rgba(239,68,68,0.15); color: var(--red); }
 .badge-pending    { background: var(--surface2); color: var(--text-muted); }
+.badge-disc-type  { background: rgba(59,130,246,0.12); color: var(--blue); }
+
+.spin-inline {
+  display: inline-block;
+  animation: spin-forever 1s linear infinite;
+  margin-right: 4px;
+}
+@keyframes spin-forever {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin-inline { animation: none; }
+}
 
 /* ── Jobs list ── */
 
@@ -231,7 +246,7 @@ header h1 {
 
 .job-row {
   display: grid;
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: 1fr auto auto auto auto;
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
@@ -428,6 +443,7 @@ const knownDevices = new Set();
 
 let jobs = [];
 let selectedJobId = null;
+let jobsRefreshTimer = null;
 
 // ── Rendering helpers ────────────────────────────────────────────────────
 
@@ -441,7 +457,19 @@ function escAttr(s) {
   return String(s ?? '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function badgeHTML(status) {
+function isManualSearchWait(stage, message) {
+  const canon = canonStage(stage || '');
+  const msg = String(message || '').toLowerCase();
+  return canon === 'identify' && (
+    msg.includes('waiting for manual movie search') ||
+    msg.includes('no main title detected')
+  );
+}
+
+function badgeHTML(status, message = '') {
+  if (isManualSearchWait(status, message)) {
+    return '<span class="badge badge-waiting"><span class="spin-inline">⟳</span>⚠ awaiting title</span>';
+  }
   const s = (status || 'idle').toLowerCase();
   return `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
 }
@@ -464,6 +492,15 @@ function fmtJSON(raw) {
   catch (_) { return String(raw ?? ''); }
 }
 
+function fmtDiscType(t) {
+  switch (t) {
+    case 'bluray': return 'Blu-ray';
+    case 'dvd':    return 'DVD';
+    case 'cd':     return 'CD';
+    default:       return t;
+  }
+}
+
 // ── Drive cards ──────────────────────────────────────────────────────────
 
 function ensureDevice(device) {
@@ -482,6 +519,15 @@ function applyProgressEvent(ev) {
     driveStates[dev] = { ...driveStates[dev], ...ev, device: dev };
   }
   renderDrives();
+  scheduleJobsRefresh();
+}
+
+function scheduleJobsRefresh() {
+  if (jobsRefreshTimer) return;
+  jobsRefreshTimer = setTimeout(async () => {
+    jobsRefreshTimer = null;
+    await loadJobs();
+  }, 700);
 }
 
 function renderDrives() {
@@ -497,7 +543,11 @@ function renderDrives() {
   }).join('');
   grid.querySelectorAll('.eject-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      fetch(`/api/eject/${encodeURIComponent(btn.dataset.device)}`, { method: 'POST' }).catch(() => {});
+      fetch('/api/eject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device: btn.dataset.device }),
+      }).catch(() => {});
     });
   });
 }
@@ -506,11 +556,16 @@ function driveCardHTML(st) {
   const { stage, percent, message, title } = st;
   const device = st.device;
   const isIdle = !stage || stage === 'idle';
+  const discTypeChip = st.disc_type && st.disc_type !== 'unknown'
+    ? `<span class="badge badge-disc-type">${esc(fmtDiscType(st.disc_type))}</span>` : '';
 
   const header = `
     <div class="drive-card-header">
-      <span class="drive-device">${esc(device)}</span>
-      ${badgeHTML(stage)}
+      <div style="display:flex;align-items:center;gap:6px">
+        <span class="drive-device">${esc(device)}</span>
+        ${discTypeChip}
+      </div>
+      ${badgeHTML(stage, message)}
     </div>`;
 
   if (isIdle) {
@@ -529,7 +584,8 @@ function driveCardHTML(st) {
     const isCurrent = s === canon;
     const pct      = isDone ? 100 : (isCurrent ? (percent || 0) : 0);
     const iconClass = isDone ? 'done' : (isCurrent ? 'active' : '');
-    const icon      = isDone ? '✓'   : (isCurrent ? '●' : '○');
+    const waitingIdentify = isCurrent && isManualSearchWait(stage, message) && s === 'identify';
+    const icon      = isDone ? '✓' : (waitingIdentify ? '⚠' : (isCurrent ? '●' : '○'));
     const nameClass = isDone ? 'done' : (isCurrent ? 'active' : '');
     const msgClass  = isCurrent ? 'active' : '';
     const stageMsg  = isCurrent ? (message || '') : '';
@@ -590,12 +646,14 @@ function renderJobs() {
     const title = j.Title || j.DiscLabel || '—';
     const year  = j.Year ? ` (${j.Year})` : '';
     const sel   = j.ID === selectedJobId ? ' selected' : '';
+
     return `
       <div class="job-row${sel}" data-id="${escAttr(j.ID)}">
         <div class="job-title-col">
           <div class="job-title-text">${esc(title)}${esc(year)}</div>
         </div>
         <span class="job-meta">${esc(j.Device || '')}</span>
+        <span class="job-meta">${j.DiscType && j.DiscType !== 'unknown' ? esc(fmtDiscType(j.DiscType)) : ''}</span>
         <span class="job-meta">${fmtDate(j.CreatedAt)}</span>
         ${badgeHTML(j.Status)}
       </div>`;
@@ -656,6 +714,7 @@ function renderDetail(job, events) {
           <div class="detail-meta">
             ${badgeHTML(job.Status)}
             <span>${esc(job.Device || '')}</span>
+            ${job.DiscType && job.DiscType !== 'unknown' ? `<span class="badge badge-disc-type">${esc(fmtDiscType(job.DiscType))}</span>` : ''}
             <span>${fmtDate(job.CreatedAt)}</span>
           </div>
         </div>

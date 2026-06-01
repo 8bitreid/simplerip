@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,10 @@ import (
 
 //go:embed ui/index.html
 var indexHTML []byte
+
+var ejectDevice = func(device string) error {
+	return exec.Command("eject", device).Run()
+}
 
 // jobStore is the persistence interface the server depends on.
 // *store.Store satisfies it; a nil value disables persistence.
@@ -91,6 +96,8 @@ func (s *Server) registerRoutes() {
 	s.e.GET("/ws/progress", s.handleProgressWS)
 	s.e.GET("/api/status", s.handleStatus)
 	s.e.GET("/api/devices", s.handleDevices)
+	s.e.POST("/api/eject", s.handleEject)
+	s.e.POST("/api/eject/:device", s.handleEject)
 	s.e.GET("/api/jobs", s.handleListJobs)
 	s.e.GET("/api/jobs/:id", s.handleGetJob)
 	s.e.GET("/api/search", s.handleSearch)
@@ -134,6 +141,40 @@ func (s *Server) handleDevices(c echo.Context) error {
 		return c.JSON(http.StatusOK, []string{})
 	}
 	return c.JSON(http.StatusOK, s.devices)
+}
+
+func (s *Server) handleEject(c echo.Context) error {
+	device := c.Param("device")
+	if strings.TrimSpace(device) == "" {
+		var body struct {
+			Device string `json:"device"`
+		}
+		if err := c.Bind(&body); err == nil {
+			device = strings.TrimSpace(body.Device)
+		}
+	}
+	if strings.TrimSpace(device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+
+	allowed := false
+	for _, dev := range s.devices {
+		if dev == device {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+
+	if err := ejectDevice(device); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("eject failed: %v", err)})
+	}
+
+	// Immediately show the drive as idle in UI while poller confirms state.
+	s.svc.MarkDeviceIdle(device)
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": device})
 }
 
 // handleListJobs returns the 100 most recent jobs.
@@ -257,6 +298,15 @@ func (s *Server) handleReidentify(c echo.Context) error {
 	if err := s.store.UpdateJob(ctx, id, body.Title, body.Year, existing.Status, existing.Pattern); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+
+	// If this job is currently ripping on a device, update the in-memory
+	// live title immediately so websocket progress text and final deliver
+	// naming reflect the correction without waiting for a new scan.
+	liveTitle := body.Title
+	if body.Year > 0 {
+		liveTitle = fmt.Sprintf("%s (%d)", body.Title, body.Year)
+	}
+	_ = s.svc.ReidentifyRip(existing.Device, liveTitle)
 
 	job, _, err := s.store.GetJob(ctx, id)
 	if err != nil {

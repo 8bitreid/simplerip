@@ -31,6 +31,7 @@ type Job struct {
 	Year      int
 	Status    string
 	Pattern   string
+	DiscType  string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -96,12 +97,12 @@ func runMigrations(databaseURL string) error {
 	return nil
 }
 
-// scanJob handles nullable columns (disc_label, title, year, pattern).
+// scanJob handles nullable columns (disc_label, title, year, pattern, disc_type).
 func scanJob(scan func(...any) error) (Job, error) {
 	var j Job
-	var discLabel, title, pattern *string
+	var discLabel, title, pattern, discType *string
 	var year *int
-	err := scan(&j.ID, &j.Device, &discLabel, &title, &year, &j.Status, &pattern, &j.CreatedAt, &j.UpdatedAt)
+	err := scan(&j.ID, &j.Device, &discLabel, &title, &year, &j.Status, &pattern, &discType, &j.CreatedAt, &j.UpdatedAt)
 	if err != nil {
 		return Job{}, err
 	}
@@ -117,15 +118,18 @@ func scanJob(scan func(...any) error) (Job, error) {
 	if pattern != nil {
 		j.Pattern = *pattern
 	}
+	if discType != nil {
+		j.DiscType = *discType
+	}
 	return j, nil
 }
 
-func (s *Store) CreateJob(ctx context.Context, device, discLabel string) (Job, error) {
+func (s *Store) CreateJob(ctx context.Context, device, discLabel, discType string) (Job, error) {
 	row := s.pool.QueryRow(ctx,
-		`INSERT INTO jobs (device, disc_label)
-		 VALUES ($1, $2)
-		 RETURNING id, device, disc_label, title, year, status, pattern, created_at, updated_at`,
-		device, discLabel,
+		`INSERT INTO jobs (device, disc_label, disc_type)
+		 VALUES ($1, $2, $3)
+		 RETURNING id, device, disc_label, title, year, status, pattern, disc_type, created_at, updated_at`,
+		device, discLabel, discType,
 	)
 	j, err := scanJob(row.Scan)
 	if err != nil {
@@ -180,7 +184,7 @@ func (s *Store) AddEvent(ctx context.Context, jobID, stage, message string, data
 
 func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, device, disc_label, title, year, status, pattern, created_at, updated_at
+		`SELECT id, device, disc_label, title, year, status, pattern, disc_type, created_at, updated_at
 		 FROM jobs
 		 ORDER BY created_at DESC
 		 LIMIT 100`,
@@ -203,7 +207,7 @@ func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 
 func (s *Store) GetJob(ctx context.Context, id string) (Job, []JobEvent, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, device, disc_label, title, year, status, pattern, created_at, updated_at
+		`SELECT id, device, disc_label, title, year, status, pattern, disc_type, created_at, updated_at
 		 FROM jobs WHERE id=$1`,
 		id,
 	)

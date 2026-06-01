@@ -236,6 +236,40 @@ func TestHandleDevices_ReturnsConfiguredDevices(t *testing.T) {
 	}
 }
 
+func TestHandleEject_Success(t *testing.T) {
+	s := newTestServer(nil)
+	s.devices = []string{"/dev/sr0", "/dev/sr1"}
+
+	origEject := ejectDevice
+	t.Cleanup(func() { ejectDevice = origEject })
+
+	var gotDevice string
+	ejectDevice = func(device string) error {
+		gotDevice = device
+		return nil
+	}
+
+	body := []byte(`{"device":"/dev/sr1"}`)
+	rr := doRequest(t, s, http.MethodPost, "/api/eject", body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if gotDevice != "/dev/sr1" {
+		t.Fatalf("eject called with %q, want /dev/sr1", gotDevice)
+	}
+}
+
+func TestHandleEject_UnknownDevice(t *testing.T) {
+	s := newTestServer(nil)
+	s.devices = []string{"/dev/sr0"}
+
+	body := []byte(`{"device":"/dev/sr1"}`)
+	rr := doRequest(t, s, http.MethodPost, "/api/eject", body)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
 // ── POST /api/jobs/:id/reidentify ─────────────────────────────────────────────
 
 func TestHandleReidentify_NilStore(t *testing.T) {

@@ -21,6 +21,37 @@ type DiscEvent struct {
 	Present bool   // true = disc inserted, false = disc removed
 }
 
+// BusyDeviceTracker holds device paths currently owned by an active rip.
+// Polling code can use it to avoid probing drives that are in use.
+type BusyDeviceTracker struct {
+	busy sync.Map // map[string]struct{}
+}
+
+// MarkBusy marks device as active.
+func (t *BusyDeviceTracker) MarkBusy(device string) {
+	if t == nil {
+		return
+	}
+	t.busy.Store(device, struct{}{})
+}
+
+// MarkIdle removes device from the active set.
+func (t *BusyDeviceTracker) MarkIdle(device string) {
+	if t == nil {
+		return
+	}
+	t.busy.Delete(device)
+}
+
+// IsBusy reports whether device is currently active.
+func (t *BusyDeviceTracker) IsBusy(device string) bool {
+	if t == nil {
+		return false
+	}
+	_, ok := t.busy.Load(device)
+	return ok
+}
+
 // Poll continuously monitors optical devices for disc insertion.
 // It checks each device at the given interval by running makemkvcon.
 // When a disc is newly inserted, the device path is sent on the returned channel.
@@ -31,7 +62,7 @@ type DiscEvent struct {
 // Poll reports insertions only; use PollEvents to also observe removals.
 func Poll(ctx context.Context, devices []string, interval time.Duration) <-chan string {
 	out := make(chan string)
-	events := PollEvents(ctx, devices, interval)
+	events := PollEventsWithBusy(ctx, devices, interval, nil)
 	go func() {
 		defer close(out)
 		for ev := range events {
@@ -52,6 +83,18 @@ func Poll(ctx context.Context, devices []string, interval time.Duration) <-chan 
 // as DiscEvents. Each device is polled independently so one slow drive does not
 // block the others. Context cancellation stops the poll loop and closes the channel.
 func PollEvents(ctx context.Context, devices []string, interval time.Duration) <-chan DiscEvent {
+	return PollEventsWithBusy(ctx, devices, interval, nil)
+}
+
+// PollEventsWithBusy is like PollEvents, but skips polling for any device where
+// isBusy(device) returns true. Busy devices are bypassed before any drive probe,
+// keeping the hardware channel clear for the active rip process.
+func PollEventsWithBusy(
+	ctx context.Context,
+	devices []string,
+	interval time.Duration,
+	isBusy func(device string) bool,
+) <-chan DiscEvent {
 	ch := make(chan DiscEvent)
 	go func() {
 		var wg sync.WaitGroup
@@ -60,7 +103,7 @@ func PollEvents(ctx context.Context, devices []string, interval time.Duration) <
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				pollDevice(ctx, device, interval, ch)
+				pollDevice(ctx, device, interval, ch, isBusy)
 			}()
 		}
 		wg.Wait()
@@ -73,12 +116,23 @@ func PollEvents(ctx context.Context, devices []string, interval time.Duration) <
 // DiscEvent whenever disc presence changes. A failed check (drive busy during a
 // rip, timeout, error) does not update state, so it never produces a spurious
 // "removed" event while a rip holds the drive.
-func pollDevice(ctx context.Context, device string, interval time.Duration, ch chan<- DiscEvent) {
+func pollDevice(
+	ctx context.Context,
+	device string,
+	interval time.Duration,
+	ch chan<- DiscEvent,
+	isBusy func(device string) bool,
+) {
 	state := false
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	check := func() {
+		if isBusy != nil && isBusy(device) {
+			fmt.Fprintf(os.Stderr, "poll: device=%s skipped=busy\n", device)
+			return
+		}
+
 		start := time.Now()
 		hasDisc, ok := checkDevice(ctx, device, discProbeTimeout)
 		elapsed := time.Since(start).Round(time.Millisecond)

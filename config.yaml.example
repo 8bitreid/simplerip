@@ -68,6 +68,18 @@ makemkv:
   # uneven disc reads. Default is 256. Increase for faster drives.
   cache_mb: 256
 
+  # Abort a rip early after this many low-level read errors (MSG code 2003).
+  # Helps avoid spending hours on heavily damaged discs.
+  read_error_limit: 100
+
+  # Abort a rip if progress does not advance for this many minutes while
+  # read errors are still occurring.
+  no_progress_minutes: 15
+
+  # Number of retry attempts after a retryable rip failure.
+  # Total attempts = 1 + max_rip_retries.
+  max_rip_retries: 1
+
   # Optical drives to monitor for disc insertions.
   devices:
     - /dev/sr0
