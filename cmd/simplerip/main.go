@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -273,17 +274,50 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 			ctx := cmd.Context()
 			discCh := disc.PollEvents(ctx, cfg.MakeMKV.Devices, 5*time.Second)
 
+			// Track which devices have a rip in progress. A busy drive can make
+			// a poll probe transiently read "no disc" mid-rip; without this guard
+			// that produces a spurious removal (card flicker) and could start a
+			// duplicate rip on the same drive.
+			var ripMu sync.Mutex
+			ripActive := make(map[string]bool)
+
 			// Handle disc insertion/removal events in background.
 			go func() {
 				for ev := range discCh {
 					if !ev.Present {
+						// Ignore removals for a device that's mid-rip — the disc
+						// hasn't really left; the busy drive just failed a probe.
+						ripMu.Lock()
+						busy := ripActive[ev.Device]
+						ripMu.Unlock()
+						if busy {
+							fmt.Fprintf(os.Stderr, "Ignoring disc-removed on %s: rip in progress\n", ev.Device)
+							continue
+						}
 						// Disc removed — reset the drive card to idle.
 						fmt.Fprintf(os.Stderr, "Disc removed from %s\n", ev.Device)
 						svc.MarkDeviceIdle(ev.Device)
 						continue
 					}
+
+					// Don't start a second rip on a device that's already ripping.
+					ripMu.Lock()
+					if ripActive[ev.Device] {
+						ripMu.Unlock()
+						fmt.Fprintf(os.Stderr, "Ignoring disc-detected on %s: rip already in progress\n", ev.Device)
+						continue
+					}
+					ripActive[ev.Device] = true
+					ripMu.Unlock()
+
 					fmt.Fprintf(os.Stderr, "Disc detected on %s, starting rip...\n", ev.Device)
 					go func(dev string) {
+						defer func() {
+							ripMu.Lock()
+							delete(ripActive, dev)
+							ripMu.Unlock()
+						}()
+
 						// Apply timeout from config to rip job
 						timeout := time.Duration(cfg.MakeMKV.TimeoutMinutes) * time.Minute
 						if timeout == 0 {
