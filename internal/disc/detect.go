@@ -4,66 +4,107 @@ package disc
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+const discProbeTimeout = 90 * time.Second
+
+// DiscEvent reports a change in disc presence on a device.
+type DiscEvent struct {
+	Device  string // e.g. /dev/sr0
+	Present bool   // true = disc inserted, false = disc removed
+}
 
 // Poll continuously monitors optical devices for disc insertion.
 // It checks each device at the given interval by running makemkvcon.
 // When a disc is newly inserted, the device path is sent on the returned channel.
 // The same disc will not fire twice until it's been removed and reinserted.
 // Context cancellation stops the poll loop cleanly and closes the channel.
-// The per-device check timeout equals the poll interval, keeping total check
-// time bounded to interval × device count.
+// Each device is polled independently so one slow drive does not block the others.
+//
+// Poll reports insertions only; use PollEvents to also observe removals.
 func Poll(ctx context.Context, devices []string, interval time.Duration) <-chan string {
-	ch := make(chan string)
+	out := make(chan string)
+	events := PollEvents(ctx, devices, interval)
 	go func() {
-		defer close(ch)
-		state := make(map[string]bool) // device -> disc present
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		// Initial check before first tick
-		checkDevices(ctx, devices, state, ch, interval)
-
-		for {
+		defer close(out)
+		for ev := range events {
+			if !ev.Present {
+				continue
+			}
 			select {
+			case out <- ev.Device:
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				checkDevices(ctx, devices, state, ch, interval)
 			}
 		}
+	}()
+	return out
+}
+
+// PollEvents monitors optical devices and reports both insertions and removals
+// as DiscEvents. Each device is polled independently so one slow drive does not
+// block the others. Context cancellation stops the poll loop and closes the channel.
+func PollEvents(ctx context.Context, devices []string, interval time.Duration) <-chan DiscEvent {
+	ch := make(chan DiscEvent)
+	go func() {
+		var wg sync.WaitGroup
+		for _, device := range devices {
+			device := device
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				pollDevice(ctx, device, interval, ch)
+			}()
+		}
+		wg.Wait()
+		close(ch)
 	}()
 	return ch
 }
 
-// checkDevices polls each device and sends events for newly inserted discs.
-func checkDevices(ctx context.Context, devices []string, state map[string]bool, ch chan<- string, timeout time.Duration) {
-	for _, device := range devices {
-		hasDisc, ok := checkDevice(ctx, device, timeout)
-		
-		// If check failed (drive busy, timeout, error), don't update state.
-		// This prevents false "disc removed" events during active rips.
-		if !ok {
-			continue
-		}
-		
-		wasPresent := state[device]
+// pollDevice maintains independent state for a single drive, emitting a
+// DiscEvent whenever disc presence changes. A failed check (drive busy during a
+// rip, timeout, error) does not update state, so it never produces a spurious
+// "removed" event while a rip holds the drive.
+func pollDevice(ctx context.Context, device string, interval time.Duration, ch chan<- DiscEvent) {
+	state := false
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
-		if hasDisc && !wasPresent {
-			// Disc newly inserted
+	check := func() {
+		start := time.Now()
+		hasDisc, ok := checkDevice(ctx, device, discProbeTimeout)
+		elapsed := time.Since(start).Round(time.Millisecond)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "poll: device=%s ok=false elapsed=%s\n", device, elapsed)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "poll: device=%s hasDisc=%t prev=%t elapsed=%s\n", device, hasDisc, state, elapsed)
+		if hasDisc != state {
 			select {
-			case ch <- device:
+			case ch <- DiscEvent{Device: device, Present: hasDisc}:
 			case <-ctx.Done():
 				return
 			}
 		}
+		state = hasDisc
+	}
 
-		state[device] = hasDisc
+	check()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			check()
+		}
 	}
 }
 
@@ -112,10 +153,18 @@ func checkDevice(ctx context.Context, device string, timeout time.Duration) (has
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return false, false
+	}
 
 	// Wait for command to finish
 	if err := cmd.Wait(); err != nil {
-		// Command failed - might be drive busy, timeout, or error
+		// If we already parsed TCOUNT, trust it even when makemkvcon exits
+		// non-zero. Some drives/tools report a recoverable error after printing
+		// the disc count, and disc presence is still authoritative here.
+		if foundTCOUNT {
+			return tcount > 0, true
+		}
 		return false, false
 	}
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,14 +22,26 @@ import (
 	"github.com/8bitreid/simplerip/internal/notify"
 	"github.com/8bitreid/simplerip/internal/output"
 	"github.com/8bitreid/simplerip/internal/ripper"
+	"github.com/8bitreid/simplerip/internal/store"
 )
 
 // ProgressEvent represents a state update during the rip process.
 type ProgressEvent struct {
-	Stage   string `json:"stage"`   // scanning, ripping, delivering, done, idle, error
-	Title   string `json:"title"`   // e.g. "Revenge of the Sith"
-	Percent int    `json:"percent"` // 0-100
-	Message string `json:"message"` // human-readable status message
+	Device  string `json:"device,omitempty"` // e.g. /dev/sr0
+	Stage   string `json:"stage"`            // scanning, ripping, delivering, done, idle, error
+	Title   string `json:"title"`            // e.g. "Revenge of the Sith"
+	Percent int    `json:"percent"`          // 0-100
+	Message string `json:"message"`          // human-readable status message
+}
+
+func describeScanError(err error) string {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "copy protection key exchange failure") ||
+		strings.Contains(msg, "key not present") ||
+		strings.Contains(msg, "rpc protection") {
+		return "Drive region/RPC protection blocked disc authentication. Set the drive region or update firmware, then retry."
+	}
+	return fmt.Sprintf("Scan failed: %v", err)
 }
 
 // EventBus is a simple channel-based fan-out for broadcasting progress events.
@@ -53,7 +66,7 @@ func (bus *EventBus) Subscribe() (id int, ch <-chan ProgressEvent) {
 	defer bus.mu.Unlock()
 	id = bus.nextID
 	bus.nextID++
-	c := make(chan ProgressEvent, 10) // buffered to prevent blocking
+	c := make(chan ProgressEvent, 256) // buffered so progress spam never drops terminal (done/error) events
 	bus.subscribers[id] = c
 	return id, c
 }
@@ -88,6 +101,7 @@ type RipService struct {
 	cfg      *config.Config
 	notify   *notify.Client
 	eventBus *EventBus
+	store    *store.Store
 }
 
 var (
@@ -96,18 +110,30 @@ var (
 )
 
 // New creates a RipService with the given configuration.
-// The notification client is initialized from cfg.Notification.WebhookURL.
-func New(cfg *config.Config) *RipService {
+// st may be nil — all store calls become no-ops, preserving existing behaviour.
+func New(cfg *config.Config, st *store.Store) *RipService {
 	return &RipService{
 		cfg:      cfg,
 		notify:   notify.NewClient(cfg.Notification.WebhookURL),
 		eventBus: NewEventBus(),
+		store:    st,
 	}
 }
 
 // EventBus returns the service's EventBus for subscribing to progress updates.
 func (s *RipService) EventBus() *EventBus {
 	return s.eventBus
+}
+
+// MarkDeviceIdle emits an idle progress event for a device, e.g. after its disc
+// has been removed, so subscribed UIs reset that drive's card to "no disc".
+func (s *RipService) MarkDeviceIdle(device string) {
+	s.eventBus.Emit(ProgressEvent{
+		Device:  device,
+		Stage:   "idle",
+		Percent: 0,
+		Message: "no disc — waiting",
+	})
 }
 
 // ScanDisc scans a physical disc device and classifies its titles.
@@ -140,8 +166,15 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 // the API key is not configured or lookup fails, the raw DiscName is used instead.
 // Returns an error if scan/rip/delivery steps fail. Notification is best-effort.
 func (s *RipService) RipDisc(ctx context.Context, device string) error {
+	// job tracks the DB record; zero value is safe when s.store == nil.
+	var job store.Job
+	// identifiedTitle/Year are populated after TMDB lookup and used in the final UpdateJob.
+	var identifiedTitle string
+	var identifiedYear int
+
 	// Step 1: Scan disc.
 	s.eventBus.Emit(ProgressEvent{
+		Device:  device,
 		Stage:   "scanning",
 		Title:   "",
 		Percent: 0,
@@ -150,25 +183,53 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 
 	scanned, err := ripper.ScanInfo(ctx, "makemkvcon", device, s.cfg.MakeMKV.Key)
 	if err != nil {
+		friendlyMsg := describeScanError(err)
 		s.eventBus.Emit(ProgressEvent{
+			Device:  device,
 			Stage:   "error",
 			Title:   "",
 			Percent: 0,
-			Message: fmt.Sprintf("Scan failed: %v", err),
+			Message: friendlyMsg,
 		})
+		if s.store != nil {
+			if failedJob, createErr := s.store.CreateJob(ctx, device, ""); createErr == nil {
+				_ = s.store.AddEvent(ctx, failedJob.ID, "error", friendlyMsg,
+					map[string]any{"error": err.Error(), "device": device, "error_type": "scan"})
+				_ = s.store.UpdateStatus(ctx, failedJob.ID, "error")
+			}
+		}
 		return fmt.Errorf("scan device %q: %w", device, err)
 	}
 
 	// Step 2: Classify titles.
 	result := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
 
+	// Create a DB job record now that we have a disc label.
+	if s.store != nil {
+		job, _ = s.store.CreateJob(ctx, device, scanned.DiscName)
+		pattern := strings.ToLower(result.Pattern.String())
+		mainIndex := -1
+		if len(result.MainTitles) > 0 {
+			mainIndex = result.MainTitles[0].Index
+		}
+		_ = s.store.AddEvent(ctx, job.ID, "scan",
+			fmt.Sprintf("found %d titles, pattern: %s", len(scanned.Titles), pattern),
+			map[string]any{
+				"titles":     scanned.Titles,
+				"pattern":    pattern,
+				"main_index": mainIndex,
+			})
+		_ = s.store.UpdateJob(ctx, job.ID, "", 0, "scanning", pattern)
+	}
+
 	// Step 3: TMDB metadata lookup.
 	mediaTitle := scanned.DiscName
 	if s.cfg.Metadata.TMDBApiKey != "" && scanned.DiscName != "" {
 		s.eventBus.Emit(ProgressEvent{
-			Stage:   "scanning",
+			Device:  device,
+			Stage:   "identifying",
 			Title:   "",
-			Percent: 20,
+			Percent: 0,
 			Message: fmt.Sprintf("Looking up metadata for %q", scanned.DiscName),
 		})
 
@@ -192,12 +253,46 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 				details, err := s.EnrichMovie(ctx, chosen)
 				if err == nil {
 					mediaTitle = details.FolderName()
+					if s.store != nil {
+						yr, _ := strconv.Atoi(details.Year)
+						matchReason := "best_match"
+						if runtimeWinner {
+							matchReason = "runtime_match"
+						}
+						_ = s.store.AddEvent(ctx, job.ID, "identify",
+							fmt.Sprintf("identified as: %s (%d)", details.Title, yr),
+							map[string]any{
+								"tmdb_id":         chosen.ID,
+								"title":           details.Title,
+								"year":            yr,
+								"runtime_minutes": details.RuntimeMinutes,
+								"match_reason":    matchReason,
+							})
+						_ = s.store.UpdateJob(ctx, job.ID, details.Title, yr, "identifying", "")
+						identifiedTitle = details.Title
+						identifiedYear = yr
+					}
 				}
 			} else {
 				// Fall back to first result if BestMatch fails
 				details, err := s.EnrichMovie(ctx, movies[0])
 				if err == nil {
 					mediaTitle = details.FolderName()
+					if s.store != nil {
+						yr, _ := strconv.Atoi(details.Year)
+						_ = s.store.AddEvent(ctx, job.ID, "identify",
+							fmt.Sprintf("identified as: %s (%d)", details.Title, yr),
+							map[string]any{
+								"tmdb_id":         movies[0].ID,
+								"title":           details.Title,
+								"year":            yr,
+								"runtime_minutes": details.RuntimeMinutes,
+								"match_reason":    "first_result",
+							})
+						_ = s.store.UpdateJob(ctx, job.ID, details.Title, yr, "identifying", "")
+						identifiedTitle = details.Title
+						identifiedYear = yr
+					}
 				}
 			}
 		}
@@ -208,11 +303,16 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	// For now, skip extras — future enhancement will integrate Discord callbacks.
 	if len(result.MainTitles) == 0 {
 		s.eventBus.Emit(ProgressEvent{
+			Device:  device,
 			Stage:   "error",
 			Title:   "",
 			Percent: 0,
 			Message: "No main titles found on disc",
 		})
+		if s.store != nil {
+			_ = s.store.AddEvent(ctx, job.ID, "error", "no main titles found on disc", nil)
+			_ = s.store.UpdateStatus(ctx, job.ID, "error")
+		}
 		return fmt.Errorf("no main titles found on disc %q", device)
 	}
 
@@ -223,11 +323,16 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	}
 	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
 		s.eventBus.Emit(ProgressEvent{
+			Device:  device,
 			Stage:   "error",
 			Title:   "",
 			Percent: 0,
 			Message: fmt.Sprintf("Failed to create staging dir: %v", err),
 		})
+		if s.store != nil {
+			_ = s.store.AddEvent(ctx, job.ID, "error", err.Error(), nil)
+			_ = s.store.UpdateStatus(ctx, job.ID, "error")
+		}
 		return fmt.Errorf("create staging dir: %w", err)
 	}
 
@@ -235,11 +340,16 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	ripOutputDir := filepath.Join(stagingDir, jobID)
 	if err := os.MkdirAll(ripOutputDir, 0o755); err != nil {
 		s.eventBus.Emit(ProgressEvent{
+			Device:  device,
 			Stage:   "error",
 			Title:   "",
 			Percent: 0,
 			Message: fmt.Sprintf("Failed to create output dir: %v", err),
 		})
+		if s.store != nil {
+			_ = s.store.AddEvent(ctx, job.ID, "error", err.Error(), nil)
+			_ = s.store.UpdateStatus(ctx, job.ID, "error")
+		}
 		return fmt.Errorf("create rip output dir: %w", err)
 	}
 
@@ -247,23 +357,44 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	totalTitles := len(result.MainTitles)
 	for idx, title := range result.MainTitles {
 		s.eventBus.Emit(ProgressEvent{
+			Device:  device,
 			Stage:   "ripping",
 			Title:   mediaTitle,
 			Percent: (idx * 100) / totalTitles,
 			Message: fmt.Sprintf("Ripping %s (title %d of %d)", mediaTitle, idx+1, totalTitles),
 		})
 
+		if s.store != nil {
+			audioDesc := fmt.Sprintf("%.1fh, %d audio tracks", title.Duration.Hours(), title.AudioTrackCount)
+			_ = s.store.AddEvent(ctx, job.ID, "score",
+				fmt.Sprintf("selected title %d: %s", title.Index, audioDesc),
+				map[string]any{
+					"selected_index": title.Index,
+					"duration":       title.Duration.String(),
+					"size_gb":        title.SizeGB,
+					"audio_tracks":   title.AudioTrackCount,
+					"chapters":       title.ChapterCount,
+				})
+		}
+
 		// Create progress callback that emits to EventBus, normalizing per-title
 		// progress (0-100) to overall progress across all titles.
 		titleIdx := idx // capture for closure
+		lastReportedPct := -10
 		progressCb := func(_ int, percent int) {
 			overall := (titleIdx*100 + percent) / totalTitles
 			s.eventBus.Emit(ProgressEvent{
+				Device:  device,
 				Stage:   "ripping",
 				Title:   mediaTitle,
 				Percent: overall,
 				Message: fmt.Sprintf("Ripping %s (%d%%)", mediaTitle, overall),
 			})
+			if s.store != nil && overall >= lastReportedPct+10 {
+				lastReportedPct = (overall / 10) * 10
+				_ = s.store.AddEvent(ctx, job.ID, "rip",
+					fmt.Sprintf("progress: %d%%", overall), nil)
+			}
 		}
 
 		files, err := ripper.RipTitle(
@@ -278,23 +409,48 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		)
 		if err != nil {
 			s.eventBus.Emit(ProgressEvent{
+				Device:  device,
 				Stage:   "error",
 				Title:   mediaTitle,
 				Percent: (idx * 100) / totalTitles,
 				Message: fmt.Sprintf("Rip failed: %v", err),
 			})
+			if s.store != nil {
+				_ = s.store.AddEvent(ctx, job.ID, "error", err.Error(), nil)
+				_ = s.store.UpdateStatus(ctx, job.ID, "error")
+			}
 			return fmt.Errorf("rip title %d: %w", title.Index, err)
 		}
+
+		if s.store != nil {
+			for _, f := range files {
+				fi, _ := os.Stat(f)
+				sizeGB := 0.0
+				if fi != nil {
+					sizeGB = float64(fi.Size()) / (1024 * 1024 * 1024)
+				}
+				_ = s.store.AddEvent(ctx, job.ID, "rip",
+					fmt.Sprintf("complete: %s (%.1f GB)", filepath.Base(f), sizeGB),
+					map[string]any{"file": filepath.Base(f), "size_gb": sizeGB})
+			}
+			_ = s.store.UpdateStatus(ctx, job.ID, "ripping")
+		}
+
 		rippedFiles = append(rippedFiles, files...)
 	}
 
 	if len(rippedFiles) == 0 {
 		s.eventBus.Emit(ProgressEvent{
+			Device:  device,
 			Stage:   "error",
 			Title:   "",
 			Percent: 0,
 			Message: "No files ripped from disc",
 		})
+		if s.store != nil {
+			_ = s.store.AddEvent(ctx, job.ID, "error", "no files ripped from disc", nil)
+			_ = s.store.UpdateStatus(ctx, job.ID, "error")
+		}
 		return fmt.Errorf("no files ripped from disc %q", device)
 	}
 
@@ -302,6 +458,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	destDir := s.cfg.Output.NASPath
 	if destDir != "" {
 		s.eventBus.Emit(ProgressEvent{
+			Device:  device,
 			Stage:   "delivering",
 			Title:   mediaTitle,
 			Percent: 90,
@@ -320,15 +477,33 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		)
 		if err != nil {
 			s.eventBus.Emit(ProgressEvent{
+				Device:  device,
 				Stage:   "error",
 				Title:   mediaTitle,
 				Percent: 90,
 				Message: fmt.Sprintf("Delivery failed: %v", err),
 			})
+			if s.store != nil {
+				_ = s.store.AddEvent(ctx, job.ID, "error", err.Error(), nil)
+				_ = s.store.UpdateStatus(ctx, job.ID, "error")
+			}
 			return fmt.Errorf("deliver to NAS: %w", err)
 		}
 		// Update rippedFiles to point to destination paths for notification.
 		rippedFiles = deliverResult.Files
+
+		if s.store != nil {
+			var deliveredGB float64
+			for _, f := range deliverResult.Files {
+				if fi, statErr := os.Stat(f); statErr == nil {
+					deliveredGB += float64(fi.Size()) / (1024 * 1024 * 1024)
+				}
+			}
+			_ = s.store.AddEvent(ctx, job.ID, "deliver",
+				fmt.Sprintf("rsync complete: %.1f GB verified on NAS", deliveredGB),
+				map[string]any{"nas_path": deliverResult.DestDir, "size_gb": deliveredGB})
+			_ = s.store.UpdateJob(ctx, job.ID, identifiedTitle, identifiedYear, "done", "")
+		}
 
 		// Clean up staging directory after successful delivery.
 		// Deliver() has already verified all files exist at destination with matching sizes,
@@ -385,6 +560,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	if err := s.notify.Send(ctx, payload); err != nil {
 		// Notification failure is not fatal — the rip succeeded.
 		s.eventBus.Emit(ProgressEvent{
+			Device:  device,
 			Stage:   "done",
 			Title:   "",
 			Percent: 100,
@@ -394,6 +570,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	}
 
 	s.eventBus.Emit(ProgressEvent{
+		Device:  device,
 		Stage:   "done",
 		Title:   "",
 		Percent: 100,

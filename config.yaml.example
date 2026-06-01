@@ -86,3 +86,7 @@ metadata:
   # ISO 639-2 language code for preferred audio/subtitle track selection
   # and metadata language. "eng" = English, "deu" = German, "fra" = French.
   preferred_language: eng
+
+# ── Database ─────────────────────────────────────────────────────────────────
+database:
+  url: "postgres://simplerip:simplerip@db:5432/simplerip?sslmode=disable"

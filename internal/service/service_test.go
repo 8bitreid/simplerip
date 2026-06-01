@@ -155,7 +155,7 @@ esac
 
 func TestRipService_ScanDisc_Movie(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	// Open the movie fixture.
 	fixturePath := filepath.Join("..", "..", "testdata", "movie.txt")
@@ -188,7 +188,7 @@ func TestRipService_ScanDisc_Movie(t *testing.T) {
 
 func TestRipService_ScanDisc_TV(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	// Open the TV show fixture.
 	fixturePath := filepath.Join("..", "..", "testdata", "tvshow.txt")
@@ -216,7 +216,7 @@ func TestRipService_ScanDisc_TV(t *testing.T) {
 
 func TestRipService_ScanDisc_MissingMetadata(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	// Open the missing metadata fixture.
 	fixturePath := filepath.Join("..", "..", "testdata", "missing-metadata.txt")
@@ -408,7 +408,7 @@ func findCrossDeviceDir(t *testing.T, srcDir string) (string, bool) {
 
 func TestEnrichMovie_NoAPIKey(t *testing.T) {
 	cfg := config.Defaults() // TMDBApiKey is empty
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	_, err := svc.EnrichMovie(context.Background(), metadata.MovieResult{ID: 1, Title: "Oppenheimer"})
 	if err == nil {
@@ -418,7 +418,7 @@ func TestEnrichMovie_NoAPIKey(t *testing.T) {
 
 func TestSearchMovie_NoAPIKey(t *testing.T) {
 	cfg := config.Defaults() // TMDBApiKey is empty
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	_, err := svc.SearchMovie(context.Background(), "Oppenheimer")
 	if err == nil {
@@ -431,7 +431,7 @@ func TestScanDiscWithFakeMakeMKV(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	result, err := svc.ScanDisc("/dev/sr0")
 	if err != nil {
@@ -453,7 +453,7 @@ func TestRipDiscWithFakeMakeMKV(t *testing.T) {
 	cfg.Output.StagingDir = t.TempDir()
 	cfg.Output.NASPath = ""
 
-	svc := New(cfg)
+	svc := New(cfg, nil)
 	if err := svc.RipDisc(context.Background(), "/dev/sr0"); err != nil {
 		t.Fatalf("RipDisc() error = %v", err)
 	}
@@ -472,7 +472,7 @@ func TestRipDiscNoMainTitles(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Output.StagingDir = t.TempDir()
 
-	svc := New(cfg)
+	svc := New(cfg, nil)
 	err := svc.RipDisc(context.Background(), "/dev/sr0")
 	if err == nil || !strings.Contains(err.Error(), "no main titles found") {
 		t.Fatalf("RipDisc() error = %v, want no-main-titles error", err)
@@ -481,7 +481,7 @@ func TestRipDiscNoMainTitles(t *testing.T) {
 
 func TestCleanDirNoMKVFiles(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	err := svc.CleanDir(t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "analyze dir") {
@@ -502,7 +502,7 @@ func TestCleanDirSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := New(config.Defaults())
+	svc := New(config.Defaults(), nil)
 	if err := svc.CleanDir(dir); err != nil {
 		t.Fatalf("CleanDir() error = %v", err)
 	}
@@ -587,7 +587,7 @@ func TestSearchMovie_RetryTable(t *testing.T) {
 
 			cfg := config.Defaults()
 			cfg.Metadata.TMDBApiKey = "tmdb-key"
-			svc := New(cfg)
+			svc := New(cfg, nil)
 
 			got, err := svc.SearchMovie(context.Background(), tc.input)
 			if tc.wantErr != "" {
@@ -687,7 +687,7 @@ func TestEnrichMovie_Table(t *testing.T) {
 			cfg := config.Defaults()
 			cfg.Metadata.TMDBApiKey = "tmdb-key"
 			cfg.Metadata.OMDbApiKey = tc.omdbKey
-			svc := New(cfg)
+			svc := New(cfg, nil)
 
 			got, err := svc.EnrichMovie(context.Background(), metadata.MovieResult{ID: 7, ReleaseDate: "2000-02-18"})
 			if tc.wantErr != "" {
@@ -928,7 +928,7 @@ func TestQueryFromMKVPath(t *testing.T) {
 
 func TestNew(t *testing.T) {
 	cfg := config.Defaults()
-	svc := New(cfg)
+	svc := New(cfg, nil)
 
 	if svc == nil {
 		t.Fatal("New returned nil")

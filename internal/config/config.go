@@ -14,6 +14,11 @@ type Config struct {
 	Server       ServerConfig       `yaml:"server"`
 	MakeMKV      MakeMKVConfig      `yaml:"makemkv"`
 	Metadata     MetadataConfig     `yaml:"metadata"`
+	Database     DatabaseConfig     `yaml:"database"`
+}
+
+type DatabaseConfig struct {
+	URL string `yaml:"url"`
 }
 
 type DetectionConfig struct {

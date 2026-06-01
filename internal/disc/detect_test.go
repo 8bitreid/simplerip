@@ -175,6 +175,78 @@ done:
 	}
 }
 
+func TestPollTreatsParsedTCOUNTAsSuccessEvenOnExitError(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockPath := filepath.Join(tmpDir, "mock-makemkvcon")
+	// checkDevice runs: makemkvcon -r --cache=1 info dev:/dev/sr0
+	// so the device argument is $4. A case pattern cannot contain unquoted
+	// spaces, so match on the device arg alone rather than the whole arg list.
+	script := `#!/bin/sh
+case "$4" in
+  dev:/dev/sr0)
+    echo 'TCOUNT:1'
+    exit 1
+    ;;
+esac
+echo 'TCOUNT:0'
+exit 0
+`
+	if err := os.WriteFile(mockPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	disc.SetMakemkvPathForTest(mockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	ch := disc.Poll(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+
+	select {
+	case device := <-ch:
+		if device != "/dev/sr0" {
+			t.Fatalf("got device %q, want /dev/sr0", device)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("timeout waiting for disc detection event")
+	}
+}
+
+// TestPollEventsReportsRemoval verifies that PollEvents emits a Present=false
+// event when a disc is removed, after the initial Present=true insertion.
+func TestPollEventsReportsRemoval(t *testing.T) {
+	mockPath := createMockMakemkv(t, map[string][]int{
+		"/dev/sr0": {1, 1, 0, 0}, // disc present, then removed
+	})
+	defer os.Remove(mockPath)
+
+	disc.SetMakemkvPathForTest(mockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	ch := disc.PollEvents(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+
+	// First: insertion.
+	select {
+	case ev := <-ch:
+		if ev.Device != "/dev/sr0" || !ev.Present {
+			t.Fatalf("first event = %+v, want {/dev/sr0 true}", ev)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for insertion event")
+	}
+
+	// Then: removal.
+	select {
+	case ev := <-ch:
+		if ev.Device != "/dev/sr0" || ev.Present {
+			t.Fatalf("second event = %+v, want {/dev/sr0 false}", ev)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for removal event")
+	}
+}
+
 // createMockMakemkv creates a mock makemkvcon script that returns different
 // TCOUNT values on successive invocations for each device.
 // tcounts maps device paths to a sequence of title counts.
