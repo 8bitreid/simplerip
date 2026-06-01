@@ -275,10 +275,10 @@ exit 0
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	ch := disc.PollEventsWithBusy(ctx, []string{"/dev/sr0"}, 100*time.Millisecond, isBusy)
 	defer func() {
+		cancel()
 		for range ch {
 		}
 	}()
