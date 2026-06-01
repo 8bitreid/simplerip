@@ -142,9 +142,26 @@ header h1 {
 .stage-msg { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stage-msg.active { color: var(--text); }
 
-.prog-wrap { height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+.prog-wrap { position: relative; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
 .prog-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; background: var(--accent); }
 .prog-fill.done { background: var(--green); }
+
+/* Indeterminate sweep for stages with no measurable progress (scan, identify):
+   a back-and-forth "radar" pass instead of a misleading static bar. */
+.prog-fill.indeterminate {
+  position: absolute;
+  width: 35%;
+  left: 0;
+  transition: none;
+  animation: prog-sweep 1.1s ease-in-out infinite alternate;
+}
+@keyframes prog-sweep {
+  from { left: 0%; }
+  to   { left: 65%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prog-fill.indeterminate { animation: none; width: 100%; opacity: 0.4; }
+}
 
 .eject-btn {
   display: block;
@@ -402,6 +419,9 @@ const STAGE_ALIASES = {
 };
 function canonStage(stage) { return STAGE_ALIASES[stage] || stage; }
 
+// Stages with no measurable progress — show an indeterminate sweep, not a bar.
+const INDETERMINATE_STAGES = new Set(['scan', 'identify']);
+
 // device → ProgressEvent (stage, percent, message, title, device)
 const driveStates = {};
 const knownDevices = new Set();
@@ -514,12 +534,18 @@ function driveCardHTML(st) {
     const msgClass  = isCurrent ? 'active' : '';
     const stageMsg  = isCurrent ? (message || '') : '';
     const fillClass = isDone ? 'done' : '';
+    // The active scan/identify stage has no real percentage — sweep instead of
+    // showing a stuck 0% bar that implies a known end time.
+    const indeterminate = isCurrent && INDETERMINATE_STAGES.has(s);
+    const fill = indeterminate
+      ? `<div class="prog-fill indeterminate"></div>`
+      : `<div class="prog-fill ${fillClass}" style="width:${pct}%"></div>`;
     return `
       <div class="stage-row">
         <span class="stage-icon ${iconClass}">${icon}</span>
         <span class="stage-name ${nameClass}">${esc(s)}</span>
         <span class="stage-msg  ${msgClass}">${esc(stageMsg)}</span>
-        <div class="prog-wrap"><div class="prog-fill ${fillClass}" style="width:${pct}%"></div></div>
+        <div class="prog-wrap">${fill}</div>
       </div>`;
   }).join('');
 
