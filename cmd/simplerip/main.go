@@ -447,29 +447,44 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 		stdin := bufio.NewScanner(os.Stdin)
 
 		// ── Step 1: flatten extras/ into parent dir ─────────────────────────
-		if moved, err := output.FlattenSubdirs(absDir); err != nil {
+		// In dry-run, FlattenSubdirs is read-only: it reports the files it
+		// *would* move (in their current subdir locations) so the preview stays
+		// faithful without mutating the disk.
+		flattened, err := output.FlattenSubdirs(absDir, dryRun)
+		if err != nil {
 			return fmt.Errorf(organizeErrFmt, err)
-		} else if len(moved) > 0 {
-			fmt.Fprintf(os.Stderr, "Flattened %d file(s) from extras/\n", len(moved))
-			for _, f := range moved {
+		}
+		if len(flattened) > 0 {
+			verb := "Flattened"
+			if dryRun {
+				verb = "[dry-run] Would flatten"
+			}
+			fmt.Fprintf(os.Stderr, "%s %d file(s) from extras/\n", verb, len(flattened))
+			for _, f := range flattened {
 				fmt.Fprintf(os.Stderr, "  %s\n", filepath.Base(f))
 			}
 		}
 
 		// ── Step 2: deduplicate ──────────────────────────────────────────────
+		// Effective file set = top-level MKVs plus, in dry-run, the extras files
+		// that would have been flattened (analysed in place, since they were not
+		// actually moved).
 		fmt.Fprintf(os.Stderr, "Scanning %s...\n", absDir)
-		analyses, err := output.AnalyzeDir(ctx, absDir)
+		effectiveMKVs, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
+		if dryRun {
+			effectiveMKVs = append(effectiveMKVs, flattened...)
+		}
+		analyses, err := output.AnalyzeFiles(ctx, effectiveMKVs)
 		if err != nil {
 			return fmt.Errorf(organizeErrFmt, err)
 		}
 
 		var keptFile string
 		if len(analyses) == 0 {
-			matches, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
-			if len(matches) == 0 {
+			if len(effectiveMKVs) == 0 {
 				return fmt.Errorf("organize: no MKV files found in %q", absDir)
 			}
-			keptFile = matches[0]
+			keptFile = effectiveMKVs[0]
 			fmt.Fprintf(os.Stderr, "No duplicates found. File: %s\n", filepath.Base(keptFile))
 		} else {
 			a := analyses[0]
@@ -510,7 +525,7 @@ highest audio quality), looks up TMDB/OMDb metadata, and renames files to
 			keptFile = results[0].Kept
 		}
 
-		allMKVs, _ := filepath.Glob(filepath.Join(absDir, "*.mkv"))
+		allMKVs := effectiveMKVs
 		keepPaths := []string{keptFile}
 		if len(analyses) == 0 {
 			keepPaths = append([]string{}, allMKVs...)

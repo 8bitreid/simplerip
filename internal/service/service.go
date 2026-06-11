@@ -889,7 +889,7 @@ func (s *RipService) CleanDir(dir string) error {
 	ctx := context.Background()
 
 	// Step 1: Flatten extras/ subdirectories.
-	_, err := output.FlattenSubdirs(dir)
+	_, err := output.FlattenSubdirs(dir, false)
 	if err != nil {
 		return fmt.Errorf("flatten subdirs: %w", err)
 	}
