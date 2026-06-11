@@ -171,7 +171,7 @@ func TestFlattenSubdirs(t *testing.T) {
 			dir := t.TempDir()
 			tc.makeLayout(t, dir)
 
-			moved, err := FlattenSubdirs(dir)
+			moved, err := FlattenSubdirs(dir, false)
 			if err != nil {
 				t.Fatalf("FlattenSubdirs() error = %v", err)
 			}
@@ -198,6 +198,44 @@ func TestFlattenSubdirs(t *testing.T) {
 				t.Fatalf("remaining files = %v, want %v", gotRemain, tc.wantRemain)
 			}
 		})
+	}
+}
+
+// TestFlattenSubdirsDryRun verifies that a dry run is read-only: it reports the
+// source files it would move (in place, inside the subdir) without moving any
+// file or removing the subdirectory.
+func TestFlattenSubdirsDryRun(t *testing.T) {
+	dir := t.TempDir()
+	extras := filepath.Join(dir, "extras")
+	if err := os.Mkdir(extras, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(extras, "a.mkv")
+	if err := os.WriteFile(src, []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	moved, err := FlattenSubdirs(dir, true)
+	if err != nil {
+		t.Fatalf("FlattenSubdirs() error = %v", err)
+	}
+
+	// Reports the source path in place, not a destination in dir.
+	if !reflect.DeepEqual(moved, []string{src}) {
+		t.Fatalf("would-move = %v, want %v", moved, []string{src})
+	}
+
+	// Nothing was moved up into dir.
+	if entries, _ := filepath.Glob(filepath.Join(dir, "*.mkv")); len(entries) != 0 {
+		t.Fatalf("dry-run moved files into dir: %v", entries)
+	}
+
+	// The source file and its subdirectory are both untouched.
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("dry-run removed source file: %v", err)
+	}
+	if _, err := os.Stat(extras); err != nil {
+		t.Fatalf("dry-run removed subdir: %v", err)
 	}
 }
 

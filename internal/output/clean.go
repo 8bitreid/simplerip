@@ -43,9 +43,21 @@ func AnalyzeDir(ctx context.Context, dir string) ([]CleanAnalysis, error) {
 	if err != nil || len(entries) == 0 {
 		return nil, fmt.Errorf("no MKV files found in %q", dir)
 	}
+	return AnalyzeFiles(ctx, entries)
+}
+
+// AnalyzeFiles probes the given MKV files, groups them by duration, and returns
+// one CleanAnalysis per duplicate group. Files whose duration does not match any
+// other (singleton groups) have nothing to deduplicate and are omitted. Accepting
+// an explicit file list (rather than globbing a directory) lets callers preview a
+// would-be layout — e.g. dry-run organize analyzing extras files still in place.
+func AnalyzeFiles(ctx context.Context, paths []string) ([]CleanAnalysis, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no MKV files to analyze")
+	}
 
 	var infos []*inspect.FileInfo
-	for _, path := range entries {
+	for _, path := range paths {
 		info, err := inspect.Probe(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("probe %q: %w", filepath.Base(path), err)
@@ -116,8 +128,13 @@ func ExecuteDedupe(dir string, analyses []CleanAnalysis) ([]CleanResult, error) 
 // FlattenSubdirs moves all MKV files from any immediate subdirectory of dir
 // up into dir, then removes the (now-empty) subdirectory. This normalises
 // the layout before AnalyzeDir runs so all files are considered together.
-// Returns the paths of any files that were moved.
-func FlattenSubdirs(dir string) ([]string, error) {
+//
+// When dryRun is true, no files are moved and no subdirectory is removed; the
+// function instead returns the source paths (in their current subdir locations)
+// of the files it *would* move, so callers can preview and analyse them in place
+// without mutating the disk. When dryRun is false it returns the destination
+// paths of the files actually moved.
+func FlattenSubdirs(dir string, dryRun bool) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read dir: %w", err)
@@ -131,6 +148,12 @@ func FlattenSubdirs(dir string) ([]string, error) {
 		subdir := filepath.Join(dir, entry.Name())
 		mkvs, _ := filepath.Glob(filepath.Join(subdir, "*.mkv"))
 		for _, src := range mkvs {
+			if dryRun {
+				// Report the file where it currently lives; the caller analyses
+				// it in place. Skip collision/rename handling — nothing moves.
+				moved = append(moved, src)
+				continue
+			}
 			dst := filepath.Join(dir, filepath.Base(src))
 			// Avoid overwriting an existing file with the same name.
 			if _, err := os.Stat(dst); err == nil {
@@ -142,6 +165,9 @@ func FlattenSubdirs(dir string) ([]string, error) {
 				return moved, fmt.Errorf("flatten %q: %w", filepath.Base(src), err)
 			}
 			moved = append(moved, dst)
+		}
+		if dryRun {
+			continue
 		}
 		// Remove subdirectory if now empty.
 		_ = os.Remove(subdir)
