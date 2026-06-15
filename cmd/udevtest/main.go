@@ -15,7 +15,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	targets := []string{"/dev/sr0"}
+	targets := []string{"/dev/sr0", "/dev/sr1"}
 	fmt.Printf("Listening for udev events on %v... (Press Ctrl+C to stop)\n", targets)
 
 	events := disc.ListenUdevEvents(ctx, targets)
