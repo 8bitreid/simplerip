@@ -175,13 +175,21 @@ func FlattenSubdirs(dir string, dryRun bool) ([]string, error) {
 	return moved, nil
 }
 
+// TitleFileName returns the canonical MKV basename for a delivered title,
+// matching Jellyfin's "Title (Year)/Title (Year).mkv" layout. It is the single
+// source of truth for the file-naming convention shared by RenameToTitle (the
+// organize workflow) and Deliver (the automated daemon).
+func TitleFileName(folderName string) string {
+	return filepath.Base(folderName) + ".mkv"
+}
+
 // RenameToTitle moves keptFile into baseDir/folderName/folderName.mkv.
 func RenameToTitle(keptFile, baseDir, folderName string) (string, error) {
 	newDir := filepath.Join(baseDir, folderName)
 	if err := os.MkdirAll(newDir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %q: %w", newDir, err)
 	}
-	newFile := filepath.Join(newDir, folderName+".mkv")
+	newFile := filepath.Join(newDir, TitleFileName(folderName))
 	if err := os.Rename(keptFile, newFile); err != nil {
 		return "", fmt.Errorf("rename file: %w", err)
 	}

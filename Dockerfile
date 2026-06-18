@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # Only the compiled binary is carried forward to the final image.
 FROM ubuntu:24.04 AS makemkv
 
-ARG MAKEMKV_VERSION=1.18.3
+ARG MAKEMKV_VERSION=1.18.4
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
@@ -80,6 +80,7 @@ RUN apt-get update \
         ffmpeg \
         rsync \
         eject \
+        udev \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
