@@ -272,37 +272,35 @@ automatically listen to udev kernel changes and start ripping when a disc is det
 		// Start udev real-time listener if devices are configured
 		if len(cfg.MakeMKV.Devices) > 0 {
 			ctx := cmd.Context()
-			busyDevices := &disc.BusyDeviceTracker{}
-			
-			// Use the new non-blocking udev stream listener
+			stateTracker := disc.NewDriveStateTracker()
+
+			// Use the non-blocking udev stream listener (no polling).
 			discCh := disc.ListenUdevEvents(ctx, cfg.MakeMKV.Devices)
 
 			// Handle disc insertion/removal events in background.
 			go func() {
 				for ev := range discCh {
 					if !ev.Present {
-						// Ignore removals for a device that's mid-rip
-						if busyDevices.IsBusy(ev.Device) {
-							fmt.Fprintf(os.Stderr, "Ignoring disc-removed on %s: rip in progress\n", ev.Device)
-							continue
-						}
-						// Disc removed — reset the drive card to idle.
+						// Removal always resets the drive's state machine. If a
+						// rip was in progress, RipDisc's own ctx/error handling
+						// is the real abort path; this is informational only.
 						fmt.Fprintf(os.Stderr, "Disc removed from %s\n", ev.Device)
+						stateTracker.OnDiscEvent(ev)
 						svc.MarkDeviceIdle(ev.Device)
 						continue
 					}
 
-					// Don't start a second rip on a device that's already ripping.
-					if busyDevices.IsBusy(ev.Device) {
-						fmt.Fprintf(os.Stderr, "Ignoring disc-detected on %s: rip already in progress\n", ev.Device)
+					// Only the empty -> media_detected transition starts a rip.
+					// Duplicate "present" events for an already-known disc are
+					// ignored, so a disc that's been ripped won't re-trigger.
+					if !stateTracker.OnDiscEvent(ev) {
+						fmt.Fprintf(os.Stderr, "Ignoring already-known disc on %s\n", ev.Device)
 						continue
 					}
-					busyDevices.MarkBusy(ev.Device)
+					stateTracker.Set(ev.Device, disc.StateRipping)
 
 					fmt.Fprintf(os.Stderr, "Disc detected on %s, starting rip...\n", ev.Device)
 					go func(dev string) {
-						defer busyDevices.MarkIdle(dev)
-
 						// Apply timeout from config to rip job
 						timeout := time.Duration(cfg.MakeMKV.TimeoutMinutes) * time.Minute
 						if timeout == 0 {
@@ -313,7 +311,10 @@ automatically listen to udev kernel changes and start ripping when a disc is det
 
 						if err := svc.RipDisc(ripCtx, dev); err != nil {
 							fmt.Fprintf(os.Stderr, "Rip failed for %s: %v\n", dev, err)
+							stateTracker.Set(dev, disc.StateError)
+							return
 						}
+						stateTracker.Set(dev, disc.StateDone)
 					}(ev.Device)
 				}
 			}()
