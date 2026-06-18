@@ -229,7 +229,7 @@ Exits with code 3 on timeout (distinct from other errors).`,
 	},
 }
 
-// ── version ───────────────────────────────────────────────────────────────
+// ── serve ─────────────────────────────────────────────────────────────────
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
@@ -244,7 +244,7 @@ The server provides:
 The server will stream real-time progress updates for any active rip jobs.
 
 If optical devices are configured in makemkv.devices, the server will
-automatically poll for disc insertion and start ripping when a disc is detected.`,
+automatically listen to udev kernel changes and start ripping when a disc is detected.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -269,19 +269,19 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 			port = 8080
 		}
 
-		// Start disc polling if devices are configured
+		// Start udev real-time listener if devices are configured
 		if len(cfg.MakeMKV.Devices) > 0 {
-			// Use command context so polling stops on cancellation
 			ctx := cmd.Context()
 			busyDevices := &disc.BusyDeviceTracker{}
-			discCh := disc.PollEventsWithBusy(ctx, cfg.MakeMKV.Devices, 5*time.Second, busyDevices.IsBusy)
+			
+			// Use the new non-blocking udev stream listener
+			discCh := disc.ListenUdevEvents(ctx, cfg.MakeMKV.Devices)
 
 			// Handle disc insertion/removal events in background.
 			go func() {
 				for ev := range discCh {
 					if !ev.Present {
-						// Ignore removals for a device that's mid-rip — the disc
-						// hasn't really left; the busy drive just failed a probe.
+						// Ignore removals for a device that's mid-rip
 						if busyDevices.IsBusy(ev.Device) {
 							fmt.Fprintf(os.Stderr, "Ignoring disc-removed on %s: rip in progress\n", ev.Device)
 							continue
@@ -318,7 +318,7 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 				}
 			}()
 
-			fmt.Fprintf(os.Stderr, "Polling devices: %v (interval: 5s)\n", cfg.MakeMKV.Devices)
+			fmt.Fprintf(os.Stderr, "Listening for event-driven udev changes on: %v\n", cfg.MakeMKV.Devices)
 		}
 
 		fmt.Fprintf(os.Stderr, "Starting HTTP server on port %d...\n", port)
