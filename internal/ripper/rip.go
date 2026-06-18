@@ -114,7 +114,7 @@ loop:
 				if pct := prog.percent(); pct != lastPct {
 					lastPct = pct
 					lastProgressAt = time.Now()
-					fmt.Printf("title %d: %d%%\n", title.Index, pct)
+					fmt.Printf("%s title %d: %d%%\n", device, title.Index, pct)
 					if progressCb != nil {
 						progressCb(title.Index, pct)
 					}

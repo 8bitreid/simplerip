@@ -60,7 +60,33 @@ func pickLongest(titles []disc.MKVTitle) (disc.MKVTitle, bool) {
 	return best, true
 }
 
-func findManualCorrection(events []store.JobEvent, since time.Time) (string, int, bool) {
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+// pickClosestToRuntime returns the title whose duration is nearest to ref.
+// It is used after a manual identification supplies a TMDB runtime, so the
+// title that actually matches the identified movie is ripped rather than
+// simply the longest title on the disc (which is often a play-all loop or an
+// extras reel). Returns false when titles is empty or ref is non-positive.
+func pickClosestToRuntime(titles []disc.MKVTitle, ref time.Duration) (disc.MKVTitle, bool) {
+	if len(titles) == 0 || ref <= 0 {
+		return disc.MKVTitle{}, false
+	}
+	best := titles[0]
+	bestDiff := absDuration(best.Duration - ref)
+	for _, t := range titles[1:] {
+		if d := absDuration(t.Duration - ref); d < bestDiff {
+			best, bestDiff = t, d
+		}
+	}
+	return best, true
+}
+
+func findManualCorrection(events []store.JobEvent, since time.Time) (string, int, int, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]
 		if ev.CreatedAt.Before(since) {
@@ -88,17 +114,24 @@ func findManualCorrection(events []store.JobEvent, since time.Time) (string, int
 		case int:
 			year = v
 		}
+		tmdbID := 0
+		switch v := payload["tmdb_id"].(type) {
+		case float64:
+			tmdbID = int(v)
+		case int:
+			tmdbID = v
+		}
 		if strings.TrimSpace(title) == "" {
 			continue
 		}
-		return title, year, true
+		return title, year, tmdbID, true
 	}
-	return "", 0, false
+	return "", 0, 0, false
 }
 
-func (s *RipService) awaitManualReidentify(ctx context.Context, jobID string, timeoutMin int) (string, int, error) {
+func (s *RipService) awaitManualReidentify(ctx context.Context, jobID string, timeoutMin int) (string, int, int, error) {
 	if s.store == nil {
-		return "", 0, errors.New("database not configured")
+		return "", 0, 0, errors.New("database not configured")
 	}
 
 	waitCtx := ctx
@@ -115,21 +148,21 @@ func (s *RipService) awaitManualReidentify(ctx context.Context, jobID string, ti
 	for {
 		job, events, err := s.store.GetJob(waitCtx, jobID)
 		if err == nil {
-			if title, year, ok := findManualCorrection(events, start); ok {
+			if title, year, tmdbID, ok := findManualCorrection(events, start); ok {
 				if strings.TrimSpace(job.Title) != "" {
 					title = job.Title
 					year = job.Year
 				}
-				return title, year, nil
+				return title, year, tmdbID, nil
 			}
 		}
 
 		select {
 		case <-waitCtx.Done():
 			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-				return "", 0, fmt.Errorf("manual title search timed out")
+				return "", 0, 0, fmt.Errorf("manual title search timed out")
 			}
-			return "", 0, waitCtx.Err()
+			return "", 0, 0, waitCtx.Err()
 		case <-tick.C:
 		}
 	}
@@ -505,7 +538,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			_ = s.store.UpdateStatus(ctx, job.ID, "identifying")
 		}
 
-		title, year, waitErr := s.awaitManualReidentify(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
+		title, year, tmdbID, waitErr := s.awaitManualReidentify(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
 		if waitErr != nil {
 			s.emit(ProgressEvent{
 				Device:  device,
@@ -528,7 +561,35 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		}
 		s.beginRipTitle(device, mediaTitle)
 
-		fallbackMain, ok := pickLongest(result.AllTitles)
+		// Re-score the candidate titles against the runtime of the movie the
+		// user just identified, instead of blindly ripping the longest title.
+		// The longest title on an ambiguous disc is often a play-all loop or an
+		// extras reel; the title whose duration matches the theatrical runtime
+		// is the actual feature. Fall back to the longest title only when no
+		// runtime is available (no TMDB id, lookup fails, or runtime unknown).
+		var (
+			selected     disc.MKVTitle
+			ok           bool
+			selectReason string
+		)
+		if tmdbID > 0 {
+			if details, derr := s.EnrichMovie(ctx, metadata.MovieResult{ID: tmdbID}); derr == nil && details.RuntimeMinutes > 0 {
+				ref := time.Duration(details.RuntimeMinutes) * time.Minute
+				if selected, ok = pickClosestToRuntime(result.AllTitles, ref); ok {
+					selectReason = fmt.Sprintf("closest to %d-min runtime", details.RuntimeMinutes)
+				}
+				// The enriched record may carry a more accurate title/year than
+				// the raw correction text — prefer its folder name.
+				if name := details.FolderName(); name != "" {
+					mediaTitle = name
+					s.beginRipTitle(device, mediaTitle)
+				}
+			}
+		}
+		if !ok {
+			selected, ok = pickLongest(result.AllTitles)
+			selectReason = "longest title (no runtime to match)"
+		}
 		if !ok {
 			s.emit(ProgressEvent{
 				Device:  device,
@@ -544,16 +605,22 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			return fmt.Errorf("no candidate titles available to rip on disc %q", device)
 		}
 
-		result.MainTitles = []disc.MKVTitle{fallbackMain}
+		result.MainTitles = []disc.MKVTitle{selected}
 		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "identifying",
 			Title:   mediaTitle,
 			Percent: 0,
-			Message: fmt.Sprintf("Manual title selected. Continuing with longest title #%d", fallbackMain.Index),
+			Message: fmt.Sprintf("Manual title selected. Ripping title #%d (%s)", selected.Index, selectReason),
 		})
 		if s.store != nil {
-			_ = s.store.AddEvent(ctx, job.ID, "identify", fmt.Sprintf("manual title selected; using longest title index %d", fallbackMain.Index), map[string]any{"selected_index": fallbackMain.Index, "selected_duration": fallbackMain.Duration.String()})
+			_ = s.store.AddEvent(ctx, job.ID, "identify",
+				fmt.Sprintf("manual title selected; ripping title index %d (%s)", selected.Index, selectReason),
+				map[string]any{
+					"selected_index":    selected.Index,
+					"selected_duration": selected.Duration.String(),
+					"select_reason":     selectReason,
+				})
 		}
 	}
 

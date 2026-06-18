@@ -4,3 +4,5 @@ config.yaml
 makemkv-config/
 *.env
 .env
+# Ignore the binarys generated
+simplerip

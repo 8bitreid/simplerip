@@ -586,7 +586,7 @@ func TestFindManualCorrection(t *testing.T) {
 		{Stage: "identify", CreatedAt: now.Add(-1 * time.Minute), Data: manualPayload},
 	}
 
-	title, year, ok := findManualCorrection(events, now.Add(-90*time.Second))
+	title, year, tmdbID, ok := findManualCorrection(events, now.Add(-90*time.Second))
 	if !ok {
 		t.Fatal("expected manual correction to be detected")
 	}
@@ -595,6 +595,32 @@ func TestFindManualCorrection(t *testing.T) {
 	}
 	if year != 1985 {
 		t.Fatalf("year = %d, want %d", year, 1985)
+	}
+	if tmdbID != 0 {
+		t.Fatalf("tmdbID = %d, want 0 (not present in payload)", tmdbID)
+	}
+}
+
+func TestPickClosestToRuntime(t *testing.T) {
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 142 * time.Minute}, // play-all / longest
+		{Index: 1, Duration: 95 * time.Minute},  // the actual feature
+		{Index: 2, Duration: 12 * time.Minute},  // extra
+	}
+
+	got, ok := pickClosestToRuntime(titles, 96*time.Minute)
+	if !ok {
+		t.Fatal("expected a title")
+	}
+	if got.Index != 1 {
+		t.Fatalf("picked index = %d, want %d (closest to runtime, not longest)", got.Index, 1)
+	}
+
+	if _, ok := pickClosestToRuntime(titles, 0); ok {
+		t.Fatal("expected no match when ref runtime is zero")
+	}
+	if _, ok := pickClosestToRuntime(nil, 96*time.Minute); ok {
+		t.Fatal("expected no match for empty title list")
 	}
 }
 
