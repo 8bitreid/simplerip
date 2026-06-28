@@ -37,6 +37,14 @@ type ProgressEvent struct {
 	DiscType string `json:"disc_type,omitempty"` // bluray, dvd, unknown
 }
 
+// reidentifySignal is sent on a device's reidentifyCh when a manual correction
+// selects a different track than the one currently ripping.
+type reidentifySignal struct {
+	Title  string
+	Year   int
+	TMDBID int
+}
+
 func describeScanError(err error) string {
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "copy protection key exchange failure") ||
@@ -227,15 +235,15 @@ type RipService struct {
 	eventBus *EventBus
 	store    *store.Store
 
-	// ripMu guards the live per-device rip state below.
-	ripMu sync.Mutex
-	// ripTitles maps a device to the current display/folder title of its
-	// in-flight rip. A live re-identify updates this so both progress updates
-	// and the final delivered filename pick up the corrected name.
+	ripMu     sync.Mutex
 	ripTitles map[string]string
-	// lastEvent holds the most recent progress event per device, so a live
-	// re-identify can re-emit it immediately with the new title.
 	lastEvent map[string]ProgressEvent
+
+	// Fields added for mid-rip re-identification:
+	ripCancels   map[string]context.CancelFunc    // device -> cancel fn for active RipTitle call
+	ripTitleIdx  map[string]int                   // device -> title index currently ripping
+	ripAllTitles map[string][]disc.MKVTitle       // device -> all titles from scan
+	reidentifyCh map[string]chan reidentifySignal // device -> signal channel
 }
 
 var (
@@ -247,12 +255,16 @@ var (
 // st may be nil — all store calls become no-ops, preserving existing behaviour.
 func New(cfg *config.Config, st *store.Store) *RipService {
 	return &RipService{
-		cfg:       cfg,
-		notify:    notify.NewClient(cfg.Notification.WebhookURL),
-		eventBus:  NewEventBus(),
-		store:     st,
-		ripTitles: make(map[string]string),
-		lastEvent: make(map[string]ProgressEvent),
+		cfg:          cfg,
+		notify:       notify.NewClient(cfg.Notification.WebhookURL),
+		eventBus:     NewEventBus(),
+		store:        st,
+		ripTitles:    make(map[string]string),
+		lastEvent:    make(map[string]ProgressEvent),
+		ripCancels:   make(map[string]context.CancelFunc),
+		ripTitleIdx:  make(map[string]int),
+		ripAllTitles: make(map[string][]disc.MKVTitle),
+		reidentifyCh: make(map[string]chan reidentifySignal),
 	}
 }
 
@@ -292,18 +304,29 @@ func (s *RipService) currentTitle(device, fallback string) string {
 	return fallback
 }
 
-// ReidentifyRip overrides the title of an in-flight rip on device so progress
-// updates and the final delivered filename use the corrected name. It returns
-// false when no rip is active on that device (re-identify only applies during a
-// rip — a delivered file is out of our control). On success it immediately
-// re-emits the device's latest progress event with the new title so connected
-// UIs update without waiting for the next progress tick.
-func (s *RipService) ReidentifyRip(device, folder string) bool {
+// ReidentifyRip applies a manual metadata correction to an in-flight rip.
+// It fetches TMDB runtime for the corrected movie, re-selects the best title
+// from the disc's known tracks, and compares it to the track currently ripping.
+//
+// If the track is the same: only the display title and folder name are updated.
+// If the track differs: the current rip is cancelled and a signal is sent to
+// RipDisc to restart with the correct track.
+//
+// Returns false when no rip is active on the device.
+func (s *RipService) ReidentifyRip(ctx context.Context, device, folder string, tmdbID int) bool {
 	s.ripMu.Lock()
 	if _, ok := s.ripTitles[device]; !ok {
 		s.ripMu.Unlock()
 		return false
 	}
+	allTitles := s.ripAllTitles[device]
+	currentIdx := s.ripTitleIdx[device]
+	ch := s.reidentifyCh[device]
+	s.ripMu.Unlock()
+
+	// Always update the display title immediately so the UI reflects the
+	// correction regardless of whether a track switch is needed.
+	s.ripMu.Lock()
 	s.ripTitles[device] = folder
 	last, hasLast := s.lastEvent[device]
 	s.ripMu.Unlock()
@@ -315,6 +338,68 @@ func (s *RipService) ReidentifyRip(device, folder string) bool {
 		}
 		s.emit(last)
 	}
+
+	// No channel means the rip isn't in the rip loop yet (still scanning or
+	// identifying) — title patch is all we can do right now.
+	if ch == nil {
+		return true
+	}
+
+	// No titles stored means we can't re-classify — title patch only.
+	if len(allTitles) == 0 {
+		return true
+	}
+
+	// Fetch TMDB runtime to pick the closest matching track.
+	// Fall back to longest title if runtime isn't available.
+	var selected disc.MKVTitle
+	var ok bool
+	if tmdbID > 0 {
+		if details, err := s.EnrichMovie(ctx, metadata.MovieResult{ID: tmdbID}); err == nil && details.RuntimeMinutes > 0 {
+			ref := time.Duration(details.RuntimeMinutes) * time.Minute
+			selected, ok = pickClosestToRuntime(allTitles, ref)
+			// Prefer the enriched folder name if it's more accurate.
+			if ok {
+				if name := details.FolderName(); name != "" {
+					folder = name
+					s.ripMu.Lock()
+					s.ripTitles[device] = folder
+					s.ripMu.Unlock()
+				}
+			}
+		}
+	}
+	if !ok {
+		selected, ok = pickLongest(allTitles)
+	}
+	if !ok {
+		return true
+	}
+
+	signal := reidentifySignal{
+		Title:  folder,
+		TMDBID: tmdbID,
+	}
+
+	if selected.Index == currentIdx {
+		// Same track — title patch already done above, nothing else needed.
+		return true
+	}
+
+	// Different track — cancel the current rip and signal RipDisc.
+	s.ripMu.Lock()
+	if cancel, ok := s.ripCancels[device]; ok {
+		cancel()
+	}
+	s.ripMu.Unlock()
+
+	// Non-blocking send — if a signal is already pending, drop this one.
+	// The user can re-submit if needed.
+	select {
+	case ch <- signal:
+	default:
+	}
+
 	return true
 }
 
@@ -498,6 +583,9 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		detCfg.TVThreshold = 99
 	}
 	result := ripper.ClassifyTitles(scanned.Titles, detCfg)
+	s.ripMu.Lock()
+	s.ripAllTitles[device] = result.AllTitles
+	s.ripMu.Unlock()
 
 	// Create a DB job record now that we have a disc label.
 	if s.store != nil {
@@ -519,8 +607,26 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	// Register the live title for this rip so a mid-rip re-identify can correct
 	// both the progress display and the final delivered filename. Cleared when
 	// the rip finishes (any return path below).
+	// Create the re-identify signal channel for this rip. Buffered so
+	// ReidentifyRip never blocks even if RipDisc is momentarily between selects.
+	reidentifyCh := make(chan reidentifySignal, 1)
+	s.ripMu.Lock()
+	s.reidentifyCh[device] = reidentifyCh
+	s.ripMu.Unlock()
+
 	s.beginRipTitle(device, mediaTitle)
 	defer s.endRipTitle(device)
+	defer func() {
+		s.ripMu.Lock()
+		delete(s.ripAllTitles, device)
+		delete(s.ripTitleIdx, device)
+		delete(s.ripCancels, device)
+		if ch, ok := s.reidentifyCh[device]; ok {
+			close(ch)
+			delete(s.reidentifyCh, device)
+		}
+		s.ripMu.Unlock()
+	}()
 
 	// Step 4: Determine which titles to rip.
 	// In daemon mode, we always rip MainTitles immediately.
@@ -667,6 +773,13 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		_ = s.store.UpdateStatus(ctx, job.ID, "ripping")
 	}
 	for idx, title := range result.MainTitles {
+		s.ripMu.Lock()
+		s.ripTitleIdx[device] = title.Index
+		s.ripMu.Unlock()
+		titleCtx, titleCancel := context.WithCancel(ctx)
+		s.ripMu.Lock()
+		s.ripCancels[device] = titleCancel
+		s.ripMu.Unlock()
 		cur := s.currentTitle(device, mediaTitle)
 		s.emit(ProgressEvent{
 			Device:  device,
@@ -717,30 +830,62 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		}
 		attempts := maxRetries + 1
 
-		var (
+		// ripResult carries the outcome of a RipTitle call back to the select loop.
+		type ripResult struct {
 			files []string
 			err   error
+		}
+
+		var (
+			files         []string
+			reidentified  bool
+			pendingSignal reidentifySignal
 		)
+
 		for attempt := 1; attempt <= attempts; attempt++ {
-			files, err = ripper.RipTitle(
-				ctx,
-				device,
-				title,
-				ripOutputDir,
-				s.cfg.MakeMKV.Key,
-				s.cfg.MakeMKV.TimeoutMinutes,
-				cacheMBForDisc(s.cfg.MakeMKV.CacheMB, scanned.Type),
-				s.cfg.MakeMKV.ReadErrorLimit,
-				s.cfg.MakeMKV.NoProgressMin,
-				progressCb,
-			)
-			if err == nil {
+			resultCh := make(chan ripResult, 1)
+			go func() {
+				f, e := ripper.RipTitle(
+					titleCtx,
+					device,
+					title,
+					ripOutputDir,
+					s.cfg.MakeMKV.Key,
+					s.cfg.MakeMKV.TimeoutMinutes,
+					cacheMBForDisc(s.cfg.MakeMKV.CacheMB, scanned.Type),
+					s.cfg.MakeMKV.ReadErrorLimit,
+					s.cfg.MakeMKV.NoProgressMin,
+					progressCb,
+				)
+				resultCh <- ripResult{f, e}
+			}()
+
+			var ripErr error
+			select {
+			case res := <-resultCh:
+				files = res.files
+				ripErr = res.err
+			case sig := <-reidentifyCh:
+				// Re-identify signal received — cancel the current rip and
+				// drain the result so the goroutine can exit cleanly.
+				titleCancel()
+				<-resultCh
+				pendingSignal = sig
+				reidentified = true
+			}
+
+			if reidentified {
 				break
 			}
 
-			retryable := !errors.Is(err, context.Canceled)
+			if ripErr == nil {
+				break
+			}
 
+			retryable := !errors.Is(ripErr, context.Canceled)
 			if !retryable || attempt == attempts {
+				// Real error, not a re-identify cancel.
+				files = nil
 				break
 			}
 
@@ -755,22 +900,99 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			if s.store != nil {
 				_ = s.store.AddEvent(ctx, job.ID, "rip",
 					fmt.Sprintf("retrying title %d: attempt %d/%d", title.Index, attempt+1, attempts),
-					map[string]any{"error": err.Error()})
+					map[string]any{"error": ripErr.Error()})
 			}
+
+			// Recreate the title context for the next attempt.
+			titleCancel()
+			s.ripMu.Lock()
+			delete(s.ripCancels, device)
+			s.ripMu.Unlock()
+			titleCtx, titleCancel = context.WithCancel(ctx)
+			s.ripMu.Lock()
+			s.ripCancels[device] = titleCancel
+			s.ripMu.Unlock()
 		}
-		if err != nil {
+
+		titleCancel()
+		s.ripMu.Lock()
+		delete(s.ripCancels, device)
+		s.ripMu.Unlock()
+
+		// Re-identify: pick the new track and restart the rip loop.
+		if reidentified {
+			var (
+				newTitle     disc.MKVTitle
+				ok           bool
+				selectReason string
+			)
+			if pendingSignal.TMDBID > 0 {
+				if details, derr := s.EnrichMovie(ctx, metadata.MovieResult{ID: pendingSignal.TMDBID}); derr == nil && details.RuntimeMinutes > 0 {
+					ref := time.Duration(details.RuntimeMinutes) * time.Minute
+					newTitle, ok = pickClosestToRuntime(result.AllTitles, ref)
+					selectReason = fmt.Sprintf("closest to %d-min runtime", details.RuntimeMinutes)
+				}
+			}
+			if !ok {
+				newTitle, ok = pickLongest(result.AllTitles)
+				selectReason = "longest title (no runtime to match)"
+			}
+			if !ok {
+				s.emit(ProgressEvent{
+					Device:  device,
+					Stage:   "error",
+					Title:   s.currentTitle(device, mediaTitle),
+					Percent: 0,
+					Message: "Re-identify: no candidate titles available",
+				})
+				if s.store != nil {
+					_ = s.store.AddEvent(ctx, job.ID, "error", "re-identify: no candidate titles", nil)
+					_ = s.store.UpdateStatus(ctx, job.ID, "error")
+				}
+				return fmt.Errorf("re-identify: no candidate titles on disc %q", device)
+			}
+
+			mediaTitle = pendingSignal.Title
+			s.beginRipTitle(device, mediaTitle)
+			totalTitles = 1
+
+			s.emit(ProgressEvent{
+				Device:  device,
+				Stage:   "identifying",
+				Title:   mediaTitle,
+				Percent: 0,
+				Message: fmt.Sprintf("Re-identified: ripping title #%d (%s)", newTitle.Index, selectReason),
+			})
+			if s.store != nil {
+				_ = s.store.AddEvent(ctx, job.ID, "identify",
+					fmt.Sprintf("re-identified; ripping title index %d (%s)", newTitle.Index, selectReason),
+					map[string]any{
+						"selected_index":    newTitle.Index,
+						"selected_duration": newTitle.Duration.String(),
+						"select_reason":     selectReason,
+					})
+			}
+
+			// Restart the rip loop with the corrected title.
+			// Reset idx so the progress calculation is correct.
+			result.MainTitles = []disc.MKVTitle{newTitle}
+			rippedFiles = nil
+			continue
+		}
+
+		if len(files) == 0 {
 			s.emit(ProgressEvent{
 				Device:  device,
 				Stage:   "error",
 				Title:   s.currentTitle(device, mediaTitle),
 				Percent: (idx * 100) / totalTitles,
-				Message: fmt.Sprintf("Rip failed: %v", err),
+				Message: "Rip failed",
 			})
 			if s.store != nil {
-				_ = s.store.AddEvent(ctx, job.ID, "error", err.Error(), nil)
+				_ = s.store.AddEvent(ctx, job.ID, "error", "rip produced no files", nil)
 				_ = s.store.UpdateStatus(ctx, job.ID, "error")
 			}
-			return fmt.Errorf("rip title %d: %w", title.Index, err)
+			return fmt.Errorf("rip title %d: no output files", title.Index)
 		}
 
 		if s.store != nil {

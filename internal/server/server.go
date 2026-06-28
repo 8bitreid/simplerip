@@ -306,7 +306,7 @@ func (s *Server) handleReidentify(c echo.Context) error {
 	if body.Year > 0 {
 		liveTitle = fmt.Sprintf("%s (%d)", body.Title, body.Year)
 	}
-	_ = s.svc.ReidentifyRip(existing.Device, liveTitle)
+	_ = s.svc.ReidentifyRip(ctx, existing.Device, liveTitle, body.TMDBID)
 
 	job, _, err := s.store.GetJob(ctx, id)
 	if err != nil {
