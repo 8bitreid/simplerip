@@ -293,7 +293,18 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 			// Use command context so polling stops on cancellation
 			ctx := cmd.Context()
 			busyDevices := &disc.BusyDeviceTracker{}
-			discCh := disc.PollEventsWithBusy(ctx, cfg.MakeMKV.Devices, 5*time.Second, busyDevices.IsBusy)
+			driveStatusMsg := map[string]string{
+				disc.StatusDetecting:    "detecting disc…",
+				disc.StatusNoDisc:       "no disc — waiting",
+				disc.StatusDiscPresent:  "disc detected",
+				disc.StatusUnresponsive: "drive not responding — retrying",
+			}
+			discCh := disc.PollEventsWithStatus(ctx, cfg.MakeMKV.Devices, 5*time.Second, busyDevices.IsBusy,
+				func(dev, status string) {
+					if msg, ok := driveStatusMsg[status]; ok {
+						svc.SetDriveStatus(dev, msg)
+					}
+				})
 
 			// Handle disc insertion/removal events in background.
 			go func() {

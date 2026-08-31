@@ -302,6 +302,22 @@ func (s *RipService) MarkDeviceIdle(device string) {
 	})
 }
 
+// SetDriveStatus shows a disc-detection status on an idle drive's card. It is
+// ignored while the drive has an active or finished job (anything but idle), so
+// it never overwrites rip progress or a "done"/"error" result.
+func (s *RipService) SetDriveStatus(device, message string) {
+	s.ripMu.Lock()
+	last, ok := s.lastEvent[device]
+	s.ripMu.Unlock()
+	if ok && last.Stage != "idle" {
+		return
+	}
+	if ok && last.Message == message {
+		return
+	}
+	s.emit(ProgressEvent{Device: device, Stage: "idle", Message: message})
+}
+
 // ScanDisc scans a physical disc device and classifies its titles.
 // Returns the classification result suitable for decision-making.
 // device is the optical drive path (e.g. /dev/sr0).

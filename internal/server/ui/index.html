@@ -119,6 +119,9 @@ header h1 {
   padding: 8px 0 4px;
 }
 
+.drive-idle-warn { color: #e5a13a; }
+.drive-idle-ok { color: #4caf7d; }
+
 /* ── Stage list ── */
 
 .stages {
@@ -639,6 +642,12 @@ function renderDrives() {
   });
 }
 
+function driveIdleClass(message) {
+  if (/not responding/i.test(message || '')) return 'drive-idle-warn';
+  if (/disc detected/i.test(message || '')) return 'drive-idle-ok';
+  return '';
+}
+
 function driveCardHTML(st) {
   const { stage, percent, message, title } = st;
   const device = st.device;
@@ -656,7 +665,7 @@ function driveCardHTML(st) {
     </div>`;
 
   if (isIdle) {
-    return `<div class="drive-card">${header}<div class="drive-idle">no disc — waiting</div></div>`;
+    return `<div class="drive-card">${header}<div class="drive-idle ${driveIdleClass(message)}">${esc(message || 'no disc — waiting')}</div></div>`;
   }
 
   const titleLine  = title   ? `<div class="drive-title">${esc(title)}</div>` : '';

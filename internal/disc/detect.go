@@ -21,6 +21,14 @@ type DiscEvent struct {
 	Present bool   // true = disc inserted, false = disc removed
 }
 
+// Probe status values reported to the onStatus callback of PollEventsWithStatus.
+const (
+	StatusDetecting    = "detecting"    // a probe is in flight
+	StatusNoDisc       = "no_disc"      // probe confirmed the drive is empty
+	StatusDiscPresent  = "disc_present" // probe found a disc
+	StatusUnresponsive = "unresponsive" // probe timed out or failed
+)
+
 // BusyDeviceTracker holds device paths currently owned by an active rip.
 // Polling code can use it to avoid probing drives that are in use.
 type BusyDeviceTracker struct {
@@ -95,6 +103,20 @@ func PollEventsWithBusy(
 	interval time.Duration,
 	isBusy func(device string) bool,
 ) <-chan DiscEvent {
+	return PollEventsWithStatus(ctx, devices, interval, isBusy, nil)
+}
+
+// PollEventsWithStatus is like PollEventsWithBusy, and additionally calls
+// onStatus (if non-nil) with a Status* value as each probe starts and finishes,
+// so callers can show live drive state. onStatus is invoked before any
+// resulting DiscEvent is sent.
+func PollEventsWithStatus(
+	ctx context.Context,
+	devices []string,
+	interval time.Duration,
+	isBusy func(device string) bool,
+	onStatus func(device, status string),
+) <-chan DiscEvent {
 	ch := make(chan DiscEvent)
 	go func() {
 		var wg sync.WaitGroup
@@ -103,7 +125,7 @@ func PollEventsWithBusy(
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				pollDevice(ctx, device, interval, ch, isBusy)
+				pollDevice(ctx, device, interval, ch, isBusy, onStatus)
 			}()
 		}
 		wg.Wait()
@@ -122,7 +144,13 @@ func pollDevice(
 	interval time.Duration,
 	ch chan<- DiscEvent,
 	isBusy func(device string) bool,
+	onStatus func(device, status string),
 ) {
+	report := func(status string) {
+		if onStatus != nil {
+			onStatus(device, status)
+		}
+	}
 	state := false
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -133,12 +161,19 @@ func pollDevice(
 			return
 		}
 
+		report(StatusDetecting)
 		start := time.Now()
 		hasDisc, ok := checkDevice(ctx, device, discProbeTimeout)
 		elapsed := time.Since(start).Round(time.Millisecond)
 		if !ok {
 			slog.Warn("drive probe failed", "device", device, "elapsed", elapsed)
+			report(StatusUnresponsive)
 			return
+		}
+		if hasDisc {
+			report(StatusDiscPresent)
+		} else {
+			report(StatusNoDisc)
 		}
 		slog.Debug("drive probe result", "device", device, "has_disc", hasDisc, "previous_state", state, "elapsed", elapsed)
 		if hasDisc != state {
@@ -151,13 +186,24 @@ func pollDevice(
 		state = hasDisc
 	}
 
+	// A probe can outlast the interval, leaving a tick queued. Drain it after
+	// every check so a probe never starts right behind an event the consumer
+	// hasn't acted on yet (e.g. before it has marked the drive busy for a rip).
 	check()
 	for {
+		select {
+		case <-ticker.C:
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			check()
+			select {
+			case <-ticker.C:
+			default:
+			}
 		}
 	}
 }

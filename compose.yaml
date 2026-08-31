@@ -37,5 +37,13 @@ services:
       timeout: 5s
       retries: 10
 
+  alloy:
+    image: grafana/alloy:latest
+    restart: unless-stopped
+    command: run /etc/alloy/config.alloy
+    volumes:
+      - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
 volumes:
   pgdata:
