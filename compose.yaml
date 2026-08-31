@@ -7,11 +7,13 @@ services:
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - ./makemkv-config:/root/.MakeMKV
-      - /tmp/staging:/staging
+      - ./staging:/staging
       - /mnt/nas-simplerip/Dev Movies:/output
     devices:
       - /dev/sr0:/dev/sr0
       - /dev/sr1:/dev/sr1
+      - /dev/sg0:/dev/sg0
+      - /dev/sg1:/dev/sg1
     privileged: true
     user: root
     environment:

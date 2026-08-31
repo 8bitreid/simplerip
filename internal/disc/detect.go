@@ -4,7 +4,7 @@ package disc
 import (
 	"bufio"
 	"context"
-	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -129,7 +129,7 @@ func pollDevice(
 
 	check := func() {
 		if isBusy != nil && isBusy(device) {
-			fmt.Fprintf(os.Stderr, "poll: device=%s skipped=busy\n", device)
+			slog.Debug("poll skipped because device busy", "device", device)
 			return
 		}
 
@@ -137,10 +137,10 @@ func pollDevice(
 		hasDisc, ok := checkDevice(ctx, device, discProbeTimeout)
 		elapsed := time.Since(start).Round(time.Millisecond)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "poll: device=%s ok=false elapsed=%s\n", device, elapsed)
+			slog.Warn("drive probe failed", "device", device, "elapsed", elapsed)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "poll: device=%s hasDisc=%t prev=%t elapsed=%s\n", device, hasDisc, state, elapsed)
+		slog.Debug("drive probe result", "device", device, "has_disc", hasDisc, "previous_state", state, "elapsed", elapsed)
 		if hasDisc != state {
 			select {
 			case ch <- DiscEvent{Device: device, Present: hasDisc}:

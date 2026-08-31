@@ -3,8 +3,8 @@ package disc
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 )
@@ -56,11 +56,11 @@ func ProbeDiscType(ctx context.Context, device string) DiscType {
 
 	select {
 	case <-ctx.Done():
-		fmt.Fprintf(os.Stderr, "probe: disc type probe timed out for %s\n", device)
+		slog.Warn("disc type probe timed out", "device", device)
 		return DiscTypeUnknown
 	case r := <-ch:
 		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "probe: disc type probe failed for %s: %v\n", device, r.err)
+			slog.Warn("disc type probe failed", "device", device, "error", r.err)
 			return DiscTypeUnknown
 		}
 		switch {

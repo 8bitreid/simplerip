@@ -121,26 +121,58 @@ header h1 {
 
 /* ── Stage list ── */
 
-.stages { display: flex; flex-direction: column; gap: 5px; }
-
-.stage-row {
-  display: grid;
-  grid-template-columns: 14px 68px 1fr 64px;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
+.stages {
+  display: flex;
+  align-items: flex-start;
+  margin: 14px 0 4px;
 }
+.stage-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  position: relative;
+}
+.stage-connector {
+  flex: 1;
+  height: 2px;
+  background: var(--border);
+  margin-top: 11px;
+}
+.stage-connector.done { background: rgba(34,197,94,0.35); }
+.stage-connector.active { background: rgba(99,102,241,0.35); }
 
-.stage-icon { text-align: center; font-size: 10px; color: var(--text-muted); }
-.stage-icon.done  { color: var(--green); font-size: 11px; }
-.stage-icon.active { color: var(--accent); font-size: 12px; }
+.stage-circle {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  z-index: 1;
+}
+.stage-circle.done   { background: rgba(34,197,94,0.15); border-color: transparent; color: var(--green); }
+.stage-circle.active { background: var(--accent); border-color: transparent; color: #fff; }
+.stage-circle.waiting { background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.4); color: var(--red); }
 
-.stage-name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
-.stage-name.active { color: var(--text); font-weight: 600; }
-.stage-name.done   { color: var(--green); }
+.stage-label {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.stage-label.active { color: var(--text); font-weight: 600; }
+.stage-label.done { color: var(--green); }
 
-.stage-msg { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.stage-msg.active { color: var(--text); }
+.stage-progress {
+  margin: 4px 0 2px;
+}
+.stage-progress .prog-wrap { height: 5px; border-radius: 999px; }
 
 .prog-wrap { position: relative; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
 .prog-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; background: var(--accent); }
@@ -177,6 +209,10 @@ header h1 {
   transition: background 0.15s, color 0.15s;
 }
 .eject-btn:hover { background: var(--surface2); color: var(--text); }
+
+.card-resolve { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.card-resolve .search-row { margin-bottom: 8px; }
+.card-resolve .search-results { display: flex; flex-direction: column; gap: 4px; }
 
 /* ── Badges ── */
 
@@ -435,11 +471,14 @@ const STAGE_ALIASES = {
 function canonStage(stage) { return STAGE_ALIASES[stage] || stage; }
 
 // Stages with no measurable progress — show an indeterminate sweep, not a bar.
-const INDETERMINATE_STAGES = new Set(['scan', 'identify']);
+const INDETERMINATE_STAGES = new Set(['scan', 'identify', 'score']);
 
 // device → ProgressEvent (stage, percent, message, title, device)
 const driveStates = {};
 const knownDevices = new Set();
+
+// device → { query, results, message } for the inline re-identify search on a card
+const cardResolveState = {};
 
 let jobs = [];
 let selectedJobId = null;
@@ -501,6 +540,30 @@ function fmtDiscType(t) {
   }
 }
 
+// Recent Rips only shows finished jobs; in-progress state lives on the drive card.
+const TERMINAL_STATUSES = new Set(['done', 'error']);
+function isTerminal(status) {
+  return TERMINAL_STATUSES.has(String(status || '').toLowerCase());
+}
+
+// Finds the job currently in progress on a device, e.g. to apply a re-identify to it.
+function findActiveJobForDevice(device) {
+  return jobs.find(j => j.Device === device && !isTerminal(j.Status));
+}
+
+function renderResolveResults(device, results) {
+  if (!results.length) return '<div class="msg-info">No results found.</div>';
+  return results.map(r => `
+    <div class="sr-row">
+      <div>
+        <div class="sr-title">${esc(r.title)}</div>
+        <div class="sr-meta">${r.year || '—'}${r.runtime ? ' · ' + r.runtime + ' min' : ''} · ${esc(r.media_type || 'movie')}</div>
+      </div>
+      <button class="sr-apply card-resolve-apply" data-device="${escAttr(device)}"
+        data-id="${r.id}" data-title="${escAttr(r.title)}" data-year="${r.year || 0}">Select</button>
+    </div>`).join('');
+}
+
 // ── Drive cards ──────────────────────────────────────────────────────────
 
 function ensureDevice(device) {
@@ -550,6 +613,22 @@ function renderDrives() {
       }).catch(() => {});
     });
   });
+  grid.querySelectorAll('.card-resolve-search').forEach(btn => {
+    btn.addEventListener('click', () => doCardSearch(btn.dataset.device));
+  });
+  grid.querySelectorAll('.card-resolve-input').forEach(input => {
+    input.addEventListener('input', () => {
+      cardResolveState[input.dataset.device] = { ...(cardResolveState[input.dataset.device] || {}), query: input.value };
+    });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') doCardSearch(input.dataset.device); });
+  });
+  grid.querySelectorAll('.card-resolve-apply').forEach(btn => {
+    btn.addEventListener('click', () => applyCardReidentify(btn.dataset.device, {
+      tmdb_id: parseInt(btn.dataset.id, 10),
+      title:   btn.dataset.title,
+      year:    parseInt(btn.dataset.year, 10),
+    }));
+  });
 }
 
 function driveCardHTML(st) {
@@ -582,28 +661,53 @@ function driveCardHTML(st) {
   const stagesHTML = STAGES.map((s, idx) => {
     const isDone   = idx < curIdx;
     const isCurrent = s === canon;
-    const pct      = isDone ? 100 : (isCurrent ? (percent || 0) : 0);
-    const iconClass = isDone ? 'done' : (isCurrent ? 'active' : '');
     const waitingIdentify = isCurrent && isManualSearchWait(stage, message) && s === 'identify';
-    const icon      = isDone ? '✓' : (waitingIdentify ? '⚠' : (isCurrent ? '●' : '○'));
-    const nameClass = isDone ? 'done' : (isCurrent ? 'active' : '');
-    const msgClass  = isCurrent ? 'active' : '';
-    const stageMsg  = isCurrent ? (message || '') : '';
-    const fillClass = isDone ? 'done' : '';
-    // The active scan/identify stage has no real percentage — sweep instead of
-    // showing a stuck 0% bar that implies a known end time.
     const indeterminate = isCurrent && INDETERMINATE_STAGES.has(s);
-    const fill = indeterminate
-      ? `<div class="prog-fill indeterminate"></div>`
-      : `<div class="prog-fill ${fillClass}" style="width:${pct}%"></div>`;
+
+    const circleClass = isDone ? 'done' : waitingIdentify ? 'waiting' : isCurrent ? 'active' : '';
+    const labelClass  = isDone ? 'done' : isCurrent ? 'active' : '';
+    const icon = isDone
+      ? '✓'
+      : waitingIdentify
+        ? '⚠'
+        : indeterminate
+          ? '<span class="spin-inline" style="margin-right:0">⟳</span>'
+          : (isCurrent ? '' : '');
+
+    const connectorClass = isDone ? 'done' : (isCurrent ? 'active' : '');
+
     return `
-      <div class="stage-row">
-        <span class="stage-icon ${iconClass}">${icon}</span>
-        <span class="stage-name ${nameClass}">${esc(s)}</span>
-        <span class="stage-msg  ${msgClass}">${esc(stageMsg)}</span>
-        <div class="prog-wrap">${fill}</div>
-      </div>`;
+      <div class="stage-node">
+        <div class="stage-circle ${circleClass}">${icon}</div>
+        <div class="stage-label ${labelClass}">${esc(s)}</div>
+      </div>
+      ${idx < STAGES.length - 1 ? `<div class="stage-connector ${connectorClass}"></div>` : ''}`;
   }).join('');
+
+  // only rip/deliver get a progress bar under the stepper — matches the
+  // existing pct/indeterminate values, just moved out of the per-row layout
+  const activeStageHasBar = curIdx < STAGES.length && !INDETERMINATE_STAGES.has(canon) && canon !== 'idle';
+  const pct = activeStageHasBar ? (percent || 0) : 0;
+  const progressHTML = activeStageHasBar
+    ? `<div class="stage-progress prog-wrap"><div class="prog-fill" style="width:${pct}%"></div></div>`
+    : '';
+
+  const showResolve = isManualSearchWait(stage, message);
+  let resolvePanelHTML = '';
+  if (showResolve) {
+    const rs = cardResolveState[device] || { query: title || '', results: null, message: '' };
+    cardResolveState[device] = rs;
+    resolvePanelHTML = `
+      <div class="card-resolve" data-device="${escAttr(device)}">
+        <div class="search-row">
+          <input class="search-input card-resolve-input" data-device="${escAttr(device)}"
+            type="text" placeholder="Search TMDB…" value="${escAttr(rs.query)}" />
+          <button class="btn btn-primary card-resolve-search" data-device="${escAttr(device)}">Search</button>
+        </div>
+        <div class="search-results">${rs.results ? renderResolveResults(device, rs.results) : ''}</div>
+        ${rs.message ? `<div class="${rs.message.startsWith('Error') ? 'msg-error' : 'msg-info'}">${esc(rs.message)}</div>` : ''}
+      </div>`;
+  }
 
   return `
     <div class="drive-card">
@@ -611,8 +715,52 @@ function driveCardHTML(st) {
       ${titleLine}
       ${msgLine}
       <div class="stages">${stagesHTML}</div>
+      ${progressHTML}
       <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
+      ${resolvePanelHTML}
     </div>`;
+}
+
+async function doCardSearch(device) {
+  const rs = cardResolveState[device] || { query: '' };
+  const q = (rs.query || '').trim();
+  if (!q) return;
+  cardResolveState[device] = { ...rs, message: '' };
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const data = await r.json();
+    if (!r.ok) {
+      cardResolveState[device] = { ...rs, message: data.error || 'Search failed' };
+    } else {
+      cardResolveState[device] = { ...rs, results: data, message: '' };
+    }
+  } catch (_) {
+    cardResolveState[device] = { ...rs, message: 'Search request failed.' };
+  }
+  renderDrives();
+}
+
+async function applyCardReidentify(device, payload) {
+  const job = findActiveJobForDevice(device);
+  if (!job) return;
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(job.ID)}/reidentify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      cardResolveState[device] = { ...cardResolveState[device], message: data.error || 'Failed' };
+      renderDrives();
+      return;
+    }
+    delete cardResolveState[device]; // card will re-render past "identify" on the next progress event
+    await loadJobs();
+  } catch (_) {
+    cardResolveState[device] = { ...cardResolveState[device], message: 'Request failed.' };
+    renderDrives();
+  }
 }
 
 // ── Jobs list ────────────────────────────────────────────────────────────
@@ -638,11 +786,12 @@ async function loadDevices() {
 
 function renderJobs() {
   const el = document.getElementById('jobs-table');
-  if (!jobs.length) {
-    el.innerHTML = '<div class="jobs-empty">No rips yet.</div>';
+  const historical = jobs.filter(j => isTerminal(j.Status));
+  if (!historical.length) {
+    el.innerHTML = '<div class="jobs-empty">No completed rips yet.</div>';
     return;
   }
-  el.innerHTML = jobs.map(j => {
+  el.innerHTML = historical.map(j => {
     const title = j.Title || j.DiscLabel || '—';
     const year  = j.Year ? ` (${j.Year})` : '';
     const sel   = j.ID === selectedJobId ? ' selected' : '';

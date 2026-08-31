@@ -16,6 +16,8 @@ func writeConfig(t *testing.T, content string) string {
 }
 
 func TestLoadFull(t *testing.T) {
+	t.Setenv("MAKEMKV_KEY", "")
+
 	path := writeConfig(t, `
 detection:
   tv_threshold: 5

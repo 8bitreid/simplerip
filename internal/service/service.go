@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -409,7 +410,7 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			chosen, runtimeWinner, logMsg, err := metadata.BestMatch(ctx, tmdbClient, movies, longestDuration)
 			if err == nil {
 				if runtimeWinner && logMsg != "" {
-					fmt.Fprintln(os.Stderr, logMsg)
+					slog.Info("tmdb runtime match selected", "message", logMsg)
 				}
 				details, err := s.EnrichMovie(ctx, chosen)
 				if err == nil {
@@ -808,10 +809,10 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 			strings.HasPrefix(filepath.Base(cleanedRipDir), "rip-") {
 			if err := os.RemoveAll(cleanedRipDir); err != nil {
 				// Log warning but don't fail — delivery succeeded.
-				fmt.Fprintf(os.Stderr, "Warning: failed to clean up staging dir %s: %v\n", cleanedRipDir, err)
+				slog.Warn("failed to clean up staging dir", "path", cleanedRipDir, "error", err)
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "Warning: skipping cleanup, path validation failed: %s\n", cleanedRipDir)
+			slog.Warn("skipping cleanup due to invalid path", "path", cleanedRipDir)
 		}
 	}
 
