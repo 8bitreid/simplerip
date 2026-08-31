@@ -214,6 +214,10 @@ header h1 {
 .card-resolve .search-row { margin-bottom: 8px; }
 .card-resolve .search-results { display: flex; flex-direction: column; gap: 4px; }
 
+.card-resolve { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.card-resolve .search-row { margin-bottom: 8px; }
+.card-resolve .search-results { display: flex; flex-direction: column; gap: 4px; }
+
 /* ── Badges ── */
 
 .badge {
@@ -242,17 +246,21 @@ header h1 {
 .badge-pending    { background: var(--surface2); color: var(--text-muted); }
 .badge-disc-type  { background: rgba(59,130,246,0.12); color: var(--blue); }
 
-.spin-inline {
+.spinner {
   display: inline-block;
-  animation: spin-forever 1s linear infinite;
-  margin-right: 4px;
-}
-@keyframes spin-forever {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255,255,255,0.15);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spinner-rotate 0.7s linear infinite;
+  vertical-align: middle;
 }
 @media (prefers-reduced-motion: reduce) {
-  .spin-inline { animation: none; }
+  .spinner { animation: none; }
+}
+@keyframes spinner-rotate {
+  to { transform: rotate(360deg); }
 }
 
 /* ── Jobs list ── */
@@ -507,7 +515,7 @@ function isManualSearchWait(stage, message) {
 
 function badgeHTML(status, message = '') {
   if (isManualSearchWait(status, message)) {
-    return '<span class="badge badge-waiting"><span class="spin-inline">⟳</span>⚠ awaiting title</span>';
+    return '<span class="badge badge-waiting">⚠ awaiting title</span>';
   }
   const s = (status || 'idle').toLowerCase();
   return `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
@@ -671,7 +679,7 @@ function driveCardHTML(st) {
       : waitingIdentify
         ? '⚠'
         : indeterminate
-          ? '<span class="spin-inline" style="margin-right:0">⟳</span>'
+          ? '<span class="spinner"></span>'
           : (isCurrent ? '' : '');
 
     const connectorClass = isDone ? 'done' : (isCurrent ? 'active' : '');
