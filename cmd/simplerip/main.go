@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,10 +31,28 @@ const version = "0.1.0-dev"
 var cfgPath string
 
 func main() {
+	configureLogger()
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "simplerip:", err)
+		slog.Error("command failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func configureLogger() {
+	level := slog.LevelInfo
+	if raw := strings.TrimSpace(os.Getenv("LOG_LEVEL")); raw != "" {
+		switch strings.ToUpper(raw) {
+		case "DEBUG":
+			level = slog.LevelDebug
+		case "INFO":
+			level = slog.LevelInfo
+		case "WARN":
+			level = slog.LevelWarn
+		case "ERROR":
+			level = slog.LevelError
+		}
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
 
 func init() {
@@ -84,11 +103,11 @@ Environment variables:
 			return err
 		}
 		svc := service.New(cfg, nil)
-		fmt.Fprintf(os.Stderr, "Starting automated rip pipeline for %s...\n", device)
+		slog.Info("starting automated rip pipeline", "device", device)
 		if err := svc.RipDisc(context.Background(), device); err != nil {
 			return fmt.Errorf("rip pipeline: %w", err)
 		}
-		fmt.Fprintln(os.Stderr, "Rip pipeline completed successfully.")
+		slog.Info("rip pipeline completed successfully", "device", device)
 		return nil
 	},
 }
@@ -257,7 +276,7 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 			var stErr error
 			st, stErr = store.New(cmd.Context(), cfg.Database.URL)
 			if stErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: database unavailable, running without persistence: %v\n", stErr)
+				slog.Warn("database unavailable; running without persistence", "error", stErr)
 			}
 		}
 
@@ -283,23 +302,23 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 						// Ignore removals for a device that's mid-rip — the disc
 						// hasn't really left; the busy drive just failed a probe.
 						if busyDevices.IsBusy(ev.Device) {
-							fmt.Fprintf(os.Stderr, "Ignoring disc-removed on %s: rip in progress\n", ev.Device)
+							slog.Debug("ignoring disc removal while rip in progress", "device", ev.Device)
 							continue
 						}
 						// Disc removed — reset the drive card to idle.
-						fmt.Fprintf(os.Stderr, "Disc removed from %s\n", ev.Device)
+						slog.Info("disc removed", "device", ev.Device)
 						svc.MarkDeviceIdle(ev.Device)
 						continue
 					}
 
 					// Don't start a second rip on a device that's already ripping.
 					if busyDevices.IsBusy(ev.Device) {
-						fmt.Fprintf(os.Stderr, "Ignoring disc-detected on %s: rip already in progress\n", ev.Device)
+						slog.Debug("ignoring disc detection because rip already in progress", "device", ev.Device)
 						continue
 					}
 					busyDevices.MarkBusy(ev.Device)
 
-					fmt.Fprintf(os.Stderr, "Disc detected on %s, starting rip...\n", ev.Device)
+					slog.Info("disc detected; starting rip", "device", ev.Device)
 					go func(dev string) {
 						defer busyDevices.MarkIdle(dev)
 
@@ -312,18 +331,18 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 						defer cancel()
 
 						if err := svc.RipDisc(ripCtx, dev); err != nil {
-							fmt.Fprintf(os.Stderr, "Rip failed for %s: %v\n", dev, err)
+							slog.Error("rip failed", "device", dev, "error", err)
 						}
 					}(ev.Device)
 				}
 			}()
 
-			fmt.Fprintf(os.Stderr, "Polling devices: %v (interval: 5s)\n", cfg.MakeMKV.Devices)
+			slog.Info("starting disc polling", "devices", cfg.MakeMKV.Devices, "interval", 5*time.Second)
 		}
 
-		fmt.Fprintf(os.Stderr, "Starting HTTP server on port %d...\n", port)
-		fmt.Fprintf(os.Stderr, "Web UI: http://localhost:%d/\n", port)
-		fmt.Fprintf(os.Stderr, "WebSocket: ws://localhost:%d/ws/progress\n", port)
+		slog.Info("starting http server", "port", port)
+		slog.Info("web ui ready", "url", fmt.Sprintf("http://localhost:%d/", port))
+		slog.Info("websocket ready", "url", fmt.Sprintf("ws://localhost:%d/ws/progress", port))
 
 		if err := srv.Start(port); err != nil {
 			return fmt.Errorf("serve: %w", err)
