@@ -29,6 +29,16 @@ const (
 	StatusUnresponsive = "unresponsive" // probe timed out or failed
 )
 
+// driveState is the kernel's answer about a drive's media.
+type driveState int
+
+const (
+	driveUnsupported driveState = iota // kernel can't answer for this device; use makemkvcon
+	driveNotReady                      // spinning up or unreadable right now; retry next tick
+	driveEmpty                         // no disc / tray open
+	driveDisc                          // disc loaded
+)
+
 // BusyDeviceTracker holds device paths currently owned by an active rip.
 // Polling code can use it to avoid probing drives that are in use.
 type BusyDeviceTracker struct {
@@ -212,16 +222,37 @@ func pollDevice(
 // This is a test hook — production code uses the system PATH.
 var makemkvPath = "makemkvcon"
 
+// useDriveIoctl makes checkDevice ask the kernel for drive status before
+// falling back to a makemkvcon probe. Tests that supply a fake makemkvcon turn
+// it off so they never touch a real drive.
+var useDriveIoctl = true
+
 // SetMakemkvPathForTest sets a custom makemkvcon binary path for testing.
 func SetMakemkvPathForTest(path string) {
 	makemkvPath = path
+	useDriveIoctl = false
 }
 
-// checkDevice runs makemkvcon to check if a disc is present in the device.
+// checkDevice reports whether a disc is present in the device, using the kernel
+// drive-status ioctl and falling back to a makemkvcon probe.
 // Returns (hasDisc=true, ok=true) if TCOUNT > 0.
 // Returns (hasDisc=false, ok=true) if TCOUNT == 0 (confirmed no disc).
 // Returns (hasDisc=false, ok=false) if check failed (timeout, error, drive busy).
 func checkDevice(ctx context.Context, device string, timeout time.Duration) (hasDisc bool, ok bool) {
+	// The kernel CD-ROM status ioctl answers in microseconds and does not touch
+	// the disc. makemkvcon is only used when the kernel can't answer for this
+	// device at all; a drive that is merely not ready is retried on the next
+	// tick instead of being probed while it spins up.
+	if useDriveIoctl {
+		switch ioctlDriveStatus(device) {
+		case driveDisc:
+			return true, true
+		case driveEmpty:
+			return false, true
+		case driveNotReady:
+			return false, false
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

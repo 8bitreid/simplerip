@@ -299,7 +299,7 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 				disc.StatusDiscPresent:  "disc detected",
 				disc.StatusUnresponsive: "drive not responding — retrying",
 			}
-			discCh := disc.PollEventsWithStatus(ctx, cfg.MakeMKV.Devices, 5*time.Second, busyDevices.IsBusy,
+			discCh := disc.PollEventsWithStatus(ctx, cfg.MakeMKV.Devices, 2*time.Second, busyDevices.IsBusy,
 				func(dev, status string) {
 					if msg, ok := driveStatusMsg[status]; ok {
 						svc.SetDriveStatus(dev, msg)
@@ -348,7 +348,7 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 				}
 			}()
 
-			slog.Info("starting disc polling", "devices", cfg.MakeMKV.Devices, "interval", 5*time.Second)
+			slog.Info("starting disc polling", "devices", cfg.MakeMKV.Devices, "interval", 2*time.Second)
 		}
 
 		slog.Info("starting http server", "port", port)
