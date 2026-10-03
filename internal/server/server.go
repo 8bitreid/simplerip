@@ -36,6 +36,8 @@ type jobStore interface {
 	GetJob(ctx context.Context, id string) (store.Job, []store.JobEvent, error)
 	AddEvent(ctx context.Context, jobID, stage, message string, data any) error
 	UpdateJob(ctx context.Context, id, title string, year int, status, pattern string) error
+	DeleteJob(ctx context.Context, id string) error
+	DeleteFinishedJobs(ctx context.Context) (int64, error)
 }
 
 // Server wraps the Echo HTTP server and provides WebSocket progress streaming.
@@ -100,6 +102,8 @@ func (s *Server) registerRoutes() {
 	s.e.POST("/api/eject/:device", s.handleEject)
 	s.e.GET("/api/jobs", s.handleListJobs)
 	s.e.GET("/api/jobs/:id", s.handleGetJob)
+	s.e.DELETE("/api/jobs/:id", s.handleDeleteJob)
+	s.e.DELETE("/api/jobs", s.handleDeleteFinishedJobs)
 	s.e.GET("/api/search", s.handleSearch)
 	s.e.POST("/api/jobs/:id/reidentify", s.handleReidentify)
 }
@@ -212,6 +216,37 @@ func (s *Server) handleGetJob(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"job": job, "events": events})
 }
 
+// handleDeleteJob removes one finished job from history. Files already
+// delivered to the NAS are not touched.
+func (s *Server) handleDeleteJob(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	err := s.store.DeleteJob(c.Request().Context(), c.Param("id"))
+	switch {
+	case err == nil:
+		return c.NoContent(http.StatusNoContent)
+	case errors.Is(err, store.ErrNotFound):
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "job not found"})
+	case errors.Is(err, store.ErrJobActive):
+		return c.JSON(http.StatusConflict, map[string]string{"error": "job is still in progress"})
+	default:
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+}
+
+// handleDeleteFinishedJobs clears all finished jobs from history.
+func (s *Server) handleDeleteFinishedJobs(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	n, err := s.store.DeleteFinishedJobs(c.Request().Context())
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.JSON(http.StatusOK, map[string]int64{"deleted": n})
+}
+
 // searchResultJSON is the response shape for each TMDB search hit.
 type searchResultJSON struct {
 	ID        int    `json:"id"`
@@ -284,6 +319,10 @@ func (s *Server) handleReidentify(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "job not found"})
 		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	if s.svc.TitleFrozen(existing.Device) && !isFinished(existing.Status) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "delivery has started; the title can no longer be changed"})
 	}
 
 	_ = s.store.AddEvent(ctx, id, "identify",
@@ -436,3 +475,5 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 }
+
+func isFinished(status string) bool { return status == "done" || status == "error" }

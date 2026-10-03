@@ -298,6 +298,8 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 				disc.StatusNoDisc:       "no disc — waiting",
 				disc.StatusDiscPresent:  "disc detected",
 				disc.StatusUnresponsive: "drive not responding — retrying",
+				disc.StatusLoading:      "loading disc…",
+				disc.StatusTrayOpen:     "tray open",
 			}
 			discCh := disc.PollEventsWithStatus(ctx, cfg.MakeMKV.Devices, 2*time.Second, busyDevices.IsBusy,
 				func(dev, status string) {

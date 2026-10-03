@@ -117,3 +117,50 @@ func TestDeliverRsyncFailure(t *testing.T) {
 		t.Fatalf("Deliver() error = %v, want rsync error", err)
 	}
 }
+
+func TestRenameForDelivery(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(n string) string {
+		p := filepath.Join(dir, n)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	one, err := output.RenameForDelivery([]string{mk("title_t00.mkv")}, "Real Steel (2011)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "Real Steel (2011).mkv"); one[0] != want {
+		t.Fatalf("got %q, want %q", one[0], want)
+	}
+	if _, err := os.Stat(one[0]); err != nil {
+		t.Fatalf("renamed file missing: %v", err)
+	}
+
+	dir2 := t.TempDir()
+	a, b := filepath.Join(dir2, "a.mkv"), filepath.Join(dir2, "b.mkv")
+	os.WriteFile(a, []byte("x"), 0o644)
+	os.WriteFile(b, []byte("x"), 0o644)
+	two, err := output.RenameForDelivery([]string{a, b}, "Movie (2000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(two[0]) != "Movie (2000) - part1.mkv" || filepath.Base(two[1]) != "Movie (2000) - part2.mkv" {
+		t.Fatalf("unexpected names: %v", two)
+	}
+}
+
+func TestRenameForDeliverySanitizesReservedChars(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "t.mkv")
+	os.WriteFile(src, []byte("x"), 0o644)
+	got, err := output.RenameForDelivery([]string{src}, `LeapFrog: Letter Factory? (2003)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(got[0]) != "LeapFrog - Letter Factory (2003).mkv" {
+		t.Fatalf("got %q", got[0])
+	}
+}

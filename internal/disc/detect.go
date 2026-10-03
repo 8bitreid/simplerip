@@ -27,6 +27,8 @@ const (
 	StatusNoDisc       = "no_disc"      // probe confirmed the drive is empty
 	StatusDiscPresent  = "disc_present" // probe found a disc
 	StatusUnresponsive = "unresponsive" // probe timed out or failed
+	StatusLoading      = "loading"      // disc is spinning up / being read by the drive
+	StatusTrayOpen     = "tray_open"    // tray is open
 )
 
 // driveState is the kernel's answer about a drive's media.
@@ -34,8 +36,10 @@ type driveState int
 
 const (
 	driveUnsupported driveState = iota // kernel can't answer for this device; use makemkvcon
-	driveNotReady                      // spinning up or unreadable right now; retry next tick
-	driveEmpty                         // no disc / tray open
+	driveLoading                       // disc is loading/spinning up; normal, retry next tick
+	driveError                         // couldn't query the drive; retry next tick
+	driveEmpty                         // no disc
+	driveTrayOpen                      // tray is open
 	driveDisc                          // disc loaded
 )
 
@@ -156,10 +160,14 @@ func pollDevice(
 	isBusy func(device string) bool,
 	onStatus func(device, status string),
 ) {
+	// Only report changes, so a steady state never re-renders the card.
+	lastStatus := ""
 	report := func(status string) {
-		if onStatus != nil {
-			onStatus(device, status)
+		if onStatus == nil || status == lastStatus {
+			return
 		}
+		lastStatus = status
+		onStatus(device, status)
 	}
 	state := false
 	ticker := time.NewTicker(interval)
@@ -171,18 +179,28 @@ func pollDevice(
 			return
 		}
 
-		report(StatusDetecting)
+		// Kernel checks return instantly; only show "detecting" if the probe is slow.
+		slow := time.AfterFunc(time.Second, func() { report(StatusDetecting) })
 		start := time.Now()
-		hasDisc, ok := checkDevice(ctx, device, discProbeTimeout)
+		hasDisc, ok, status := checkDeviceStatus(ctx, device, discProbeTimeout)
+		slow.Stop()
 		elapsed := time.Since(start).Round(time.Millisecond)
 		if !ok {
-			slog.Warn("drive probe failed", "device", device, "elapsed", elapsed)
-			report(StatusUnresponsive)
+			// A loading drive is normal (disc spinning up); only warn on real failures.
+			if status == StatusLoading {
+				slog.Debug("drive loading", "device", device)
+			} else {
+				slog.Warn("drive probe failed", "device", device, "elapsed", elapsed)
+			}
+			report(status)
 			return
 		}
-		if hasDisc {
+		switch {
+		case hasDisc:
 			report(StatusDiscPresent)
-		} else {
+		case status != "":
+			report(status)
+		default:
 			report(StatusNoDisc)
 		}
 		slog.Debug("drive probe result", "device", device, "has_disc", hasDisc, "previous_state", state, "elapsed", elapsed)
@@ -239,6 +257,13 @@ func SetMakemkvPathForTest(path string) {
 // Returns (hasDisc=false, ok=true) if TCOUNT == 0 (confirmed no disc).
 // Returns (hasDisc=false, ok=false) if check failed (timeout, error, drive busy).
 func checkDevice(ctx context.Context, device string, timeout time.Duration) (hasDisc bool, ok bool) {
+	hasDisc, ok, _ = checkDeviceStatus(ctx, device, timeout)
+	return hasDisc, ok
+}
+
+// checkDeviceStatus is checkDevice plus a Status* value for the cases where the
+// kernel gave a definite non-answer (loading, tray open); status is "" otherwise.
+func checkDeviceStatus(ctx context.Context, device string, timeout time.Duration) (hasDisc bool, ok bool, status string) {
 	// The kernel CD-ROM status ioctl answers in microseconds and does not touch
 	// the disc. makemkvcon is only used when the kernel can't answer for this
 	// device at all; a drive that is merely not ready is retried on the next
@@ -246,11 +271,15 @@ func checkDevice(ctx context.Context, device string, timeout time.Duration) (has
 	if useDriveIoctl {
 		switch ioctlDriveStatus(device) {
 		case driveDisc:
-			return true, true
+			return true, true, ""
 		case driveEmpty:
-			return false, true
-		case driveNotReady:
-			return false, false
+			return false, true, ""
+		case driveTrayOpen:
+			return false, true, StatusTrayOpen
+		case driveLoading:
+			return false, false, StatusLoading
+		case driveError:
+			return false, false, StatusUnresponsive
 		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -260,11 +289,11 @@ func checkDevice(ctx context.Context, device string, timeout time.Duration) (has
 	cmd.Stderr = nil // Suppress error output
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return false, false
+		return false, false, StatusUnresponsive
 	}
 
 	if err := cmd.Start(); err != nil {
-		return false, false
+		return false, false, StatusUnresponsive
 	}
 
 	// Parse output for TCOUNT line
@@ -285,7 +314,7 @@ func checkDevice(ctx context.Context, device string, timeout time.Duration) (has
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return false, false
+		return false, false, StatusUnresponsive
 	}
 
 	// Wait for command to finish
@@ -294,17 +323,17 @@ func checkDevice(ctx context.Context, device string, timeout time.Duration) (has
 		// non-zero. Some drives/tools report a recoverable error after printing
 		// the disc count, and disc presence is still authoritative here.
 		if foundTCOUNT {
-			return tcount > 0, true
+			return tcount > 0, true, ""
 		}
-		return false, false
+		return false, false, StatusUnresponsive
 	}
 
 	// If we didn't find TCOUNT line, treat as check failure
 	if !foundTCOUNT {
-		return false, false
+		return false, false, StatusUnresponsive
 	}
 
-	return tcount > 0, true
+	return tcount > 0, true, ""
 }
 
 // init allows tests to override the makemkvcon binary path.

@@ -23,7 +23,7 @@ const (
 func ioctlDriveStatus(device string) driveState {
 	fd, err := syscall.Open(device, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return driveNotReady
+		return driveError
 	}
 	defer syscall.Close(fd)
 
@@ -33,14 +33,16 @@ func ioctlDriveStatus(device string) driveState {
 	case syscall.ENOTTY, syscall.EINVAL:
 		return driveUnsupported // not a CD-ROM device; the kernel can't answer
 	default:
-		return driveNotReady
+		return driveError
 	}
 	switch int(r) {
 	case cdsDiscOK:
 		return driveDisc
-	case cdsNoDisc, cdsTrayOpen:
+	case cdsNoDisc:
 		return driveEmpty
-	default: // cdsNoInfo, cdsDriveNotRdy: spinning up; ask again next tick
-		return driveNotReady
+	case cdsTrayOpen:
+		return driveTrayOpen
+	default: // cdsNoInfo, cdsDriveNotRdy: normal while a disc loads/spins up
+		return driveLoading
 	}
 }

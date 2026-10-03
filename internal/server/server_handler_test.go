@@ -23,7 +23,17 @@ type mockStore struct {
 	getJob    func(ctx context.Context, id string) (store.Job, []store.JobEvent, error)
 	addEvent  func(ctx context.Context, jobID, stage, message string, data any) error
 	updateJob func(ctx context.Context, id, title string, year int, status, pattern string) error
+	deleteJob func(ctx context.Context, id string) error
 }
+
+func (m *mockStore) DeleteJob(ctx context.Context, id string) error {
+	if m.deleteJob != nil {
+		return m.deleteJob(ctx, id)
+	}
+	return nil
+}
+
+func (m *mockStore) DeleteFinishedJobs(ctx context.Context) (int64, error) { return 3, nil }
 
 func (m *mockStore) ListJobs(ctx context.Context) ([]store.Job, error) {
 	if m.listJobs != nil {
@@ -356,4 +366,34 @@ func TestHandleReidentify_Success(t *testing.T) {
 		t.Error("event message should not be empty")
 	}
 	_ = capturedMsg
+}
+
+func TestHandleDeleteJob(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"ok", nil, http.StatusNoContent},
+		{"missing", store.ErrNotFound, http.StatusNotFound},
+		{"active", store.ErrJobActive, http.StatusConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(&mockStore{deleteJob: func(context.Context, string) error { return tc.err }})
+			if rr := doRequest(t, s, http.MethodDelete, "/api/jobs/x", nil); rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rr.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleDeleteFinishedJobs(t *testing.T) {
+	s := newTestServer(&mockStore{})
+	rr := doRequest(t, s, http.MethodDelete, "/api/jobs", nil)
+	var got map[string]int64
+	decodeJSON(t, rr, &got)
+	if rr.Code != http.StatusOK || got["deleted"] != 3 {
+		t.Fatalf("status=%d body=%v", rr.Code, got)
+	}
 }

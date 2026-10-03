@@ -138,3 +138,67 @@ exit 1
 		t.Fatalf("expected ErrRipReadErrorLimit, got %v", err)
 	}
 }
+
+func TestRipTitleReportsAnalyzeThenSavePhases(t *testing.T) {
+	outDir := t.TempDir()
+	scriptDir := t.TempDir()
+	script := filepath.Join(scriptDir, "makemkvcon")
+	body := `#!/bin/sh
+for last; do :; done
+printf 'PRGV:0,0,65536\n'
+printf 'PRGV:32768,32768,65536\n'
+printf 'MSG:5011,0,0,"Operation successfully completed"\n'
+printf 'MSG:5014,131072,2,"Saving 1 titles into directory x"\n'
+printf 'PRGV:0,0,65536\n'
+printf 'PRGV:16384,16384,65536\n'
+touch "$last/Title_t00.mkv"
+exit 0
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	type step struct {
+		pct   int
+		phase RipPhase
+	}
+	var got []step
+	cb := func(_ int, pct int, phase RipPhase) { got = append(got, step{pct, phase}) }
+	if _, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 0}, outDir, "k", 2, 256, 100, 15, cb); err != nil {
+		t.Fatal(err)
+	}
+	want := []step{{0, PhaseAnalyze}, {50, PhaseAnalyze}, {0, PhaseSave}, {25, PhaseSave}}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("step %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRipTitleSaveFailedReportsLocation(t *testing.T) {
+	outDir := t.TempDir()
+	scriptDir := t.TempDir()
+	body := `#!/bin/sh
+printf 'MSG:2003,0,3,"Error x","fmt","Scsi error","/VIDEO_TS/VTS_01_1.VOB","601227264"\n'
+printf 'MSG:5003,0,2,"Failed to save title 0","fmt","0","f.mkv"\n'
+printf 'PRGV:100,100,100\n'
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(scriptDir, "makemkvcon"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 0}, outDir, "k", 2, 256, 0, 0, nil)
+	var re *ReadError
+	if !errors.Is(err, ErrRipSaveFailed) || !errors.As(err, &re) {
+		t.Fatalf("expected ReadError(ErrRipSaveFailed), got %v", err)
+	}
+	if re.Offset != 601227264 || re.File != "/VIDEO_TS/VTS_01_1.VOB" {
+		t.Fatalf("bad location: %+v", re)
+	}
+}

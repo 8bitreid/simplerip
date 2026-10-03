@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -40,7 +41,7 @@ func Deliver(
 	stagingDir, destDir, subdir string,
 	title, discName string,
 ) (*DeliverResult, error) {
-	target := filepath.Join(destDir, subdir)
+	target := filepath.Join(destDir, sanitizeFileName(subdir))
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %q: %w", target, err)
 	}
@@ -72,6 +73,56 @@ func Deliver(
 	}
 
 	return &DeliverResult{DestDir: target, Files: destFiles}, nil
+}
+
+// RenameForDelivery renames ripped files in place (within their staging
+// directory) to the Jellyfin-style base name: "<name>.mkv" for a single file,
+// or "<name> - part1.mkv", "<name> - part2.mkv" ... when there are several.
+// It returns the new paths in the same order. If any rename fails, files already
+// renamed are restored and an error is returned.
+func RenameForDelivery(files []string, name string) ([]string, error) {
+	name = sanitizeFileName(name)
+	if name == "" || len(files) == 0 {
+		return files, nil
+	}
+	out := make([]string, 0, len(files))
+	for i, src := range files {
+		base := name
+		if len(files) > 1 {
+			base = fmt.Sprintf("%s - part%d", name, i+1)
+		}
+		dst := filepath.Join(filepath.Dir(src), base+filepath.Ext(src))
+		if dst != src {
+			if _, err := os.Stat(dst); err == nil {
+				err = fmt.Errorf("destination %q already exists", dst)
+				rollbackRenames(files, out)
+				return nil, err
+			}
+			if err := os.Rename(src, dst); err != nil {
+				rollbackRenames(files, out)
+				return nil, fmt.Errorf("rename %q: %w", filepath.Base(src), err)
+			}
+		}
+		out = append(out, dst)
+	}
+	return out, nil
+}
+
+func rollbackRenames(orig, renamed []string) {
+	for i := range renamed {
+		_ = os.Rename(renamed[i], orig[i])
+	}
+}
+
+// sanitizeFileName strips characters Jellyfin reserves (< > : " / \ | ? *), so
+// the folder and file names always match and never trip up SMB shares.
+// A colon becomes " -" ("Star Wars: A New Hope" -> "Star Wars - A New Hope").
+func sanitizeFileName(s string) string {
+	r := strings.NewReplacer(
+		"/", "-", "\\", "-", ":", " -",
+		"?", "", "*", "", "\"", "", "<", "", ">", "", "|", "", "\x00", "",
+	)
+	return strings.Join(strings.Fields(r.Replace(s)), " ")
 }
 
 // rsync calls the system rsync to copy srcFiles into destDir.

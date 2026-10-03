@@ -20,6 +20,9 @@ import (
 // ErrNotFound is returned when a requested record does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrJobActive is returned when deleting a job that is still in progress.
+var ErrJobActive = errors.New("job is still in progress")
+
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
@@ -34,6 +37,10 @@ type Job struct {
 	DiscType  string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// Populated by ListJobs for failed jobs, from the latest error event.
+	ErrorSummary string `json:",omitempty"`
+	ErrorHint    string `json:",omitempty"`
 }
 
 type JobEvent struct {
@@ -184,9 +191,15 @@ func (s *Store) AddEvent(ctx context.Context, jobID, stage, message string, data
 
 func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, device, disc_label, title, year, status, pattern, disc_type, created_at, updated_at
-		 FROM jobs
-		 ORDER BY created_at DESC
+		`SELECT j.id, j.device, j.disc_label, j.title, j.year, j.status, j.pattern, j.disc_type, j.created_at, j.updated_at,
+		        e.message, e.data->>'hint'
+		 FROM jobs j
+		 LEFT JOIN LATERAL (
+		   SELECT message, data FROM job_events
+		   WHERE job_id = j.id AND stage = 'error'
+		   ORDER BY created_at DESC LIMIT 1
+		 ) e ON j.status = 'error'
+		 ORDER BY j.created_at DESC
 		 LIMIT 100`,
 	)
 	if err != nil {
@@ -196,9 +209,16 @@ func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 
 	var jobs []Job
 	for rows.Next() {
-		j, err := scanJob(rows.Scan)
+		var summary, hint *string
+		j, err := scanJob(func(dest ...any) error { return rows.Scan(append(dest, &summary, &hint)...) })
 		if err != nil {
 			return nil, fmt.Errorf("scanning job: %w", err)
+		}
+		if summary != nil {
+			j.ErrorSummary = *summary
+		}
+		if hint != nil {
+			j.ErrorHint = *hint
 		}
 		jobs = append(jobs, j)
 	}
@@ -243,4 +263,30 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, []JobEvent, error) 
 	}
 
 	return j, events, nil
+}
+
+// DeleteJob removes a finished (done or error) job and, via ON DELETE CASCADE,
+// its events. In-progress jobs are refused with ErrJobActive.
+func (s *Store) DeleteJob(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM jobs WHERE id=$1 AND status IN ('done','error')`, id)
+	if err != nil {
+		return fmt.Errorf("deleting job %s: %w", id, err)
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	if _, _, err := s.GetJob(ctx, id); err != nil {
+		return err
+	}
+	return ErrJobActive
+}
+
+// DeleteFinishedJobs removes every done or error job and returns how many.
+func (s *Store) DeleteFinishedJobs(ctx context.Context) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM jobs WHERE status IN ('done','error')`)
+	if err != nil {
+		return 0, fmt.Errorf("deleting finished jobs: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }

@@ -3,6 +3,7 @@ package ripper
 import (
 	"bufio"
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"os"
@@ -25,8 +26,53 @@ var ErrRipReadErrorLimit = errors.New("makemkvcon: read error limit reached")
 // ErrRipNoProgress is returned when the rip stalls for too long.
 var ErrRipNoProgress = errors.New("makemkvcon: no progress")
 
+// ErrRipSaveFailed is returned when makemkvcon finishes without writing the
+// title, typically because part of the disc could not be read.
+var ErrRipSaveFailed = errors.New("makemkvcon: title could not be saved")
+
+// ReadError describes a disc read failure, including where it happened.
+// Cause is one of the ErrRip* sentinels, so errors.Is keeps working.
+type ReadError struct {
+	Cause  error
+	Title  int
+	Device string
+	File   string // file on the disc, e.g. /VIDEO_TS/VTS_01_1.VOB
+	Offset int64  // byte offset of the first failed read, -1 if unknown
+	Count  int    // number of read errors reported
+	Detail string // extra context, e.g. "12 min stalled"
+}
+
+func (e *ReadError) Unwrap() error { return e.Cause }
+
+func (e *ReadError) Error() string {
+	msg := fmt.Sprintf("%v: title %d on %s (%d read errors", e.Cause, e.Title, e.Device, e.Count)
+	if e.Detail != "" {
+		msg += ", " + e.Detail
+	}
+	msg += ")"
+	if e.Offset >= 0 {
+		msg += fmt.Sprintf(" first at %s offset %d", e.File, e.Offset)
+	}
+	return msg
+}
+
+// RipPhase identifies which of makemkvcon's two passes a progress update belongs to.
+// makemkvcon first analyzes the disc (0-100%), then restarts progress at 0%
+// when it begins saving the title to disk.
+type RipPhase int
+
+const (
+	PhaseAnalyze RipPhase = iota // reading/analyzing the disc structure
+	PhaseSave                    // writing the MKV file
+)
+
+// msgSavingTitles is the makemkvcon message code ("Saving N titles into
+// directory ...") emitted when the save pass begins.
+const msgSavingTitles = 5014
+
 // ProgressCallback is called with percentage updates during ripping (0-100).
-type ProgressCallback func(titleIndex int, percent int)
+// Percent is relative to the current phase.
+type ProgressCallback func(titleIndex int, percent int, phase RipPhase)
 
 // RipTitle runs:
 //
@@ -93,9 +139,16 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 	}()
 
 	lastPct := -1
+	phase := PhaseAnalyze
 	lastProgressAt := time.Now()
 	readErrors := 0
+	firstReadFile, firstReadOffset := "", int64(-1)
+	saveFailed := false
 	var abortErr error
+	readErr := func(cause error, detail string) *ReadError {
+		return &ReadError{Cause: cause, Title: title.Index, Device: device, File: firstReadFile,
+			Offset: firstReadOffset, Count: readErrors, Detail: detail}
+	}
 
 	watchdog := time.NewTicker(10 * time.Second)
 	defer watchdog.Stop()
@@ -116,14 +169,26 @@ loop:
 					lastProgressAt = time.Now()
 					fmt.Printf("title %d: %d%%\n", title.Index, pct)
 					if progressCb != nil {
-						progressCb(title.Index, pct)
+						progressCb(title.Index, pct, phase)
 					}
 				}
 			} else if strings.HasPrefix(line, "MSG:") {
-				if parseMSGCode(line[len("MSG:"):]) == 2003 {
+				code := parseMSGCode(line[len("MSG:"):])
+				if code == msgSavingTitles && phase == PhaseAnalyze {
+					// Progress restarts at 0% for the save pass; force that to be reported.
+					phase = PhaseSave
+					lastPct = -1
+				}
+				if code == msgSaveTitleFailed {
+					saveFailed = true
+				}
+				if code == 2003 {
 					readErrors++
+					if firstReadOffset < 0 {
+						firstReadFile, firstReadOffset = parseReadErrorLocation(line[len("MSG:"):])
+					}
 					if readErrorLimit > 0 && readErrors >= readErrorLimit {
-						abortErr = fmt.Errorf("%w: title %d on %s (%d read errors)", ErrRipReadErrorLimit, title.Index, device, readErrors)
+						abortErr = readErr(ErrRipReadErrorLimit, "")
 						cancel()
 						break loop
 					}
@@ -133,7 +198,7 @@ loop:
 			}
 		case <-watchdog.C:
 			if noProgressMinutes > 0 && readErrors > 0 && time.Since(lastProgressAt) >= time.Duration(noProgressMinutes)*time.Minute {
-				abortErr = fmt.Errorf("%w: title %d on %s (%d min stalled, %d read errors)", ErrRipNoProgress, title.Index, device, noProgressMinutes, readErrors)
+				abortErr = readErr(ErrRipNoProgress, fmt.Sprintf("%d min stalled", noProgressMinutes))
 				cancel()
 				break loop
 			}
@@ -157,7 +222,36 @@ loop:
 		return nil, fmt.Errorf("makemkvcon: %w", werr)
 	}
 
-	return newMKVFiles(outputDir, start)
+	files, err := newMKVFiles(outputDir, start)
+	if err != nil {
+		return nil, err
+	}
+	// makemkvcon can exit cleanly (and report 100%) after giving up on a
+	// title it could not read; surface that instead of an empty result.
+	if len(files) == 0 && (saveFailed || readErrors > 0) {
+		return nil, readErr(ErrRipSaveFailed, "")
+	}
+	return files, nil
+}
+
+// msgSaveTitleFailed is the makemkvcon message code "Failed to save title".
+const msgSaveTitleFailed = 5003
+
+// parseReadErrorLocation extracts the file and byte offset from a MSG:2003
+// payload: code,flags,count,"text","fmt","reason","file","offset".
+func parseReadErrorLocation(payload string) (string, int64) {
+	r := csv.NewReader(strings.NewReader(payload))
+	r.LazyQuotes = true
+	r.FieldsPerRecord = -1
+	f, err := r.Read()
+	if err != nil || len(f) < 8 {
+		return "", -1
+	}
+	off, err := strconv.ParseInt(strings.TrimSpace(f[7]), 10, 64)
+	if err != nil {
+		return "", -1
+	}
+	return f[6], off
 }
 
 func parseMSGCode(payload string) int {

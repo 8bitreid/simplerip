@@ -241,6 +241,7 @@ header h1 {
 .badge-identifying { background: rgba(245,158,11,0.15); color: var(--yellow); }
 .badge-waiting { background: rgba(239,68,68,0.14); color: var(--red); }
 .badge-rip,
+.badge-analyzing  { background: rgba(59,130,246,0.15); color: var(--blue); }
 .badge-ripping    { background: rgba(99,102,241,0.15); color: var(--accent); }
 .badge-deliver,
 .badge-delivering { background: rgba(245,158,11,0.15); color: var(--yellow); }
@@ -281,7 +282,7 @@ header h1 {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow: visible;
 }
 
 .jobs-empty {
@@ -291,9 +292,22 @@ header h1 {
   font-size: 13px;
 }
 
+.has-tip { position: relative; cursor: help; }
+.has-tip::after {
+  content: attr(data-tip);
+  white-space: pre-wrap;
+  position: absolute; right: 0; top: calc(100% + 6px);
+  width: 340px; max-width: 80vw;
+  padding: 10px 12px; border-radius: 6px;
+  background: var(--surface2); color: var(--text); border: 1px solid var(--border, #444);
+  font-size: 12px; font-weight: 400; line-height: 1.4; text-align: left;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 50;
+}
+.has-tip:hover::after, .has-tip:focus::after { opacity: 1; }
 .job-row {
   display: grid;
-  grid-template-columns: 1fr auto auto auto auto;
+  grid-template-columns: 1fr auto auto auto auto auto;
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
@@ -461,7 +475,7 @@ header h1 {
   <header><h1>SimpleRip</h1></header>
   <div id="drives-grid" class="drives-grid"></div>
   <div>
-    <div class="section-title">Recent Rips</div>
+    <div class="section-title">Recent Rips <button id="clear-jobs" class="btn" style="margin-left:12px;display:none">Clear all</button></div>
     <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
     <div id="detail-panel" style="display:none"></div>
   </div>
@@ -469,16 +483,24 @@ header h1 {
 
 <script>
 // Checklist order, matching the real backend pipeline.
-const STAGES = ['scan', 'identify', 'score', 'rip', 'deliver'];
+const STAGES = ['scan', 'identify', 'score', 'analyze', 'rip', 'deliver'];
 
 // The backend emits progressive ("-ing") stage names; map them to checklist keys.
 const STAGE_ALIASES = {
   scanning:    'scan',
   identifying: 'identify',
   scoring:     'score',
+  analyzing:   'analyze',
   ripping:     'rip',
   delivering:  'deliver',
 };
+function fmtETA(sec) {
+  if (!sec || sec <= 0) return '';
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
 function canonStage(stage) { return STAGE_ALIASES[stage] || stage; }
 
 // Stages with no measurable progress — show an indeterminate sweep, not a bar.
@@ -606,6 +628,10 @@ function scheduleJobsRefresh() {
 
 function renderDrives() {
   const grid = document.getElementById('drives-grid');
+  // Re-rendering replaces the DOM, which would drop focus and typed text on
+  // every progress tick. Skip while the user is typing in a card's search box.
+  const focused = document.activeElement;
+  if (focused && focused.classList && focused.classList.contains('card-resolve-input')) return;
   const devices = knownDevices.size > 0 ? [...knownDevices] : [];
   if (!devices.length) {
     grid.innerHTML = '<div class="jobs-empty">Loading drives…</div>';
@@ -623,6 +649,17 @@ function renderDrives() {
         body: JSON.stringify({ device: btn.dataset.device }),
       }).catch(() => {});
     });
+  });
+  grid.querySelectorAll('.card-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const d = btn.dataset.device;
+      const cur = driveStates[d] || {};
+      cardResolveState[d] = { query: cur.title || '', results: null, message: '', ...(cardResolveState[d] || {}), open: true };
+      renderDrives();
+    });
+  });
+  grid.querySelectorAll('.card-resolve-cancel').forEach(btn => {
+    btn.addEventListener('click', () => { delete cardResolveState[btn.dataset.device]; renderDrives(); });
   });
   grid.querySelectorAll('.card-resolve-search').forEach(btn => {
     btn.addEventListener('click', () => doCardSearch(btn.dataset.device));
@@ -642,10 +679,13 @@ function renderDrives() {
   });
 }
 
-function driveIdleClass(message) {
-  if (/not responding/i.test(message || '')) return 'drive-idle-warn';
-  if (/disc detected/i.test(message || '')) return 'drive-idle-ok';
-  return '';
+function driveIdleState(message) {
+  const m = message || '';
+  if (/not responding/i.test(m)) return { icon: '⚠️', cls: 'drive-idle-warn', text: m };
+  if (/disc detected/i.test(m))  return { icon: '💿', cls: 'drive-idle-ok', text: m };
+  if (/loading|detecting/i.test(m)) return { icon: '⏳', cls: '', text: m };
+  if (/tray open/i.test(m))      return { icon: '⏏️', cls: '', text: m };
+  return { icon: '', cls: '', text: m || 'no disc — waiting' };
 }
 
 function driveCardHTML(st) {
@@ -665,7 +705,7 @@ function driveCardHTML(st) {
     </div>`;
 
   if (isIdle) {
-    return `<div class="drive-card">${header}<div class="drive-idle ${driveIdleClass(message)}">${esc(message || 'no disc — waiting')}</div></div>`;
+    return `<div class="drive-card">${header}${(() => { const d = driveIdleState(message); return `<div class="drive-idle ${d.cls}">${d.icon ? `<span class="drive-idle-icon">${d.icon}</span> ` : ""}${esc(d.text)}</div>`; })()}</div>`;
   }
 
   const titleLine  = title   ? `<div class="drive-title">${esc(title)}</div>` : '';
@@ -708,8 +748,14 @@ function driveCardHTML(st) {
   const progressHTML = activeStageHasBar
     ? `<div class="stage-progress prog-wrap"><div class="prog-fill" style="width:${pct}%"></div></div>`
     : '';
+  const etaText = canon === 'rip' ? fmtETA(st.eta_seconds) : '';
+  const etaHTML = etaText
+    ? `<div class="drive-subtitle">${pct}% · ~${esc(etaText)} remaining</div>`
+    : '';
 
-  const showResolve = isManualSearchWait(stage, message);
+  const canEdit = ['scanning', 'identifying', 'analyzing', 'ripping'].includes(stage);
+  const editOpen = canEdit && !!(cardResolveState[device] && cardResolveState[device].open);
+  const showResolve = isManualSearchWait(stage, message) || editOpen;
   let resolvePanelHTML = '';
   if (showResolve) {
     const rs = cardResolveState[device] || { query: title || '', results: null, message: '' };
@@ -720,6 +766,7 @@ function driveCardHTML(st) {
           <input class="search-input card-resolve-input" data-device="${escAttr(device)}"
             type="text" placeholder="Search TMDB…" value="${escAttr(rs.query)}" />
           <button class="btn btn-primary card-resolve-search" data-device="${escAttr(device)}">Search</button>
+          ${editOpen ? `<button class="btn card-resolve-cancel" data-device="${escAttr(device)}">Cancel</button>` : ''}
         </div>
         <div class="search-results">${rs.results ? renderResolveResults(device, rs.results) : ''}</div>
         ${rs.message ? `<div class="${rs.message.startsWith('Error') ? 'msg-error' : 'msg-info'}">${esc(rs.message)}</div>` : ''}
@@ -733,6 +780,8 @@ function driveCardHTML(st) {
       ${msgLine}
       <div class="stages">${stagesHTML}</div>
       ${progressHTML}
+      ${etaHTML}
+      ${canEdit && !showResolve ? `<button class="btn card-edit-btn" data-device="${escAttr(device)}">✎ Edit title</button>` : ''}
       <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
       ${resolvePanelHTML}
     </div>`;
@@ -758,8 +807,13 @@ async function doCardSearch(device) {
 }
 
 async function applyCardReidentify(device, payload) {
-  const job = findActiveJobForDevice(device);
-  if (!job) return;
+  let job = findActiveJobForDevice(device);
+  if (!job) { await loadJobs(); job = findActiveJobForDevice(device); }
+  if (!job) {
+    cardResolveState[device] = { ...cardResolveState[device], message: 'No active job found for this drive.' };
+    renderDrives();
+    return;
+  }
   try {
     const r = await fetch(`/api/jobs/${encodeURIComponent(job.ID)}/reidentify`, {
       method: 'POST',
@@ -804,6 +858,7 @@ async function loadDevices() {
 function renderJobs() {
   const el = document.getElementById('jobs-table');
   const historical = jobs.filter(j => isTerminal(j.Status));
+  document.getElementById('clear-jobs').style.display = historical.length ? '' : 'none';
   if (!historical.length) {
     el.innerHTML = '<div class="jobs-empty">No completed rips yet.</div>';
     return;
@@ -821,13 +876,36 @@ function renderJobs() {
         <span class="job-meta">${esc(j.Device || '')}</span>
         <span class="job-meta">${j.DiscType && j.DiscType !== 'unknown' ? esc(fmtDiscType(j.DiscType)) : ''}</span>
         <span class="job-meta">${fmtDate(j.CreatedAt)}</span>
-        ${badgeHTML(j.Status)}
+        ${j.Status === 'error' && (j.ErrorSummary || j.ErrorHint)
+          ? `<span class="badge badge-error has-tip" tabindex="0" data-tip="${escAttr([j.ErrorSummary, j.ErrorHint && 'Try this: ' + j.ErrorHint].filter(Boolean).join('\n\n'))}">error ⓘ</span>`
+          : badgeHTML(j.Status)}
+        <button class="btn job-delete" data-id="${escAttr(j.ID)}" title="Delete from history">🗑</button>
       </div>`;
   }).join('');
   el.querySelectorAll('.job-row').forEach(row => {
     row.addEventListener('click', () => openJob(row.dataset.id));
   });
+  el.querySelectorAll('.job-delete').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); deleteJob(btn.dataset.id); });
+  });
 }
+
+async function deleteJob(id) {
+  if (!confirm('Delete this rip from history? Delivered files are not touched.')) return;
+  const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!r.ok && r.status !== 404) { alert('Delete failed'); return; }
+  if (selectedJobId === id) { selectedJobId = null; document.getElementById('detail-panel').style.display = 'none'; }
+  await loadJobs();
+}
+
+document.getElementById('clear-jobs').addEventListener('click', async () => {
+  if (!confirm('Clear all finished rips from history? Delivered files are not touched.')) return;
+  const r = await fetch('/api/jobs', { method: 'DELETE' });
+  if (!r.ok) { alert('Clear failed'); return; }
+  selectedJobId = null;
+  document.getElementById('detail-panel').style.display = 'none';
+  await loadJobs();
+});
 
 // ── Detail panel ─────────────────────────────────────────────────────────
 
