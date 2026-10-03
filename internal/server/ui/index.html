@@ -80,6 +80,8 @@ header h1 {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
+  display: flex;
+  flex-direction: column;
 }
 
 .drive-card-header {
@@ -201,7 +203,7 @@ header h1 {
 .eject-btn {
   display: block;
   width: 100%;
-  margin-top: 14px;
+  margin-top: auto; /* pin to the bottom of the card */
   padding: 5px 12px;
   background: transparent;
   border: 1px solid var(--border);
@@ -211,6 +213,8 @@ header h1 {
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
+.eject-spacer { flex: 1 0 14px; }
+.drive-card > .card-edit-btn { align-self: flex-start; margin-top: 10px; }
 .eject-btn:hover { background: var(--surface2); color: var(--text); }
 
 .card-resolve { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
@@ -784,6 +788,8 @@ function driveCardHTML(st) {
       ${canEdit && !showResolve ? `<button class="btn card-edit-btn" data-device="${escAttr(device)}">✎ Edit title</button>` : ''}
       <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
       ${resolvePanelHTML}
+      <div class="eject-spacer"></div>
+      <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
     </div>`;
 }
 
