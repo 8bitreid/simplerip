@@ -281,9 +281,18 @@ func (s *RipService) freezeTitle(device, fallback string) string {
 }
 
 // needsConfirmation reports whether a ripped single title should be held back
-// from delivery: the identity was automatic and its runtime doesn't fit.
-func needsConfirmation(main []disc.MKVTitle, files int, userLocked bool, runtimeMin int) bool {
-	return len(main) == 1 && files == 1 && !userLocked && durationMismatch(main[0].Duration, runtimeMin)
+// from delivery: the identity was automatic and either unconfirmed or its runtime doesn't fit.
+func needsConfirmation(main []disc.MKVTitle, files int, userLocked bool, tmdbConfirmed bool, tmdbEnabled bool, runtimeMin int) bool {
+	if len(main) != 1 || files != 1 || userLocked {
+		return false
+	}
+	if !tmdbEnabled {
+		return false
+	}
+	if !tmdbConfirmed {
+		return true
+	}
+	return durationMismatch(main[0].Duration, runtimeMin)
 }
 
 func (s *RipService) titleIsLocked(device string) bool {
@@ -586,46 +595,67 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				}
 				details, err := s.EnrichMovie(ctx, chosen)
 				if err == nil {
-					mediaTitle = details.FolderName()
-					tmdbConfirmedMovie = true
 					runtimeMin = details.RuntimeMinutes
-					if s.store != nil {
-						yr, _ := strconv.Atoi(details.Year)
-						matchReason := "best_match"
-						if runtimeWinner {
-							matchReason = "runtime_match"
+					tmdbConfirmedMovie = isConfidentMovieMatch(details.RuntimeMinutes, longestDuration)
+					yr, _ := strconv.Atoi(details.Year)
+					if tmdbConfirmedMovie {
+						mediaTitle = details.FolderName()
+						if s.store != nil {
+							matchReason := "best_match"
+							if runtimeWinner {
+								matchReason = "runtime_match"
+							}
+							_ = s.store.AddEvent(ctx, job.ID, "identify",
+								fmt.Sprintf("identified as: %s (%d)", details.Title, yr),
+								map[string]any{
+									"tmdb_id":         chosen.ID,
+									"title":           details.Title,
+									"year":            yr,
+									"runtime_minutes": details.RuntimeMinutes,
+									"match_reason":    matchReason,
+									"confirmed":       true,
+								})
+							_ = s.store.UpdateJob(ctx, job.ID, details.Title, yr, "identifying", "")
 						}
-						_ = s.store.AddEvent(ctx, job.ID, "identify",
-							fmt.Sprintf("identified as: %s (%d)", details.Title, yr),
-							map[string]any{
-								"tmdb_id":         chosen.ID,
-								"title":           details.Title,
-								"year":            yr,
-								"runtime_minutes": details.RuntimeMinutes,
-								"match_reason":    matchReason,
-							})
-						_ = s.store.UpdateJob(ctx, job.ID, details.Title, yr, "identifying", "")
+					} else {
+						slog.Warn("tmdb match unconfirmed: runtime does not match disc feature",
+							"match", details.FolderName(),
+							"runtime_min", details.RuntimeMinutes,
+							"longest_duration", longestDuration.String(),
+							"disc", scanned.DiscName)
+						if s.store != nil {
+							_ = s.store.AddEvent(ctx, job.ID, "identify",
+								fmt.Sprintf("unconfirmed TMDB match %q (%d min vs disc %d min); continuing under disc label",
+									details.Title, details.RuntimeMinutes, int(longestDuration.Minutes())),
+								map[string]any{
+									"tmdb_id":         chosen.ID,
+									"suggested_title": details.Title,
+									"year":            yr,
+									"runtime_minutes": details.RuntimeMinutes,
+									"confirmed":       false,
+								})
+						}
 					}
 				}
 			} else {
 				// Fall back to first result if BestMatch fails.
 				details, err := s.EnrichMovie(ctx, movies[0])
 				if err == nil {
-					mediaTitle = details.FolderName()
-					tmdbConfirmedMovie = true
 					runtimeMin = details.RuntimeMinutes
+					tmdbConfirmedMovie = false
 					if s.store != nil {
 						yr, _ := strconv.Atoi(details.Year)
 						_ = s.store.AddEvent(ctx, job.ID, "identify",
-							fmt.Sprintf("identified as: %s (%d)", details.Title, yr),
+							fmt.Sprintf("unconfirmed TMDB match %q (%d min vs disc %d min); continuing under disc label",
+								details.Title, details.RuntimeMinutes, int(longestDuration.Minutes())),
 							map[string]any{
 								"tmdb_id":         movies[0].ID,
-								"title":           details.Title,
+								"suggested_title": details.Title,
 								"year":            yr,
 								"runtime_minutes": details.RuntimeMinutes,
+								"confirmed":       false,
 								"match_reason":    "first_result",
 							})
-						_ = s.store.UpdateJob(ctx, job.ID, details.Title, yr, "identifying", "")
 					}
 				}
 			}
@@ -655,7 +685,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				"pattern":    pattern,
 				"main_index": mainIndex,
 			})
-		_ = s.store.UpdateJob(ctx, job.ID, "", 0, "scanning", pattern)
+		_ = s.store.UpdateStatusPattern(ctx, job.ID, "scanning", pattern)
 	}
 
 	// Adopt the identified title unless the user already corrected it by hand
@@ -681,49 +711,51 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	// In daemon mode, we always rip MainTitles immediately.
 	// For now, skip extras — future enhancement will integrate Discord callbacks.
 	if len(result.MainTitles) == 0 {
-		s.emit(ProgressEvent{
-			Device:  device,
-			Stage:   "identifying",
-			Title:   s.currentTitle(device, mediaTitle),
-			Percent: 0,
-			Message: "No main title detected. Waiting for manual movie search...",
-		})
-		if s.store != nil {
-			_ = s.store.AddEvent(ctx, job.ID, "identify", "no clear main title, waiting for manual movie search", map[string]any{"action": "await_manual_search"})
-			_ = s.store.UpdateStatus(ctx, job.ID, "identifying")
-		}
-		s.notifier.Notify(notify.Message{
-			Event:   notify.EventNeedsInput,
-			JobID:   job.ID,
-			Disc:    scanned.DiscName,
-			Device:  device,
-			Title:   mediaTitle,
-			Summary: fmt.Sprintf("No main title detected (%s pattern, %d titles). Waiting for a manual movie search in the UI.", strings.ToLower(result.Pattern.String()), len(scanned.Titles)),
-		})
-
-		title, year, waitErr := s.awaitManualReidentify(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
-		if waitErr != nil {
+		if !run.restarted {
 			s.emit(ProgressEvent{
 				Device:  device,
-				Stage:   "error",
+				Stage:   "identifying",
 				Title:   s.currentTitle(device, mediaTitle),
 				Percent: 0,
-				Message: fmt.Sprintf("No main titles found and no manual selection received: %v", waitErr),
+				Message: "No main title detected. Waiting for manual movie search...",
 			})
 			if s.store != nil {
-				_ = s.store.AddEvent(ctx, job.ID, "error", "manual movie search timed out after no main title", map[string]any{"error": waitErr.Error()})
-				_ = s.store.UpdateStatus(ctx, job.ID, "error")
+				_ = s.store.AddEvent(ctx, job.ID, "identify", "no clear main title, waiting for manual movie search", map[string]any{"action": "await_manual_search"})
+				_ = s.store.UpdateStatus(ctx, job.ID, "identifying")
 			}
-			return fmt.Errorf("no main titles found on disc %q", device)
-		}
+			s.notifier.Notify(notify.Message{
+				Event:   notify.EventNeedsInput,
+				JobID:   job.ID,
+				Disc:    scanned.DiscName,
+				Device:  device,
+				Title:   mediaTitle,
+				Summary: fmt.Sprintf("No main title detected (%s pattern, %d titles). Waiting for a manual movie search in the UI.", strings.ToLower(result.Pattern.String()), len(scanned.Titles)),
+			})
 
-		if year > 0 {
-			mediaTitle = fmt.Sprintf("%s (%d)", title, year)
-		} else {
-			mediaTitle = title
+			title, year, waitErr := s.awaitManualReidentify(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
+			if waitErr != nil {
+				s.emit(ProgressEvent{
+					Device:  device,
+					Stage:   "error",
+					Title:   s.currentTitle(device, mediaTitle),
+					Percent: 0,
+					Message: fmt.Sprintf("No main titles found and no manual selection received: %v", waitErr),
+				})
+				if s.store != nil {
+					_ = s.store.AddEvent(ctx, job.ID, "error", "manual movie search timed out after no main title", map[string]any{"error": waitErr.Error()})
+					_ = s.store.UpdateStatus(ctx, job.ID, "error")
+				}
+				return fmt.Errorf("no main titles found on disc %q", device)
+			}
+
+			if year > 0 {
+				mediaTitle = fmt.Sprintf("%s (%d)", title, year)
+			} else {
+				mediaTitle = title
+			}
+			s.beginRipTitle(device, mediaTitle)
+			run.title = mediaTitle
 		}
-		s.beginRipTitle(device, mediaTitle)
-		run.title = mediaTitle
 
 		fallbackMain, ok := pickByRuntime(result.AllTitles, s.ripRuntime(device))
 		if !ok {
@@ -988,12 +1020,24 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	// probably the wrong movie. Hold the file in staging instead of delivering
 	// it under that name, and wait for the user to confirm or correct the title.
 	// Editing the title (even to the same one) releases the hold.
-	if s.store != nil && needsConfirmation(result.MainTitles, len(rippedFiles), s.titleIsLocked(device), runtimeMin) {
+	tmdbConfigured := s.cfg.Metadata.TMDBApiKey != ""
+	if s.store != nil && needsConfirmation(result.MainTitles, len(rippedFiles), s.titleIsLocked(device), tmdbConfirmedMovie, tmdbConfigured, runtimeMin) {
 		held := int(result.MainTitles[0].Duration.Minutes())
-		summary := fmt.Sprintf("Ripped title is %d min but %q runs %d min, so the match is probably wrong. The file is held in staging and not delivered: edit the title in the UI (pick the right movie, or re-select the same one to confirm).",
-			held, s.currentTitle(device, mediaTitle), runtimeMin)
+		var summary string
+		if !tmdbConfirmedMovie {
+			if runtimeMin > 0 {
+				summary = fmt.Sprintf("No confident TMDB match for %q (ripped %d min, suggested match runs %d min). The file is held in staging and not delivered: edit the title in the UI to confirm or correct.",
+					scanned.DiscName, held, runtimeMin)
+			} else {
+				summary = fmt.Sprintf("No confident TMDB match found for disc %q (%d min). The file is held in staging and not delivered: edit the title in the UI to set the title.",
+					scanned.DiscName, held)
+			}
+		} else {
+			summary = fmt.Sprintf("Ripped title is %d min but %q runs %d min, so the match is probably wrong. The file is held in staging and not delivered: edit the title in the UI (pick the right movie, or re-select the same one to confirm).",
+				held, s.currentTitle(device, mediaTitle), runtimeMin)
+		}
 		s.emit(ProgressEvent{Device: device, Stage: "identifying", Title: s.currentTitle(device, mediaTitle), Percent: 95, Message: "Waiting for title confirmation: " + summary})
-		_ = s.store.AddEvent(ctx, job.ID, "identify", "held before delivery: "+summary, map[string]any{"held": true, "ripped_minutes": held, "runtime_minutes": runtimeMin})
+		_ = s.store.AddEvent(ctx, job.ID, "identify", "held before delivery: "+summary, map[string]any{"held": true, "ripped_minutes": held, "runtime_minutes": runtimeMin, "confirmed": tmdbConfirmedMovie})
 		_ = s.store.UpdateStatus(ctx, job.ID, "identifying")
 		s.notifier.Notify(notify.Message{
 			Event: notify.EventDurationMismatch, JobID: job.ID, Disc: scanned.DiscName, Device: device,
@@ -1073,7 +1117,8 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 
 		// Name the file(s) after the title (Jellyfin: "Title (Year)/Title (Year).mkv")
 		// instead of makemkvcon's "title_t00.mkv".
-		if renamed, rerr := output.RenameForDelivery(rippedFiles, deliverTitle); rerr != nil {
+		isTV := result.Pattern == ripper.DiscPatternTV
+		if renamed, rerr := output.RenameForDeliveryPattern(rippedFiles, deliverTitle, isTV); rerr != nil {
 			slog.Warn("could not rename ripped files; delivering with original names", "error", rerr)
 		} else {
 			rippedFiles = renamed
@@ -1177,32 +1222,34 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 
 	payload := notify.RipCompletePayload(
 		jobID,
-		mediaTitle,
+		run.title,
 		scanned.DiscName,
 		destDir,
 		rippedFiles,
 		media,
 	)
 
-	if delivered {
-		details := make([]string, 0, len(media))
-		for _, m := range media {
-			line := fmt.Sprintf("%s (%.1f GB", m.File, float64(m.SizeBytes)/(1<<30))
-			if m.Resolution != "" {
-				line += ", " + m.Resolution
-			}
-			details = append(details, line+")")
+	details := make([]string, 0, len(media))
+	for _, m := range media {
+		line := fmt.Sprintf("%s (%.1f GB", m.File, float64(m.SizeBytes)/(1<<30))
+		if m.Resolution != "" {
+			line += ", " + m.Resolution
 		}
-		s.notifier.Notify(notify.Message{
-			Event:   notify.EventComplete,
-			JobID:   job.ID,
-			Disc:    scanned.DiscName,
-			Device:  device,
-			Title:   run.title,
-			Summary: fmt.Sprintf("Delivered and verified: %d file(s) in %s.", len(rippedFiles), filepath.Base(filepath.Dir(rippedFiles[0]))),
-			Details: details,
-		})
+		details = append(details, line+")")
 	}
+	summary := fmt.Sprintf("Delivered and verified: %d file(s) in %s.", len(rippedFiles), filepath.Base(filepath.Dir(rippedFiles[0])))
+	if !delivered {
+		summary = fmt.Sprintf("Ripped to staging: %d file(s) in %s.", len(rippedFiles), filepath.Base(filepath.Dir(rippedFiles[0])))
+	}
+	s.notifier.Notify(notify.Message{
+		Event:   notify.EventComplete,
+		JobID:   job.ID,
+		Disc:    scanned.DiscName,
+		Device:  device,
+		Title:   run.title,
+		Summary: summary,
+		Details: details,
+	})
 
 	if err := s.notify.Send(ctx, payload); err != nil {
 		// Notification failure is not fatal — the rip succeeded.
@@ -1741,4 +1788,27 @@ func pickBestNear(titles []disc.MKVTitle, ref time.Duration) (disc.MKVTitle, boo
 		}
 	}
 	return best, found
+}
+
+// isConfidentMovieMatch reports whether a TMDB movie match's runtime plausibly
+// matches the longest title on the disc. This guards against cryptic disc labels
+// matching unrelated films and prevents TV episode discs from being misclassified
+// as movies.
+func isConfidentMovieMatch(runtimeMin int, longestTitle time.Duration) bool {
+	if runtimeMin <= 0 || longestTitle <= 0 {
+		return false
+	}
+	// Feature films with playlist obfuscation or duplicate titles are feature-length.
+	// Titles shorter than 60 minutes with duplicate playlists are TV episodes and
+	// should not suppress TV detection.
+	if longestTitle < 60*time.Minute || runtimeMin < 60 {
+		return false
+	}
+	ref := time.Duration(runtimeMin) * time.Minute
+	diff := longestTitle - ref
+	if diff < 0 {
+		diff = -diff
+	}
+	ratio := float64(longestTitle) / float64(ref)
+	return diff <= 20*time.Minute || (ratio >= 0.70 && ratio <= 1.60)
 }

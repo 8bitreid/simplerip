@@ -156,6 +156,19 @@ func (s *Store) UpdateJob(ctx context.Context, id, title string, year int, statu
 	return nil
 }
 
+// UpdateStatusPattern updates status and detection pattern, leaving the
+// identified title and year untouched.
+func (s *Store) UpdateStatusPattern(ctx context.Context, id, status, pattern string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status=$2, pattern=$3, updated_at=now() WHERE id=$1`,
+		id, status, pattern,
+	)
+	if err != nil {
+		return fmt.Errorf("updating status/pattern for job %s: %w", id, err)
+	}
+	return nil
+}
+
 // UpdateStatus updates only the status column, leaving title, year, and pattern
 // untouched. Use this for status-only transitions (e.g. scanning → ripping) so
 // previously identified metadata is not clobbered mid-pipeline.

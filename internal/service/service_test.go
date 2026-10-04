@@ -1479,21 +1479,51 @@ func TestAlternateRipEndToEnd(t *testing.T) {
 func TestNeedsConfirmation(t *testing.T) {
 	main := []disc.MKVTitle{{Duration: 107 * time.Minute}}
 	cases := []struct {
-		name    string
-		main    []disc.MKVTitle
-		files   int
-		locked  bool
-		runtime int
-		want    bool
+		name      string
+		main      []disc.MKVTitle
+		files     int
+		locked    bool
+		confirmed bool
+		enabled   bool
+		runtime   int
+		want      bool
 	}{
-		{"auto match far off", main, 1, false, 140, true},
-		{"auto match close", main, 1, false, 105, false},
-		{"user chose it", main, 1, true, 140, false},
-		{"no runtime known", main, 1, false, 0, false},
-		{"multi-title disc", append(main, main...), 2, false, 140, false},
+		{"auto match far off", main, 1, false, true, true, 140, true},
+		{"auto match close", main, 1, false, true, true, 105, false},
+		{"user chose it", main, 1, true, false, true, 140, false},
+		{"unconfirmed match with tmdb enabled", main, 1, false, false, true, 0, true},
+		{"unconfirmed match with tmdb disabled", main, 1, false, false, false, 0, false},
+		{"multi-title disc", append(main, main...), 2, false, false, true, 140, false},
 	}
 	for _, c := range cases {
-		if got := needsConfirmation(c.main, c.files, c.locked, c.runtime); got != c.want {
+		if got := needsConfirmation(c.main, c.files, c.locked, c.confirmed, c.enabled, c.runtime); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestIsConfidentMovieMatch(t *testing.T) {
+	d := func(min int) time.Duration { return time.Duration(min) * time.Minute }
+	cases := []struct {
+		name    string
+		runtime int
+		longest time.Duration
+		want    bool
+	}{
+		{"exact match", 107, d(107), true},
+		{"close theatrical match (within 20m)", 90, d(105), true},
+		{"extended cut within 1.6x", 178, d(228), true},
+		{"director cut within 1.6x", 144, d(194), true},
+		{"shorter cut within 0.70x", 120, d(90), true},
+		{"unrelated movie on cryptic disc label (70m vs 180m)", 70, d(180), false},
+		{"short film on cryptic label (35m vs 120m)", 35, d(120), false},
+		{"tv episode length (< 60m must not confirm as movie)", 50, d(50), false},
+		{"tv episode vs full movie", 120, d(45), false},
+		{"zero runtime", 0, d(100), false},
+		{"zero longest title", 100, 0, false},
+	}
+	for _, c := range cases {
+		if got := isConfidentMovieMatch(c.runtime, c.longest); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
 	}

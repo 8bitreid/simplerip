@@ -81,6 +81,14 @@ func Deliver(
 // It returns the new paths in the same order. If any rename fails, files already
 // renamed are restored and an error is returned.
 func RenameForDelivery(files []string, name string) ([]string, error) {
+	return RenameForDeliveryPattern(files, name, false)
+}
+
+// RenameForDeliveryPattern renames ripped files in place. If isTV is true,
+// multi-file episodes are formatted as "<name> - E01.mkv", "<name> - E02.mkv"
+// so media servers (Jellyfin/Plex) index them as distinct episodes rather than
+// stacking them as parts of a single movie.
+func RenameForDeliveryPattern(files []string, name string, isTV bool) ([]string, error) {
 	name = sanitizeFileName(name)
 	if name == "" || len(files) == 0 {
 		return files, nil
@@ -89,7 +97,11 @@ func RenameForDelivery(files []string, name string) ([]string, error) {
 	for i, src := range files {
 		base := name
 		if len(files) > 1 {
-			base = fmt.Sprintf("%s - part%d", name, i+1)
+			if isTV {
+				base = fmt.Sprintf("%s - E%02d", name, i+1)
+			} else {
+				base = fmt.Sprintf("%s - part%d", name, i+1)
+			}
 		}
 		dst := filepath.Join(filepath.Dir(src), base+filepath.Ext(src))
 		if dst != src {

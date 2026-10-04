@@ -164,3 +164,17 @@ func TestRenameForDeliverySanitizesReservedChars(t *testing.T) {
 		t.Fatalf("got %q", got[0])
 	}
 }
+
+func TestRenameForDeliveryPattern_TV(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "t00.mkv"), filepath.Join(dir, "t01.mkv")
+	os.WriteFile(a, []byte("x"), 0o644)
+	os.WriteFile(b, []byte("x"), 0o644)
+	renamed, err := output.RenameForDeliveryPattern([]string{a, b}, "Breaking Bad S01", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(renamed[0]) != "Breaking Bad S01 - E01.mkv" || filepath.Base(renamed[1]) != "Breaking Bad S01 - E02.mkv" {
+		t.Fatalf("unexpected TV episode names: %v", renamed)
+	}
+}
