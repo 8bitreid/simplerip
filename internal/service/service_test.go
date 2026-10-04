@@ -1498,3 +1498,26 @@ func TestNeedsConfirmation(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeFitsAnyTitle(t *testing.T) {
+	m := func(min int) disc.MKVTitle { return disc.MKVTitle{Duration: time.Duration(min) * time.Minute} }
+	disc2h := []disc.MKVTitle{m(107), m(5), m(10)}
+	cases := []struct {
+		name    string
+		titles  []disc.MKVTitle
+		runtime int
+		want    bool
+	}{
+		{"wrong movie (45 vs 107)", disc2h, 45, false},
+		{"wrong movie (140 vs 107)", disc2h, 140, false},
+		{"exact", disc2h, 107, true},
+		{"alternate cut within 15%", disc2h, 96, true},
+		{"unknown runtime", disc2h, 0, true},
+		{"no durations scanned", []disc.MKVTitle{m(0)}, 90, true},
+	}
+	for _, c := range cases {
+		if got := runtimeFitsAnyTitle(c.titles, c.runtime); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
