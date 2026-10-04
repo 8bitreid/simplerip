@@ -38,6 +38,24 @@ type NotificationConfig struct {
 	WebhookURL         string `yaml:"webhook_url"`
 	ResponseTimeoutMin int    `yaml:"response_timeout_minutes"`
 	CallbackPort       int    `yaml:"callback_port"`
+
+	// DiscordWebhookURL receives pipeline notifications. Prefer the
+	// DISCORD_WEBHOOK_URL env var, which always overrides this value, so the
+	// secret stays out of config files.
+	DiscordWebhookURL string `yaml:"discord_webhook_url"`
+	// UIURL is the address of the SimpleRip web UI, linked from notifications.
+	// Overridden by SIMPLERIP_UI_URL.
+	UIURL  string             `yaml:"ui_url"`
+	Events NotificationEvents `yaml:"events"`
+}
+
+// NotificationEvents toggles each notification type. All default to on.
+type NotificationEvents struct {
+	NeedsInput       bool `yaml:"needs_input"`
+	MultiTitle       bool `yaml:"multi_title"`
+	Complete         bool `yaml:"complete"`
+	Failed           bool `yaml:"failed"`
+	DurationMismatch bool `yaml:"duration_mismatch"`
 }
 
 type ServerConfig struct {
@@ -74,11 +92,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config %q: %w", path, err)
 	}
 
-	// MAKEMKV_KEY env var always wins over the config file value.
-	if key := os.Getenv("MAKEMKV_KEY"); key != "" {
-		cfg.MakeMKV.Key = key
-	}
-
+	applyEnv(&cfg)
 	return &cfg, nil
 }
 
@@ -87,10 +101,22 @@ func Load(path string) (*Config, error) {
 // MAKEMKV_KEY is still applied from the environment if set.
 func Defaults() *Config {
 	cfg := defaults()
+	applyEnv(&cfg)
+	return &cfg
+}
+
+// applyEnv lets environment variables override secrets and deployment-specific
+// values in the config file.
+func applyEnv(cfg *Config) {
 	if key := os.Getenv("MAKEMKV_KEY"); key != "" {
 		cfg.MakeMKV.Key = key
 	}
-	return &cfg
+	if v := os.Getenv("DISCORD_WEBHOOK_URL"); v != "" {
+		cfg.Notification.DiscordWebhookURL = v
+	}
+	if v := os.Getenv("SIMPLERIP_UI_URL"); v != "" {
+		cfg.Notification.UIURL = v
+	}
 }
 
 func defaults() Config {
@@ -104,6 +130,13 @@ func defaults() Config {
 		Notification: NotificationConfig{
 			ResponseTimeoutMin: 30,
 			CallbackPort:       8090,
+			Events: NotificationEvents{
+				NeedsInput:       true,
+				MultiTitle:       true,
+				Complete:         true,
+				Failed:           true,
+				DurationMismatch: true,
+			},
 		},
 		Server: ServerConfig{
 			Port: 8080,

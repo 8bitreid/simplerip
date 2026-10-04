@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1073,5 +1075,426 @@ func TestNew(t *testing.T) {
 	}
 	if svc.notify == nil {
 		t.Error("service notify client is nil")
+	}
+}
+
+func TestDurationMismatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		actual  time.Duration
+		runtime int
+		want    bool
+	}{
+		{"within tolerance", 89 * time.Minute, 87, false},
+		{"exactly tolerance", 90 * time.Minute, 87, false},
+		{"longer cut", 134 * time.Minute, 117, true},
+		{"shorter", 60 * time.Minute, 90, true},
+		{"unknown runtime", 90 * time.Minute, 0, false},
+		{"unknown duration", 0, 90, false},
+	}
+	for _, tc := range cases {
+		if got := durationMismatch(tc.actual, tc.runtime); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPickByRuntime(t *testing.T) {
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 44 * time.Minute},
+		{Index: 1, Duration: 88 * time.Minute},
+		{Index: 2, Duration: 91 * time.Minute},
+	}
+	if got, ok := pickByRuntime(titles, 89); !ok || got.Index != 1 {
+		t.Fatalf("89 min: got %+v ok=%v, want title 1", got, ok)
+	}
+	if got, ok := pickByRuntime(titles, 92); !ok || got.Index != 2 {
+		t.Fatalf("92 min: got %+v ok=%v, want title 2", got, ok)
+	}
+	if _, ok := pickByRuntime(titles, 120); ok {
+		t.Fatal("120 min: nothing within tolerance, want no match")
+	}
+	if _, ok := pickByRuntime(titles, 0); ok {
+		t.Fatal("unknown runtime must not match")
+	}
+}
+
+func TestCanReselect(t *testing.T) {
+	if !canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternMovie}) {
+		t.Error("movie should allow reselect")
+	}
+	if !canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternAmbiguous}) {
+		t.Error("ambiguous should allow reselect")
+	}
+	if canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternTV}) {
+		t.Error("TV must not reselect")
+	}
+	if canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternMovie, MultiAngle: true}) {
+		t.Error("multi-angle must not reselect")
+	}
+	if canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternMovie, MissingMetadata: true}) {
+		t.Error("missing metadata must not reselect")
+	}
+}
+
+func installFakeMakeMKVConTwoTitles(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	content := `#!/bin/sh
+for arg in "$@"; do
+	if [ "$arg" = "info" ]; then
+		cat <<'EOF2'
+CINFO:30,0,"TEST_DISC"
+TCOUNT:2
+TINFO:0,8,0,"10"
+TINFO:0,9,0,"1:45:00"
+TINFO:1,8,0,"4"
+TINFO:1,9,0,"0:20:00"
+EOF2
+		exit 0
+	fi
+done
+# rip: mkv dev:/dev/sr0 <title> <outdir>
+for last; do :; done
+outdir="$last"
+set -- "$@"
+shift $(($# - 2))
+title="$1"
+if [ "$title" = "0" ]; then
+	exec sleep 60
+fi
+printf 'PRGV:10000,10000,10000\n'
+touch "$outdir/title_t0$title.mkv"
+`
+	if err := os.WriteFile(filepath.Join(binDir, "makemkvcon"), []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+}
+
+func TestEditTitleMidRipRestartsWithDifferentTitle(t *testing.T) {
+	installFakeMakeMKVConTwoTitles(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = ""
+	svc := New(cfg, nil)
+
+	const dev = "/dev/sr0"
+	done := make(chan error, 1)
+	go func() { done <- svc.RipDisc(context.Background(), dev) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		svc.ripMu.Lock()
+		_, ok := svc.restarts[dev]
+		svc.ripMu.Unlock()
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("rip never reached the ripping stage")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if !svc.ReidentifyRip(dev, "Short Film (2000)") {
+		t.Fatal("re-identify rejected")
+	}
+	svc.SetRipRuntime(dev, 20)
+	if !svc.RestartIfNeeded(dev) {
+		t.Fatal("expected a restart: 20 min matches title 1, not the title being ripped")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RipDisc() error = %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("RipDisc did not finish after restart")
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(cfg.Output.StagingDir, "*", "*.mkv"))
+	if len(matches) != 1 || filepath.Base(matches[0]) != "title_t01.mkv" {
+		t.Fatalf("staged files = %v, want only title_t01.mkv", matches)
+	}
+	dirs, _ := filepath.Glob(filepath.Join(cfg.Output.StagingDir, "rip-*"))
+	if len(dirs) != 1 {
+		t.Fatalf("staging dirs = %v, want the first attempt's dir removed", dirs)
+	}
+}
+
+func TestRestartIfNeededRules(t *testing.T) {
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 105 * time.Minute},
+		{Index: 1, Duration: 20 * time.Minute},
+	}
+	setup := func(reselect bool) (*RipService, *int) {
+		s := New(&config.Config{}, nil)
+		s.beginRipTitle("/dev/sr0", "Disc")
+		cancels := 0
+		s.restarts["/dev/sr0"] = &restartState{
+			cancel:   func(error) { cancels++ },
+			all:      titles,
+			selected: titles[:1],
+			reselect: reselect,
+		}
+		return s, &cancels
+	}
+
+	s, cancels := setup(true)
+	s.SetRipRuntime("/dev/sr0", 105)
+	if s.RestartIfNeeded("/dev/sr0") || *cancels != 0 {
+		t.Fatal("same title chosen: must not restart")
+	}
+	s.SetRipRuntime("/dev/sr0", 20)
+	if !s.RestartIfNeeded("/dev/sr0") || *cancels != 1 {
+		t.Fatal("different title: must restart")
+	}
+	if s.RestartIfNeeded("/dev/sr0") || *cancels != 1 {
+		t.Fatal("second edit must not cancel twice")
+	}
+	if s.claimDelivery("/dev/sr0") {
+		t.Fatal("delivery must not proceed once a restart is requested")
+	}
+
+	s, _ = setup(false)
+	s.SetRipRuntime("/dev/sr0", 20)
+	if s.RestartIfNeeded("/dev/sr0") {
+		t.Fatal("non-reselectable disc (TV/multi-angle) must not restart")
+	}
+
+	s, _ = setup(true)
+	s.SetRipRuntime("/dev/sr0", 20)
+	s.freezeTitle("/dev/sr0", "x")
+	if s.RestartIfNeeded("/dev/sr0") {
+		t.Fatal("must not restart after delivery has started")
+	}
+
+	s, _ = setup(true)
+	if !s.claimDelivery("/dev/sr0") {
+		t.Fatal("claimDelivery should succeed with no restart pending")
+	}
+	s.SetRipRuntime("/dev/sr0", 20)
+	if s.RestartIfNeeded("/dev/sr0") {
+		t.Fatal("must not restart once delivery is claimed")
+	}
+}
+
+// TestMain strips notification env vars so no test can reach a real webhook.
+func TestMain(m *testing.M) {
+	os.Unsetenv("DISCORD_WEBHOOK_URL")
+	os.Unsetenv("SIMPLERIP_UI_URL")
+	os.Exit(m.Run())
+}
+
+func TestRipCompleteNotificationBody(t *testing.T) {
+	installFakeMakeMKVCon(t)
+	t.Setenv("HOME", t.TempDir())
+
+	bodies := make(chan []byte, 4)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies <- b
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hook.Close()
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = t.TempDir()
+	cfg.Notification.DiscordWebhookURL = hook.URL
+	cfg.Notification.UIURL = "http://ui.test:8080"
+
+	svc := New(cfg, nil)
+	if err := svc.RipDisc(context.Background(), "/dev/sr0"); err != nil {
+		t.Fatalf("RipDisc() error = %v", err)
+	}
+
+	select {
+	case b := <-bodies:
+		var p struct {
+			Embeds []struct {
+				Title, URL string
+				Fields     []struct{ Name, Value string }
+			}
+		}
+		if err := json.Unmarshal(b, &p); err != nil || len(p.Embeds) != 1 {
+			t.Fatalf("bad payload %s: %v", b, err)
+		}
+		e := p.Embeds[0]
+		if e.Title != "Rip complete" || e.URL != "http://ui.test:8080" {
+			t.Errorf("embed = %+v", e)
+		}
+		got := map[string]string{}
+		for _, f := range e.Fields {
+			got[f.Name] = f.Value
+		}
+		if !strings.Contains(got["Disc"], "TEST_DISC") || !strings.Contains(got["Device"], "/dev/sr0") {
+			t.Errorf("fields = %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notification received")
+	}
+}
+
+func TestEditMessage(t *testing.T) {
+	titles := []disc.MKVTitle{{Index: 11, Duration: 107 * time.Minute}, {Index: 3, Duration: 20 * time.Minute}}
+	s := New(&config.Config{}, nil)
+	s.beginRipTitle("/dev/sr0", "Disc")
+	if got := s.EditMessage("/dev/sr0", false); !strings.Contains(got, "Saved") {
+		t.Errorf("not ripping: %q", got)
+	}
+	s.restarts["/dev/sr0"] = &restartState{cancel: func(error) {}, all: titles, selected: titles[:1], reselect: true}
+	s.SetRipRuntime("/dev/sr0", 96)
+	if got := s.EditMessage("/dev/sr0", false); !strings.Contains(got, "no title is within 3 min") || !strings.Contains(got, "title 11") {
+		t.Errorf("no match: %q", got)
+	}
+	s.SetRipRuntime("/dev/sr0", 107)
+	if got := s.EditMessage("/dev/sr0", false); !strings.Contains(got, "already matches") {
+		t.Errorf("same: %q", got)
+	}
+	s.SetRipRuntime("/dev/sr0", 20)
+	if !s.RestartIfNeeded("/dev/sr0") {
+		t.Fatal("want restart")
+	}
+	if got := s.EditMessage("/dev/sr0", true); !strings.Contains(got, "Restarting: ripping title 3") {
+		t.Errorf("restart: %q", got)
+	}
+}
+
+func tracks(audio ...disc.Track) []disc.Track {
+	return append([]disc.Track{{Type: "Video", Resolution: "1920x1080"}}, audio...)
+}
+
+func TestPickBestNearScoresFormat(t *testing.T) {
+	ac3 := disc.Track{Type: "Audio", CodecID: "A_AC3", Channels: 6, Language: "eng"}
+	dtsma := disc.Track{Type: "Audio", CodecID: "A_DTS", CodecDesc: "DTS-HD Master Audio", Channels: 8, Language: "eng"}
+	french := disc.Track{Type: "Audio", CodecID: "A_TRUEHD", Channels: 8, Language: "fra"}
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 107 * time.Minute, Tracks: tracks(ac3, ac3, ac3, ac3), AudioTrackCount: 4, SizeGB: 5},
+		{Index: 1, Duration: 106 * time.Minute, Tracks: tracks(dtsma), AudioTrackCount: 1, SizeGB: 5},
+		{Index: 2, Duration: 107 * time.Minute, Tracks: tracks(french), AudioTrackCount: 1, SizeGB: 9},
+		{Index: 3, Duration: 140 * time.Minute, Tracks: tracks(dtsma), AudioTrackCount: 1, SizeGB: 9},
+	}
+	got, ok := pickBestNear(titles, 107*time.Minute)
+	if !ok || got.Index != 1 {
+		t.Fatalf("got %+v ok=%v, want title 1 (one DTS-HD MA track beats four AC3; French-only disqualified; 140m out of range)", got, ok)
+	}
+}
+
+func TestPickBestNearSubtitlesBreakTie(t *testing.T) {
+	a := disc.Track{Type: "Audio", CodecID: "A_AC3", Channels: 6, Language: "eng"}
+	sub := disc.Track{Type: "Subtitles", Language: "eng"}
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 100 * time.Minute, Tracks: tracks(a)},
+		{Index: 1, Duration: 101 * time.Minute, Tracks: tracks(a, sub)},
+	}
+	if got, _ := pickBestNear(titles, 100*time.Minute); got.Index != 1 {
+		t.Fatalf("got title %d, want 1 (English subtitles)", got.Index)
+	}
+}
+
+func TestFindAlternates(t *testing.T) {
+	m := func(i, min int) disc.MKVTitle {
+		return disc.MKVTitle{Index: i, Duration: time.Duration(min) * time.Minute}
+	}
+	main := m(11, 107)
+	all := []disc.MKVTitle{main, m(1, 108), m(2, 120), m(3, 95), m(4, 45), m(5, 200), m(6, 10)}
+	got := findAlternates(all, main, 40*time.Minute)
+	var idx []int
+	for _, g := range got {
+		idx = append(idx, g.Index)
+	}
+	// 108m is the same cut, 45m and 200m are outside the plausible range, 10m is an extra.
+	if !reflect.DeepEqual(idx, []int{3, 2}) {
+		t.Fatalf("alternates = %v, want [3 2]", idx)
+	}
+}
+
+func TestStartAlternateRipGuards(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Output.NASPath = t.TempDir()
+	s := New(cfg, nil)
+	if err := s.StartAlternateRip("nope", 1); !errors.Is(err, ErrNoAlternate) {
+		t.Fatalf("unknown job: %v", err)
+	}
+	s.alternates["j"] = &altState{device: "/dev/sr0", title: "X (2000)", cands: []disc.MKVTitle{{Index: 2}}}
+	if err := s.StartAlternateRip("j", 9); !errors.Is(err, ErrNoAlternate) {
+		t.Fatalf("unknown index: %v", err)
+	}
+	s.beginRipTitle("/dev/sr0", "X")
+	if err := s.StartAlternateRip("j", 2); !errors.Is(err, ErrDeviceBusy) {
+		t.Fatalf("busy drive: %v", err)
+	}
+}
+
+func TestAlternateRipEndToEnd(t *testing.T) {
+	installFakeMakeMKVConTwoTitles(t)
+	t.Setenv("HOME", t.TempDir())
+	bodies := make(chan string, 8)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies <- string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hook.Close()
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = t.TempDir()
+	cfg.Notification.DiscordWebhookURL = hook.URL
+	s := New(cfg, nil)
+	s.alternates["j"] = &altState{
+		device: "/dev/sr0", title: "Film (2000)",
+		disc:  &disc.ClassifiedDisc{DiscName: "DISC"},
+		cands: []disc.MKVTitle{{Index: 1, Duration: 20 * time.Minute}},
+	}
+	if err := s.StartAlternateRip("j", 1); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	want := filepath.Join(cfg.Output.NASPath, "Film (2000)", "Film (2000) - Alternate (20min).mkv")
+	for {
+		if _, err := os.Stat(want); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("alternate not delivered to %s", want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	select {
+	case b := <-bodies:
+		if !strings.Contains(b, "Alternate (20min)") {
+			t.Errorf("notification body = %s", b)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notification")
+	}
+}
+
+func TestNeedsConfirmation(t *testing.T) {
+	main := []disc.MKVTitle{{Duration: 107 * time.Minute}}
+	cases := []struct {
+		name    string
+		main    []disc.MKVTitle
+		files   int
+		locked  bool
+		runtime int
+		want    bool
+	}{
+		{"auto match far off", main, 1, false, 140, true},
+		{"auto match close", main, 1, false, 105, false},
+		{"user chose it", main, 1, true, 140, false},
+		{"no runtime known", main, 1, false, 0, false},
+		{"multi-title disc", append(main, main...), 2, false, 140, false},
+	}
+	for _, c := range cases {
+		if got := needsConfirmation(c.main, c.files, c.locked, c.runtime); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
 	}
 }

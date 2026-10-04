@@ -61,3 +61,25 @@ func TestTitleFrozenOnDelivery(t *testing.T) {
 		t.Fatal("freeze leaked past job end")
 	}
 }
+
+func TestPinnedRuntimeLifecycle(t *testing.T) {
+	s := New(&config.Config{}, nil)
+	s.SetRipRuntime("/dev/sr0", 90) // no active rip: ignored
+	if got := s.ripRuntime("/dev/sr0"); got != 0 {
+		t.Fatalf("runtime set without an active rip: %d", got)
+	}
+	s.beginRipTitle("/dev/sr0", "Disc")
+	s.SetRipRuntime("/dev/sr0", 90)
+	if got := s.ripRuntime("/dev/sr0"); got != 90 {
+		t.Fatalf("runtime = %d, want 90", got)
+	}
+	s.SetRipRuntime("/dev/sr0", 0)
+	if got := s.ripRuntime("/dev/sr0"); got != 0 {
+		t.Fatalf("runtime not cleared: %d", got)
+	}
+	s.SetRipRuntime("/dev/sr0", 90)
+	s.endRipTitle("/dev/sr0")
+	if got := s.ripRuntime("/dev/sr0"); got != 0 {
+		t.Fatalf("runtime leaked into next job: %d", got)
+	}
+}

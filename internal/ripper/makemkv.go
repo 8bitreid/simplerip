@@ -43,8 +43,11 @@ import (
 //	1  = Stream type text ("Video", "Audio", "Subtitles")
 //	5  = Short codec tag ("A_TRUEHD", "A_DTS", etc.)
 //	6  = Long codec name ("DTS-HD Master Audio", etc.)
-//	19 = Audio layout ("7.1", "5.1", "stereo")
-//	28 = ISO language code ("eng", "fra", etc.)
+//	2  = Audio layout text ("Surround 5.1", "Stereo")
+//	3  = ISO language code ("eng", "fra", etc.)
+//	7  = Codec description ("Dolby Digital", "DTS-HD Master Audio")
+//	14 = Audio channel count
+//	19 = Video resolution ("1920x1080")
 
 const (
 	tinfoName       = 2
@@ -60,8 +63,11 @@ const (
 	sinfoStreamType  = 1
 	sinfoCodecName   = 5
 	sinfoCodecLong   = 6
-	sinfoAudioLayout = 19
-	sinfoLanguage    = 28
+	sinfoAudioLayout = 2
+	sinfoLanguage    = 3
+	sinfoCodecDesc   = 7
+	sinfoChannels    = 14
+	sinfoResolution  = 19
 )
 
 // writeTunedConfig writes a performance-tuned ~/.MakeMKV/settings.conf.
@@ -300,6 +306,14 @@ func parseStreamInfo(payload string, titleMap map[int]*disc.MKVTitle) {
 		track.CodecLong = val
 	case sinfoAudioLayout:
 		track.AudioLayout = val
+	case sinfoCodecDesc:
+		track.CodecDesc = val
+	case sinfoChannels:
+		if n, err := strconv.Atoi(val); err == nil {
+			track.Channels = n
+		}
+	case sinfoResolution:
+		track.Resolution = val
 	case sinfoLanguage:
 		track.Language = val
 	}

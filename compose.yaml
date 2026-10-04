@@ -18,6 +18,8 @@ services:
     user: root
     environment:
       - MAKEMKV_KEY=${MAKEMKV_KEY:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - SIMPLERIP_UI_URL=${SIMPLERIP_UI_URL:-}
     depends_on:
       db:
         condition: service_healthy

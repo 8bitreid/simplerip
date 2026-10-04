@@ -257,3 +257,29 @@ func TestDefaultsMakeMKVKeyEnvOverride(t *testing.T) {
 		t.Fatalf("MakeMKV.Key = %q, want %q", cfg.MakeMKV.Key, "env-defaults-key")
 	}
 }
+
+func TestNotificationDefaultsAndEnvOverride(t *testing.T) {
+	t.Setenv("DISCORD_WEBHOOK_URL", "https://discord.test/api/webhooks/1/tok")
+	t.Setenv("SIMPLERIP_UI_URL", "http://ui:8080")
+
+	path := writeConfig(t, `
+notification:
+  discord_webhook_url: https://from-file.example/hook
+  events:
+    complete: false
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := cfg.Notification
+	if n.DiscordWebhookURL != "https://discord.test/api/webhooks/1/tok" || n.UIURL != "http://ui:8080" {
+		t.Fatalf("env should override file: %+v", n)
+	}
+	if n.Events.Complete {
+		t.Fatal("complete should be disabled by file")
+	}
+	if !n.Events.Failed || !n.Events.NeedsInput || !n.Events.MultiTitle || !n.Events.DurationMismatch {
+		t.Fatalf("unset events should default on: %+v", n.Events)
+	}
+}

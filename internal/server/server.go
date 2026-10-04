@@ -106,6 +106,7 @@ func (s *Server) registerRoutes() {
 	s.e.DELETE("/api/jobs", s.handleDeleteFinishedJobs)
 	s.e.GET("/api/search", s.handleSearch)
 	s.e.POST("/api/jobs/:id/reidentify", s.handleReidentify)
+	s.e.POST("/api/jobs/:id/alternates/:index/rip", s.handleRipAlternate)
 }
 
 // Start starts the HTTP server on the given port.
@@ -325,6 +326,12 @@ func (s *Server) handleReidentify(c echo.Context) error {
 		return c.JSON(http.StatusConflict, map[string]string{"error": "delivery has started; the title can no longer be changed"})
 	}
 
+	// Pin the chosen movie's runtime before the correction event is written:
+	// a rip waiting on manual input wakes on that event and reads it.
+	if !isFinished(existing.Status) {
+		s.svc.SetRipRuntime(existing.Device, s.svc.RuntimeFor(ctx, body.TMDBID))
+	}
+
 	_ = s.store.AddEvent(ctx, id, "identify",
 		fmt.Sprintf("manual correction: %s (%d)", body.Title, body.Year),
 		map[string]any{
@@ -346,12 +353,41 @@ func (s *Server) handleReidentify(c echo.Context) error {
 		liveTitle = fmt.Sprintf("%s (%d)", body.Title, body.Year)
 	}
 	_ = s.svc.ReidentifyRip(existing.Device, liveTitle)
+	// If the chosen movie needs a different title than the one being ripped,
+	// stop and start over with the corrected identity.
+	message := ""
+	if !isFinished(existing.Status) {
+		restarted := s.svc.RestartIfNeeded(existing.Device)
+		message = s.svc.EditMessage(existing.Device, restarted)
+		_ = s.store.AddEvent(ctx, id, "identify", message, map[string]any{"restart": restarted})
+	}
 
 	job, _, err := s.store.GetJob(ctx, id)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
-	return c.JSON(http.StatusOK, job)
+	return c.JSON(http.StatusOK, struct {
+		store.Job
+		Message string `json:"message,omitempty"`
+	}{job, message})
+}
+
+// handleRipAlternate starts ripping one alternate cut found on a job's disc.
+func (s *Server) handleRipAlternate(c echo.Context) error {
+	idx, err := strconv.Atoi(c.Param("index"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid title index"})
+	}
+	switch err := s.svc.StartAlternateRip(c.Param("id"), idx); {
+	case err == nil:
+		return c.JSON(http.StatusAccepted, map[string]string{"status": "started"})
+	case errors.Is(err, service.ErrNoAlternate):
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "that alternate is no longer available (the daemon restarted or the disc changed)"})
+	case errors.Is(err, service.ErrDeviceBusy):
+		return c.JSON(http.StatusConflict, map[string]string{"error": "the drive is busy; try again when it is idle"})
+	default:
+		return c.JSON(http.StatusConflict, map[string]string{"error": "the main rip has not been delivered yet, or no output path is configured"})
+	}
 }
 
 // WebSocket keepalive tuning. The server pings the client periodically and

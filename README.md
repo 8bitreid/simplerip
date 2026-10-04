@@ -84,6 +84,9 @@ metadata:
 
 notification:
   webhook_url: ""            # n8n webhook for Discord alerts
+  discord_webhook_url: ""    # prefer the DISCORD_WEBHOOK_URL env var
+  ui_url: ""                 # linked from notifications (or SIMPLERIP_UI_URL)
+  events: {needs_input: true, multi_title: true, complete: true, failed: true, duration_mismatch: true}
   callback_port: 8090        # port for n8n to POST responses back
 ```
 
@@ -164,6 +167,18 @@ The full breakdown is shown in the duplicate analysis report for every `[KEEP]` 
 ---
 
 ## Discord / n8n integration
+
+### Discord notifications
+
+Set `DISCORD_WEBHOOK_URL` (put it in the gitignored `.env`; compose passes it through) and optionally `SIMPLERIP_UI_URL`. Each message includes the disc name, device, and media title, plus a link to the UI. Events, each toggled under `notification.events`:
+
+- `needs_input` — no main title detected, or no confident TMDB match
+- `multi_title` — more than one title ripped from a disc
+- `complete` — rsync finished and files verified
+- `failed` — scan, rip, or delivery failed
+- `duration_mismatch` — ripped file length differs from the TMDB/OMDb runtime by more than 3 minutes
+
+Sending is asynchronous and best-effort: a dead webhook is logged (without the URL) and never blocks or fails a rip. Senders implement `notify.Sender`, so other channels can be added without touching the pipeline.
 
 SimpleRip POSTs JSON payloads to an n8n webhook when user input is needed (extras, double features, ambiguous discs). n8n formats it as a Discord message with action buttons. The user responds in Discord, n8n POSTs the response back to SimpleRip's callback server (`:8090`), and the rip continues.
 

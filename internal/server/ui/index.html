@@ -786,7 +786,6 @@ function driveCardHTML(st) {
       ${progressHTML}
       ${etaHTML}
       ${canEdit && !showResolve ? `<button class="btn card-edit-btn" data-device="${escAttr(device)}">✎ Edit title</button>` : ''}
-      <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
       ${resolvePanelHTML}
       <div class="eject-spacer"></div>
       <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
@@ -833,11 +832,20 @@ async function applyCardReidentify(device, payload) {
       return;
     }
     delete cardResolveState[device]; // card will re-render past "identify" on the next progress event
+    if (data.message) showToast(data.message);
     await loadJobs();
   } catch (_) {
     cardResolveState[device] = { ...cardResolveState[device], message: 'Request failed.' };
     renderDrives();
   }
+}
+
+function showToast(text) {
+  const el = document.createElement('div');
+  el.textContent = text;
+  el.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);max-width:80vw;padding:10px 16px;background:#222;color:#fff;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.4);z-index:9999;font-size:14px';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 8000);
 }
 
 // ── Jobs list ────────────────────────────────────────────────────────────
@@ -937,6 +945,34 @@ async function openJob(id) {
   }
 }
 
+function alternatesHTML(job, events) {
+  const ev = [...events].reverse().find(e => e.Stage === 'alternates');
+  if (!ev) return '';
+  let data = ev.Data;
+  try { if (typeof data === 'string') data = JSON.parse(data); } catch (_) { return ''; }
+  const cands = (data && data.candidates) || [];
+  if (!cands.length) return '';
+  const rows = cands.map(c => `
+    <div class="tl-event">
+      <span class="tl-msg">Title ${esc(String(c.index))} — ${esc(String(c.minutes))} min — ${esc(c.label || '')}</span>
+      <button class="btn alt-rip" data-job="${esc(job.ID)}" data-idx="${esc(String(c.index))}">Rip this cut</button>
+    </div>`).join('');
+  return `<div class="reid-section"><div class="reid-heading">Alternate cuts</div>${rows}<div id="alt-msg"></div></div>`;
+}
+
+async function ripAlternate(jobId, idx) {
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/alternates/${encodeURIComponent(idx)}/rip`, { method: 'POST' });
+    const d = await r.json();
+    showToast(r.ok ? 'Ripping the alternate cut. Progress shows on the drive card.' : (d.error || 'Failed'));
+  } catch (_) { showToast('Request failed.'); }
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('.alt-rip');
+  if (b) ripAlternate(b.dataset.job, b.dataset.idx);
+});
+
 function renderDetail(job, events) {
   const panel = document.getElementById('detail-panel');
   const title = job.Title || job.DiscLabel || '—';
@@ -971,6 +1007,7 @@ function renderDetail(job, events) {
         <button class="close-btn" id="det-close">✕</button>
       </div>
       <div class="timeline">${timelineHTML}</div>
+      ${alternatesHTML(job, events)}
       <div class="reid-section">
         <div class="reid-heading">Re-identify</div>
         <div class="search-row">
@@ -1065,7 +1102,7 @@ async function applyReidentify(jobId, payload) {
       msg.innerHTML = `<div class="msg-error">${esc(data.error || 'Failed')}</div>`;
       return;
     }
-    msg.innerHTML = `<div class="msg-success">Updated to "${esc(data.Title || payload.title)}".</div>`;
+    msg.innerHTML = `<div class="msg-success">Updated to "${esc(data.Title || payload.title)}". ${esc(data.message || '')}</div>`;
     await loadJobs();
     // Re-render the detail panel with fresh data
     const selectedId = selectedJobId;
