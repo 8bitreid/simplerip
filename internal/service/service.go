@@ -632,22 +632,6 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		}
 	}
 
-	// A match whose runtime fits none of the disc's titles is the wrong movie
-	// (cryptic disc labels often match unrelated films). Fall back to the disc
-	// label and ask for a manual correction instead of ripping under that name.
-	if tmdbConfirmedMovie && !run.restarted && !runtimeFitsAnyTitle(scanned.Titles, runtimeMin) {
-		rejected := mediaTitle
-		slog.Warn("tmdb match rejected: runtime fits no title", "match", rejected, "runtime_min", runtimeMin, "disc", scanned.DiscName)
-		mediaTitle = scanned.DiscName
-		tmdbConfirmedMovie = false
-		runtimeMin = 0
-		if s.store != nil {
-			_ = s.store.UpdateJob(ctx, job.ID, "", 0, "identifying", "")
-			_ = s.store.AddEvent(ctx, job.ID, "identify",
-				fmt.Sprintf("rejected TMDB match %q: its runtime fits none of the disc's titles; using the disc label", rejected), nil)
-		}
-	}
-
 	// Step 3: Classify titles.
 	// If TMDB already confirmed this is a movie, suppress the TV-cluster rule
 	// so a disc with 3+ same-duration copies of the same film isn't misclassified.
@@ -671,7 +655,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				"pattern":    pattern,
 				"main_index": mainIndex,
 			})
-		_ = s.store.UpdateStatusPattern(ctx, job.ID, "scanning", pattern)
+		_ = s.store.UpdateJob(ctx, job.ID, "", 0, "scanning", pattern)
 	}
 
 	// Adopt the identified title unless the user already corrected it by hand
@@ -1757,31 +1741,4 @@ func pickBestNear(titles []disc.MKVTitle, ref time.Duration) (disc.MKVTitle, boo
 		}
 	}
 	return best, found
-}
-
-// runtimeFitsAnyTitle reports whether some scanned title is plausibly the
-// movie: within 15% of runtimeMin (and at least durationTolerance, so short
-// films still get a margin). Unknown runtimes or unreadable title durations
-// can't disprove a match, so they pass.
-func runtimeFitsAnyTitle(titles []disc.MKVTitle, runtimeMin int) bool {
-	if runtimeMin <= 0 {
-		return true
-	}
-	ref := time.Duration(runtimeMin) * time.Minute
-	slack := max(durationTolerance, ref*15/100)
-	known := false
-	for _, t := range titles {
-		if t.Duration <= 0 {
-			continue
-		}
-		known = true
-		d := t.Duration - ref
-		if d < 0 {
-			d = -d
-		}
-		if d <= slack {
-			return true
-		}
-	}
-	return !known
 }
