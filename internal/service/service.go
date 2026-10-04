@@ -1209,9 +1209,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "done",
-			Title:   "",
+			Title:   run.title,
 			Percent: 100,
-			Message: "Rip completed (notification failed)",
+			Message: run.title + " completed (notification failed)",
 		})
 		if s.store != nil {
 			_ = s.store.UpdateStatus(ctx, job.ID, "done")
@@ -1222,9 +1222,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	s.emit(ProgressEvent{
 		Device:  device,
 		Stage:   "done",
-		Title:   "",
+		Title:   run.title,
 		Percent: 100,
-		Message: "Rip completed successfully",
+		Message: run.title + " completed successfully",
 	})
 	if s.store != nil {
 		_ = s.store.UpdateStatus(ctx, job.ID, "done")
