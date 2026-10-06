@@ -31,13 +31,14 @@ import (
 
 // ProgressEvent represents a state update during the rip process.
 type ProgressEvent struct {
-	Device   string `json:"device,omitempty"`      // e.g. /dev/sr0
-	Stage    string `json:"stage"`                 // scanning, analyzing, ripping, delivering, done, idle, error
-	Title    string `json:"title"`                 // e.g. "Revenge of the Sith"
-	Percent  int    `json:"percent"`               // 0-100
-	Message  string `json:"message"`               // human-readable status message
-	DiscType string `json:"disc_type,omitempty"`   // bluray, dvd, unknown
-	ETASec   int    `json:"eta_seconds,omitempty"` // estimated seconds remaining while ripping; 0 = unknown
+	Device      string `json:"device,omitempty"`       // e.g. /dev/sr0
+	Stage       string `json:"stage"`                  // scanning, analyzing, ripping, delivering, done, idle, error
+	Title       string `json:"title"`                  // e.g. "Revenge of the Sith"
+	Percent     int    `json:"percent"`                // 0-100
+	Message     string `json:"message"`                // human-readable status message
+	DiscType    string `json:"disc_type,omitempty"`    // bluray, dvd, unknown
+	DriveStatus string `json:"drive_status,omitempty"` // disc_present, no_disc, tray_open, loading, detecting, unresponsive
+	ETASec      int    `json:"eta_seconds,omitempty"`  // estimated seconds remaining while ripping; 0 = unknown
 }
 
 func pickLongest(titles []disc.MKVTitle) (disc.MKVTitle, bool) {

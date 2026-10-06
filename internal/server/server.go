@@ -18,9 +18,12 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 
+	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/service"
 	"github.com/8bitreid/simplerip/internal/store"
 )
+
+const jobsPageSize = 100
 
 //go:embed ui/index.html
 var indexHTML []byte
@@ -32,7 +35,7 @@ var ejectDevice = func(device string) error {
 // jobStore is the persistence interface the server depends on.
 // *store.Store satisfies it; a nil value disables persistence.
 type jobStore interface {
-	ListJobs(ctx context.Context) ([]store.Job, error)
+	ListJobs(ctx context.Context, limit, offset int) ([]store.Job, error)
 	GetJob(ctx context.Context, id string) (store.Job, []store.JobEvent, error)
 	AddEvent(ctx context.Context, jobID, stage, message string, data any) error
 	UpdateJob(ctx context.Context, id, title string, year int, status, pattern string) error
@@ -91,6 +94,8 @@ func New(svc *service.RipService, st *store.Store, devices []string) *Server {
 
 	s.shutdownWg.Add(1)
 	go s.trackProgress()
+	s.shutdownWg.Add(1)
+	go s.trackDriveStatus()
 
 	return s
 }
@@ -234,13 +239,110 @@ func (s *Server) isConfiguredDevice(device string) bool {
 	return false
 }
 
-// handleListJobs returns the 100 most recent jobs.
+func (s *Server) handleCancelRip(c echo.Context) error {
+	var body struct {
+		Device string `json:"device"`
+	}
+	if err := c.Bind(&body); err != nil || strings.TrimSpace(body.Device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+	if !s.isConfiguredDevice(body.Device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	if !s.svc.CancelRip(body.Device) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "no active rip found for this drive"})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device})
+}
+
+func (s *Server) handleAutoEject(c echo.Context) error {
+	var body struct {
+		Device  string `json:"device"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := c.Bind(&body); err != nil || strings.TrimSpace(body.Device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+	if !s.isConfiguredDevice(body.Device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	s.mu.Lock()
+	s.autoEject[body.Device] = body.Enabled
+	s.mu.Unlock()
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device, "enabled": body.Enabled})
+}
+
+func (s *Server) isConfiguredDevice(device string) bool {
+	for _, dev := range s.devices {
+		if dev == device {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) handleCancelRip(c echo.Context) error {
+	var body struct {
+		Device string `json:"device"`
+	}
+	if err := c.Bind(&body); err != nil || strings.TrimSpace(body.Device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+	if !s.isConfiguredDevice(body.Device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	if !s.svc.CancelRip(body.Device) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "no active rip found for this drive"})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device})
+}
+
+func (s *Server) handleAutoEject(c echo.Context) error {
+	var body struct {
+		Device  string `json:"device"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := c.Bind(&body); err != nil || strings.TrimSpace(body.Device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+	if !s.isConfiguredDevice(body.Device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	s.mu.Lock()
+	s.autoEject[body.Device] = body.Enabled
+	s.mu.Unlock()
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device, "enabled": body.Enabled})
+}
+
+func (s *Server) isConfiguredDevice(device string) bool {
+	for _, dev := range s.devices {
+		if dev == device {
+			return true
+		}
+	}
+	return false
+}
+
+// handleListJobs returns a page of the most recent jobs.
 // Returns an empty array when no database is configured.
 func (s *Server) handleListJobs(c echo.Context) error {
+	limit, err := strconv.Atoi(c.QueryParam("limit"))
+	if c.QueryParam("limit") == "" {
+		limit = jobsPageSize
+	} else if err != nil || limit < 1 || limit > jobsPageSize {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("limit must be between 1 and %d", jobsPageSize)})
+	}
+	offset := 0
+	if rawOffset := c.QueryParam("offset"); rawOffset != "" {
+		offset, err = strconv.Atoi(rawOffset)
+		if err != nil || offset < 0 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "offset must be a non-negative integer"})
+		}
+	}
 	if s.store == nil {
 		return c.JSON(http.StatusOK, []store.Job{})
 	}
-	jobs, err := s.store.ListJobs(c.Request().Context())
+	jobs, err := s.store.ListJobs(c.Request().Context(), limit, offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -248,6 +350,20 @@ func (s *Server) handleListJobs(c echo.Context) error {
 		jobs = []store.Job{}
 	}
 	return c.JSON(http.StatusOK, jobs)
+}
+
+func (s *Server) trackDriveStatus() {
+	defer s.shutdownWg.Done()
+	events := disc.PollEventsWithStatus(s.ctx, s.devices, 5*time.Second, s.svc.HasActiveRip, func(device, status string) {
+		s.mu.Lock()
+		state := s.curStates[device]
+		state.Device = device
+		state.DriveStatus = status
+		s.curStates[device] = state
+		s.mu.Unlock()
+	})
+	for range events {
+	}
 }
 
 // handleGetJob returns a single job and its events.
@@ -541,6 +657,7 @@ func (s *Server) trackProgress() {
 				continue
 			}
 			s.mu.Lock()
+			event.DriveStatus = s.curStates[event.Device].DriveStatus
 			s.curStates[event.Device] = event
 			auto := event.Stage == "done" && s.autoEject[event.Device]
 			s.mu.Unlock()

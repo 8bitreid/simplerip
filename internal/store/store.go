@@ -27,16 +27,17 @@ var ErrJobActive = errors.New("job is still in progress")
 var migrationFiles embed.FS
 
 type Job struct {
-	ID        string
-	Device    string
-	DiscLabel string
-	Title     string
-	Year      int
-	Status    string
-	Pattern   string
-	DiscType  string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID         string
+	Device     string
+	DiscLabel  string
+	Title      string
+	Year       int
+	Status     string
+	Pattern    string
+	DiscType   string
+	CreatedAt  time.Time
+	FinishedAt *time.Time
+	UpdatedAt  time.Time
 
 	// Populated by ListJobs for failed jobs, from the latest error event.
 	ErrorSummary string `json:",omitempty"`
@@ -109,7 +110,7 @@ func scanJob(scan func(...any) error) (Job, error) {
 	var j Job
 	var discLabel, title, pattern, discType *string
 	var year *int
-	err := scan(&j.ID, &j.Device, &discLabel, &title, &year, &j.Status, &pattern, &discType, &j.CreatedAt, &j.UpdatedAt)
+	err := scan(&j.ID, &j.Device, &discLabel, &title, &year, &j.Status, &pattern, &discType, &j.CreatedAt, &j.FinishedAt, &j.UpdatedAt)
 	if err != nil {
 		return Job{}, err
 	}
@@ -135,7 +136,7 @@ func (s *Store) CreateJob(ctx context.Context, device, discLabel, discType strin
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO jobs (device, disc_label, disc_type)
 		 VALUES ($1, $2, $3)
-		 RETURNING id, device, disc_label, title, year, status, pattern, disc_type, created_at, updated_at`,
+		 RETURNING id, device, disc_label, title, year, status, pattern, disc_type, created_at, finished_at, updated_at`,
 		device, discLabel, discType,
 	)
 	j, err := scanJob(row.Scan)
@@ -147,7 +148,11 @@ func (s *Store) CreateJob(ctx context.Context, device, discLabel, discType strin
 
 func (s *Store) UpdateJob(ctx context.Context, id, title string, year int, status, pattern string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET title=$2, year=$3, status=$4, pattern=$5, updated_at=now() WHERE id=$1`,
+		`UPDATE jobs
+		 SET title=$2, year=$3, status=$4, pattern=$5,
+		     finished_at=CASE WHEN $4 IN ('done','error','cancelled') THEN COALESCE(finished_at, now()) ELSE NULL END,
+		     updated_at=now()
+		 WHERE id=$1`,
 		id, title, year, status, pattern,
 	)
 	if err != nil {
@@ -160,7 +165,11 @@ func (s *Store) UpdateJob(ctx context.Context, id, title string, year int, statu
 // identified title and year untouched.
 func (s *Store) UpdateStatusPattern(ctx context.Context, id, status, pattern string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status=$2, pattern=$3, updated_at=now() WHERE id=$1`,
+		`UPDATE jobs
+		 SET status=$2, pattern=$3,
+		     finished_at=CASE WHEN $2 IN ('done','error','cancelled') THEN COALESCE(finished_at, now()) ELSE NULL END,
+		     updated_at=now()
+		 WHERE id=$1`,
 		id, status, pattern,
 	)
 	if err != nil {
@@ -174,7 +183,11 @@ func (s *Store) UpdateStatusPattern(ctx context.Context, id, status, pattern str
 // previously identified metadata is not clobbered mid-pipeline.
 func (s *Store) UpdateStatus(ctx context.Context, id, status string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status=$2, updated_at=now() WHERE id=$1`,
+		`UPDATE jobs
+		 SET status=$2,
+		     finished_at=CASE WHEN $2 IN ('done','error','cancelled') THEN COALESCE(finished_at, now()) ELSE NULL END,
+		     updated_at=now()
+		 WHERE id=$1`,
 		id, status,
 	)
 	if err != nil {
@@ -202,9 +215,9 @@ func (s *Store) AddEvent(ctx context.Context, jobID, stage, message string, data
 	return nil
 }
 
-func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
+func (s *Store) ListJobs(ctx context.Context, limit, offset int) ([]Job, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT j.id, j.device, j.disc_label, j.title, j.year, j.status, j.pattern, j.disc_type, j.created_at, j.updated_at,
+		`SELECT j.id, j.device, j.disc_label, j.title, j.year, j.status, j.pattern, j.disc_type, j.created_at, j.finished_at, j.updated_at,
 		        e.message, e.data->>'hint'
 		 FROM jobs j
 		 LEFT JOIN LATERAL (
@@ -212,8 +225,9 @@ func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 		   WHERE job_id = j.id AND stage = 'error'
 		   ORDER BY created_at DESC LIMIT 1
 		 ) e ON j.status = 'error'
-		 ORDER BY j.created_at DESC
-		 LIMIT 100`,
+		 ORDER BY COALESCE(j.finished_at, j.created_at) DESC, j.id DESC
+		 LIMIT $1 OFFSET $2`,
+		limit, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("listing jobs: %w", err)
@@ -240,7 +254,7 @@ func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 
 func (s *Store) GetJob(ctx context.Context, id string) (Job, []JobEvent, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, device, disc_label, title, year, status, pattern, disc_type, created_at, updated_at
+		`SELECT id, device, disc_label, title, year, status, pattern, disc_type, created_at, finished_at, updated_at
 		 FROM jobs WHERE id=$1`,
 		id,
 	)

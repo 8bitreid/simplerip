@@ -19,7 +19,7 @@ import (
 // ── mock store ────────────────────────────────────────────────────────────────
 
 type mockStore struct {
-	listJobs  func(ctx context.Context) ([]store.Job, error)
+	listJobs  func(ctx context.Context, limit, offset int) ([]store.Job, error)
 	getJob    func(ctx context.Context, id string) (store.Job, []store.JobEvent, error)
 	addEvent  func(ctx context.Context, jobID, stage, message string, data any) error
 	updateJob func(ctx context.Context, id, title string, year int, status, pattern string) error
@@ -35,9 +35,9 @@ func (m *mockStore) DeleteJob(ctx context.Context, id string) error {
 
 func (m *mockStore) DeleteFinishedJobs(ctx context.Context) (int64, error) { return 3, nil }
 
-func (m *mockStore) ListJobs(ctx context.Context) ([]store.Job, error) {
+func (m *mockStore) ListJobs(ctx context.Context, limit, offset int) ([]store.Job, error) {
 	if m.listJobs != nil {
-		return m.listJobs(ctx)
+		return m.listJobs(ctx, limit, offset)
 	}
 	return nil, nil
 }
@@ -128,7 +128,12 @@ func TestHandleListJobs_ReturnsJobs(t *testing.T) {
 		{ID: "uuid-2", Device: "/dev/sr1", DiscLabel: "Dune", Status: "ripping", CreatedAt: now},
 	}
 	ms := &mockStore{
-		listJobs: func(_ context.Context) ([]store.Job, error) { return jobs, nil },
+		listJobs: func(_ context.Context, limit, offset int) ([]store.Job, error) {
+			if limit != jobsPageSize || offset != 0 {
+				t.Errorf("ListJobs(limit, offset) = (%d, %d), want (%d, 0)", limit, offset, jobsPageSize)
+			}
+			return jobs, nil
+		},
 	}
 	s := newTestServer(ms)
 	rr := doRequest(t, s, http.MethodGet, "/api/jobs", nil)
@@ -143,6 +148,32 @@ func TestHandleListJobs_ReturnsJobs(t *testing.T) {
 	}
 	if got[0].ID != "uuid-1" {
 		t.Errorf("first job ID = %q, want uuid-1", got[0].ID)
+	}
+}
+
+func TestHandleListJobs_Pagination(t *testing.T) {
+	ms := &mockStore{
+		listJobs: func(_ context.Context, limit, offset int) ([]store.Job, error) {
+			if limit != 25 || offset != 100 {
+				t.Errorf("ListJobs(limit, offset) = (%d, %d), want (25, 100)", limit, offset)
+			}
+			return []store.Job{}, nil
+		},
+	}
+	s := newTestServer(ms)
+	rr := doRequest(t, s, http.MethodGet, "/api/jobs?limit=25&offset=100", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleListJobs_RejectsInvalidPagination(t *testing.T) {
+	s := newTestServer(&mockStore{})
+	for _, path := range []string{"/api/jobs?limit=101", "/api/jobs?limit=0", "/api/jobs?offset=-1", "/api/jobs?offset=abc"} {
+		rr := doRequest(t, s, http.MethodGet, path, nil)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("GET %s status = %d, want 400", path, rr.Code)
+		}
 	}
 }
 

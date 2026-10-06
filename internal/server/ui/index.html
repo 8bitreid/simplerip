@@ -123,6 +123,17 @@ header h1 {
 
 .drive-idle-warn { color: #e5a13a; }
 .drive-idle-ok { color: #4caf7d; }
+.drive-media-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.drive-media-status.ok { color: var(--green); }
+.drive-media-status.warn { color: var(--yellow); }
+.drive-media-status.error { color: var(--red); }
 
 /* ── Stage list ── */
 
@@ -203,15 +214,18 @@ header h1 {
 .eject-btn {
   display: block;
   width: 100%;
+  min-height: 36px;
+  flex: 0 0 auto;
   margin-top: auto; /* pin to the bottom of the card */
-  padding: 5px 12px;
-  background: transparent;
+  padding: 7px 12px;
+  background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  font-size: 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, border-color 0.15s;
 }
 .eject-spacer { flex: 1 0 14px; }
 .drive-actions { display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; }
@@ -219,8 +233,13 @@ header h1 {
 .auto-eject-label input { accent-color: var(--accent); }
 .cancel-rip-btn { border-color: var(--red); color: var(--red); }
 .cancel-rip-btn:hover { background: rgba(239,68,68,0.12); }
+.drive-actions { display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; }
+.auto-eject-label { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.auto-eject-label input { accent-color: var(--accent); }
+.cancel-rip-btn { border-color: var(--red); color: var(--red); }
+.cancel-rip-btn:hover { background: rgba(239,68,68,0.12); }
 .drive-card > .card-edit-btn { align-self: flex-start; margin-top: 10px; }
-.eject-btn:hover { background: var(--surface2); color: var(--text); }
+.eject-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 .card-resolve { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .card-resolve .search-row { margin-bottom: 8px; }
@@ -487,6 +506,7 @@ header h1 {
   <div>
     <div class="section-title">Recent Rips <button id="clear-jobs" class="btn" style="margin-left:12px;display:none">Clear all</button></div>
     <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
+    <button id="load-more-jobs" class="btn" style="display:none;margin:12px auto">Load more rips</button>
     <div id="detail-panel" style="display:none"></div>
   </div>
 </div>
@@ -524,6 +544,8 @@ const knownDevices = new Set();
 const cardResolveState = {};
 
 let jobs = [];
+let jobsHasMore = false;
+let jobsLoadingMore = false;
 let selectedJobId = null;
 let jobsRefreshTimer = null;
 
@@ -729,6 +751,18 @@ function driveIdleState(message) {
   return { icon: '', cls: '', text: m || 'no disc — waiting' };
 }
 
+function driveMediaStatusHTML(status) {
+  switch (status) {
+    case 'disc_present': return '<div class="drive-media-status ok"><span>●</span> Tray closed · Disc present</div>';
+    case 'no_disc': return '<div class="drive-media-status"><span>○</span> Tray closed · Empty</div>';
+    case 'tray_open': return '<div class="drive-media-status warn"><span>⏏</span> Tray open · No disc</div>';
+    case 'loading': return '<div class="drive-media-status warn"><span>◌</span> Drive loading</div>';
+    case 'detecting': return '<div class="drive-media-status"><span>◌</span> Checking drive…</div>';
+    case 'unresponsive': return '<div class="drive-media-status error"><span>⚠</span> Drive not responding</div>';
+    default: return '<div class="drive-media-status"><span>◌</span> Checking drive…</div>';
+  }
+}
+
 function driveCardHTML(st) {
   const { stage, percent, message, title } = st;
   const device = st.device;
@@ -746,7 +780,7 @@ function driveCardHTML(st) {
     </div>`;
 
   if (isIdle) {
-    return `<div class="drive-card">${header}${(() => { const d = driveIdleState(message); return `<div class="drive-idle ${d.cls}">${d.icon ? `<span class="drive-idle-icon">${d.icon}</span> ` : ""}${esc(d.text)}</div>`; })()}${driveActionsHTML(device, false)}</div>`;
+    return `<div class="drive-card">${header}${driveMediaStatusHTML(st.drive_status)}${(() => { const d = driveIdleState(message); return `<div class="drive-idle ${d.cls}">${d.icon ? `<span class="drive-idle-icon">${d.icon}</span> ` : ""}${esc(d.text)}</div>`; })()}${driveActionsHTML(device, false)}</div>`;
   }
 
   const titleLine  = title   ? `<div class="drive-title">${esc(title)}</div>` : '';
@@ -817,6 +851,7 @@ function driveCardHTML(st) {
   return `
     <div class="drive-card">
       ${header}
+      ${driveMediaStatusHTML(st.drive_status)}
       ${titleLine}
       ${msgLine}
       <div class="stages">${stagesHTML}</div>
@@ -852,7 +887,7 @@ setInterval(() => {
 
 function driveActionsHTML(device, active) {
   const checked = autoEjectDevices.has(device) ? 'checked' : '';
-  return `<div class="drive-actions">${active ? `<button class="btn cancel-rip-btn" data-device="${escAttr(device)}">Cancel rip</button>` : ''}<label class="auto-eject-label"><input class="auto-eject-toggle" type="checkbox" data-device="${escAttr(device)}" ${checked}> Auto eject when complete</label><button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button></div>`;
+  return `<div class="drive-actions">${active ? `<button class="btn cancel-rip-btn" data-device="${escAttr(device)}">Cancel rip</button>` : ''}<label class="auto-eject-label"><input class="auto-eject-toggle" type="checkbox" data-device="${escAttr(device)}" ${checked}> Auto eject when complete</label><button type="button" class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button></div>`;
 }
 
 async function doCardSearch(device) {
@@ -914,13 +949,32 @@ function showToast(text) {
 // ── Jobs list ────────────────────────────────────────────────────────────
 
 async function loadJobs() {
+  await fetchJobsPage(true);
+}
+
+async function fetchJobsPage(reset) {
+  if (jobsLoadingMore) return;
+  jobsLoadingMore = true;
   try {
-    const r = await fetch('/api/jobs');
+    const offset = reset ? 0 : jobs.length;
+    const r = await fetch(`/api/jobs?limit=100&offset=${offset}`);
     if (!r.ok) return;
-    jobs = await r.json() || [];
+    const page = await r.json() || [];
+    jobs = reset ? page : jobs.concat(page);
+    jobsHasMore = page.length === 100;
     renderJobs();
     jobs.forEach(j => { if (j.Device) ensureDevice(j.Device); });
   } catch (_) {}
+  finally {
+    jobsLoadingMore = false;
+    updateLoadMoreButton();
+  }
+}
+
+function updateLoadMoreButton() {
+  const button = document.getElementById('load-more-jobs');
+  button.style.display = jobsHasMore ? 'block' : 'none';
+  button.disabled = jobsLoadingMore;
 }
 
 async function loadDevices() {
@@ -939,6 +993,7 @@ function renderJobs() {
   const el = document.getElementById('jobs-table');
   const historical = jobs.filter(j => isTerminal(j.Status));
   document.getElementById('clear-jobs').style.display = historical.length ? '' : 'none';
+  updateLoadMoreButton();
   if (!historical.length) {
     el.innerHTML = '<div class="jobs-empty">No completed rips yet.</div>';
     return;
@@ -955,7 +1010,7 @@ function renderJobs() {
         </div>
         <span class="job-meta">${esc(j.Device || '')}</span>
         <span class="job-meta">${j.DiscType && j.DiscType !== 'unknown' ? esc(fmtDiscType(j.DiscType)) : ''}</span>
-        <span class="job-meta">${fmtDate(j.CreatedAt)}</span>
+        <span class="job-meta">${fmtDate(j.FinishedAt || j.CreatedAt)}</span>
         ${j.Status === 'error' && (j.ErrorSummary || j.ErrorHint)
           ? `<span class="badge badge-error has-tip" tabindex="0" data-tip="${escAttr([j.ErrorSummary, j.ErrorHint && 'Try this: ' + j.ErrorHint].filter(Boolean).join('\n\n'))}">error ⓘ</span>`
           : badgeHTML(j.Status)}
@@ -968,6 +1023,26 @@ function renderJobs() {
   el.querySelectorAll('.job-delete').forEach(btn => {
     btn.addEventListener('click', e => { e.stopPropagation(); deleteJob(btn.dataset.id); });
   });
+}
+
+document.getElementById('load-more-jobs').addEventListener('click', () => fetchJobsPage(false));
+
+async function loadDriveStatuses() {
+  try {
+    const response = await fetch('/api/status');
+    if (!response.ok) return;
+    const statuses = await response.json();
+    let changed = false;
+    for (const [device, status] of Object.entries(statuses || {})) {
+      ensureDevice(device);
+      const driveStatus = status.drive_status;
+      if (driveStatus && driveStates[device].drive_status !== driveStatus) {
+        driveStates[device].drive_status = driveStatus;
+        changed = true;
+      }
+    }
+    if (changed) renderDrives();
+  } catch (_) {}
 }
 
 async function deleteJob(id) {
@@ -1194,6 +1269,8 @@ function connectWS() {
 
 loadDevices();
 loadJobs();
+loadDriveStatuses();
+setInterval(loadDriveStatuses, 5000);
 connectWS();
 </script>
 </body>
