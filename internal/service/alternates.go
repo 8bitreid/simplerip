@@ -130,22 +130,31 @@ func (s *RipService) StartAlternateRip(jobID string, index int) error {
 		return ErrNothingStaged
 	}
 	s.altBusy[a.device] = true
+	ctx, cancel := context.WithCancel(context.Background())
+	if s.activeCancels == nil {
+		s.activeCancels = make(map[string]context.CancelFunc)
+	}
+	s.activeCancels[a.device] = cancel
 	s.ripMu.Unlock()
 
 	go func() {
 		defer func() {
+			cancel()
 			s.ripMu.Lock()
 			delete(s.altBusy, a.device)
+			delete(s.activeCancels, a.device)
 			s.ripMu.Unlock()
 		}()
 		timeout := time.Duration(s.cfg.MakeMKV.TimeoutMinutes) * time.Minute
 		if timeout <= 0 {
 			timeout = 120 * time.Minute
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		if err := s.ripAlternate(ctx, jobID, a, *cand); err != nil {
+		runCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+		defer timeoutCancel()
+		if err := s.ripAlternate(runCtx, jobID, a, *cand); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("alternate rip failed", "job", jobID, "title", cand.Index, "error", err)
+		} else if errors.Is(err, context.Canceled) {
+			s.emit(ProgressEvent{Device: a.device, Stage: "idle", Message: "Rip canceled"})
 		}
 	}()
 	return nil
@@ -153,6 +162,9 @@ func (s *RipService) StartAlternateRip(jobID string, index int) error {
 
 func (s *RipService) ripAlternate(ctx context.Context, jobID string, a *altState, t disc.MKVTitle) error {
 	fail := func(err error) error {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
 		if s.store != nil {
 			_ = s.store.AddEvent(ctx, jobID, "error", fmt.Sprintf("alternate title %d failed: %v", t.Index, err), nil)
 		}

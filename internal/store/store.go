@@ -278,11 +278,11 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, []JobEvent, error) 
 	return j, events, nil
 }
 
-// DeleteJob removes a finished (done or error) job and, via ON DELETE CASCADE,
+// DeleteJob removes a finished (done, error, or cancelled) job and, via ON DELETE CASCADE,
 // its events. In-progress jobs are refused with ErrJobActive.
 func (s *Store) DeleteJob(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM jobs WHERE id=$1 AND status IN ('done','error')`, id)
+		`DELETE FROM jobs WHERE id=$1 AND status IN ('done','error','cancelled')`, id)
 	if err != nil {
 		return fmt.Errorf("deleting job %s: %w", id, err)
 	}
@@ -295,9 +295,9 @@ func (s *Store) DeleteJob(ctx context.Context, id string) error {
 	return ErrJobActive
 }
 
-// DeleteFinishedJobs removes every done or error job and returns how many.
+// DeleteFinishedJobs removes every done, error, or cancelled job and returns how many.
 func (s *Store) DeleteFinishedJobs(ctx context.Context) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM jobs WHERE status IN ('done','error')`)
+	tag, err := s.pool.Exec(ctx, `DELETE FROM jobs WHERE status IN ('done','error','cancelled')`)
 	if err != nil {
 		return 0, fmt.Errorf("deleting finished jobs: %w", err)
 	}

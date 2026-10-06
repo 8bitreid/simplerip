@@ -214,6 +214,11 @@ header h1 {
   transition: background 0.15s, color 0.15s;
 }
 .eject-spacer { flex: 1 0 14px; }
+.drive-actions { display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; }
+.auto-eject-label { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.auto-eject-label input { accent-color: var(--accent); }
+.cancel-rip-btn { border-color: var(--red); color: var(--red); }
+.cancel-rip-btn:hover { background: rgba(239,68,68,0.12); }
 .drive-card > .card-edit-btn { align-self: flex-start; margin-top: 10px; }
 .eject-btn:hover { background: var(--surface2); color: var(--text); }
 
@@ -251,6 +256,7 @@ header h1 {
 .badge-delivering { background: rgba(245,158,11,0.15); color: var(--yellow); }
 .badge-done       { background: rgba(34,197,94,0.15); color: var(--green); }
 .badge-error      { background: rgba(239,68,68,0.15); color: var(--red); }
+.badge-cancelled  { background: var(--surface2); color: var(--text-muted); }
 .badge-pending    { background: var(--surface2); color: var(--text-muted); }
 .badge-disc-type  { background: rgba(59,130,246,0.12); color: var(--blue); }
 
@@ -533,6 +539,10 @@ function escAttr(s) {
   return String(s ?? '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+let savedAutoEject = [];
+try { savedAutoEject = JSON.parse(localStorage.getItem('simplerip-auto-eject') || '[]'); } catch (_) {}
+const autoEjectDevices = new Set(Array.isArray(savedAutoEject) ? savedAutoEject : []);
+
 function isManualSearchWait(stage, message) {
   const canon = canonStage(stage || '');
   const msg = String(message || '').toLowerCase();
@@ -578,7 +588,7 @@ function fmtDiscType(t) {
 }
 
 // Recent Rips only shows finished jobs; in-progress state lives on the drive card.
-const TERMINAL_STATUSES = new Set(['done', 'error']);
+const TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
 function isTerminal(status) {
   return TERMINAL_STATUSES.has(String(status || '').toLowerCase());
 }
@@ -616,10 +626,12 @@ function applyProgressEvent(ev) {
   const dev = ev.device;
   if (dev) {
     ensureDevice(dev);
-    driveStates[dev] = { ...driveStates[dev], ...ev, device: dev };
+    driveStates[dev] = { ...driveStates[dev], ...ev, device: dev, progressAt: Date.now() };
   }
   renderDrives();
-  scheduleJobsRefresh();
+  if (ev.stage === 'done' || ev.stage === 'error' || ev.stage === 'cancelled') {
+    scheduleJobsRefresh();
+  }
 }
 
 function scheduleJobsRefresh() {
@@ -646,14 +658,35 @@ function renderDrives() {
     return driveCardHTML(st);
   }).join('');
   grid.querySelectorAll('.eject-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      fetch('/api/eject', {
+    btn.addEventListener('click', async () => {
+      const d = btn.dataset.device;
+      const response = await fetch('/api/eject', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device: btn.dataset.device }),
-      }).catch(() => {});
+        body: JSON.stringify({ device: d }),
+      }).catch(() => null);
+      if (response && !response.ok) {
+        const data = await response.json().catch(() => ({}));
+        alert(data.error || 'Eject failed.');
+      }
     });
   });
+  grid.querySelectorAll('.cancel-rip-btn').forEach(btn => btn.addEventListener('click', async () => {
+    const d = btn.dataset.device;
+    if (!confirm(`Cancel the active rip on ${d}? Any work in progress may be lost.`)) return;
+    const response = await fetch('/api/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: d }) }).catch(() => null);
+    if (!response || !response.ok) {
+      const data = response ? await response.json().catch(() => ({})) : {};
+      alert(data.error || 'Could not cancel the rip.');
+    }
+  }));
+  grid.querySelectorAll('.auto-eject-toggle').forEach(input => input.addEventListener('change', async () => {
+    const d = input.dataset.device;
+    if (input.checked) autoEjectDevices.add(d); else autoEjectDevices.delete(d);
+    localStorage.setItem('simplerip-auto-eject', JSON.stringify([...autoEjectDevices]));
+    const response = await fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: d, enabled: input.checked }) }).catch(() => null);
+    if (!response || !response.ok) alert('Could not save the auto-eject setting on the server.');
+  }));
   grid.querySelectorAll('.card-edit-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const d = btn.dataset.device;
@@ -683,6 +716,10 @@ function renderDrives() {
   });
 }
 
+function isDriveActive(st) {
+  return !!st.stage && !['idle', 'done', 'error', 'cancelled'].includes(st.stage);
+}
+
 function driveIdleState(message) {
   const m = message || '';
   if (/not responding/i.test(m)) return { icon: '⚠️', cls: 'drive-idle-warn', text: m };
@@ -709,7 +746,7 @@ function driveCardHTML(st) {
     </div>`;
 
   if (isIdle) {
-    return `<div class="drive-card">${header}${(() => { const d = driveIdleState(message); return `<div class="drive-idle ${d.cls}">${d.icon ? `<span class="drive-idle-icon">${d.icon}</span> ` : ""}${esc(d.text)}</div>`; })()}</div>`;
+    return `<div class="drive-card">${header}${(() => { const d = driveIdleState(message); return `<div class="drive-idle ${d.cls}">${d.icon ? `<span class="drive-idle-icon">${d.icon}</span> ` : ""}${esc(d.text)}</div>`; })()}${driveActionsHTML(device, false)}</div>`;
   }
 
   const titleLine  = title   ? `<div class="drive-title">${esc(title)}</div>` : '';
@@ -748,9 +785,9 @@ function driveCardHTML(st) {
   // only rip/deliver get a progress bar under the stepper — matches the
   // existing pct/indeterminate values, just moved out of the per-row layout
   const activeStageHasBar = curIdx < STAGES.length && !INDETERMINATE_STAGES.has(canon) && canon !== 'idle';
-  const pct = activeStageHasBar ? (percent || 0) : 0;
+  const pct = activeStageHasBar ? displayPercent(st) : 0;
   const progressHTML = activeStageHasBar
-    ? `<div class="stage-progress prog-wrap"><div class="prog-fill" style="width:${pct}%"></div></div>`
+    ? `<div class="stage-progress prog-wrap"><div class="prog-fill" data-progress-device="${escAttr(device)}" style="width:${pct}%"></div></div>`
     : '';
   const etaText = canon === 'rip' ? fmtETA(st.eta_seconds) : '';
   const etaHTML = etaText
@@ -787,9 +824,35 @@ function driveCardHTML(st) {
       ${etaHTML}
       ${canEdit && !showResolve ? `<button class="btn card-edit-btn" data-device="${escAttr(device)}">✎ Edit title</button>` : ''}
       ${resolvePanelHTML}
-      <div class="eject-spacer"></div>
-      <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
+      ${driveActionsHTML(device, isDriveActive(st))}
     </div>`;
+}
+
+// Estimate only a short distance beyond the latest server value. The ETA
+// controls the rate; every WebSocket event resets the estimate to the backend
+// value, so corrections are smoothly reconciled by the bar's CSS transition.
+function displayPercent(st) {
+  const base = Number(st.percent) || 0;
+  if (canonStage(st.stage) !== 'rip' || !st.progressAt || !st.eta_seconds || base >= 99) return base;
+  const elapsedSec = Math.max(0, (Date.now() - st.progressAt) / 1000);
+  const remainingPct = Math.max(1, 100 - base);
+  const secondsPerPoint = Math.max(1, st.eta_seconds / remainingPct);
+  return Math.min(99, base + Math.min(1.5, elapsedSec / secondsPerPoint));
+}
+
+// Keep the display moving between backend ticks without re-rendering cards or
+// disturbing an open input. This is display-only; backend progress remains the
+// source of truth for stage changes and completion.
+setInterval(() => {
+  document.querySelectorAll('.prog-fill[data-progress-device]').forEach(fill => {
+    const st = driveStates[fill.dataset.progressDevice];
+    if (st) fill.style.width = `${displayPercent(st)}%`;
+  });
+}, 250);
+
+function driveActionsHTML(device, active) {
+  const checked = autoEjectDevices.has(device) ? 'checked' : '';
+  return `<div class="drive-actions">${active ? `<button class="btn cancel-rip-btn" data-device="${escAttr(device)}">Cancel rip</button>` : ''}<label class="auto-eject-label"><input class="auto-eject-toggle" type="checkbox" data-device="${escAttr(device)}" ${checked}> Auto eject when complete</label><button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button></div>`;
 }
 
 async function doCardSearch(device) {
@@ -865,7 +928,10 @@ async function loadDevices() {
     const r = await fetch('/api/devices');
     if (!r.ok) return;
     const devices = await r.json() || [];
-    devices.forEach(ensureDevice);
+    devices.forEach(device => {
+      ensureDevice(device);
+      fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device, enabled: autoEjectDevices.has(device) }) }).catch(() => {});
+    });
   } catch (_) {}
 }
 
@@ -879,7 +945,7 @@ function renderJobs() {
   }
   el.innerHTML = historical.map(j => {
     const title = j.Title || j.DiscLabel || '—';
-    const year  = j.Year ? ` (${j.Year})` : '';
+    const year  = j.Year && !title.includes(`(${j.Year})`) ? ` (${j.Year})` : '';
     const sel   = j.ID === selectedJobId ? ' selected' : '';
 
     return `
@@ -1129,7 +1195,6 @@ function connectWS() {
 loadDevices();
 loadJobs();
 connectWS();
-setInterval(loadJobs, 30_000);
 </script>
 </body>
 </html>

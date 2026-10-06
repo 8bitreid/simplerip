@@ -48,6 +48,7 @@ type Server struct {
 	devices    []string
 	mu         sync.RWMutex
 	curStates  map[string]service.ProgressEvent // device -> latest event
+	autoEject  map[string]bool
 	ctx        context.Context
 	cancel     context.CancelFunc
 	shutdownWg sync.WaitGroup
@@ -65,6 +66,7 @@ func New(svc *service.RipService, st *store.Store, devices []string) *Server {
 		ctx:       ctx,
 		cancel:    cancel,
 		curStates: make(map[string]service.ProgressEvent),
+		autoEject: make(map[string]bool),
 	}
 	// Seed each configured device with an idle state so a fresh client renders
 	// the drive cards immediately, before any progress event arrives.
@@ -100,6 +102,8 @@ func (s *Server) registerRoutes() {
 	s.e.GET("/api/devices", s.handleDevices)
 	s.e.POST("/api/eject", s.handleEject)
 	s.e.POST("/api/eject/:device", s.handleEject)
+	s.e.POST("/api/cancel", s.handleCancelRip)
+	s.e.POST("/api/auto-eject", s.handleAutoEject)
 	s.e.GET("/api/jobs", s.handleListJobs)
 	s.e.GET("/api/jobs/:id", s.handleGetJob)
 	s.e.DELETE("/api/jobs/:id", s.handleDeleteJob)
@@ -172,6 +176,12 @@ func (s *Server) handleEject(c echo.Context) error {
 	if !allowed {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
 	}
+	// The service tracks active pipelines by device. Progress events can lag or
+	// remain stale (for example, after a worker exits), so they must not block
+	// ejecting an otherwise idle drive.
+	if s.svc.HasActiveRip(device) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "a rip is in process; ejecting now would cancel it. Cancel the rip first or wait for it to finish."})
+	}
 
 	if err := ejectDevice(device); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("eject failed: %v", err)})
@@ -180,6 +190,48 @@ func (s *Server) handleEject(c echo.Context) error {
 	// Immediately show the drive as idle in UI while poller confirms state.
 	s.svc.MarkDeviceIdle(device)
 	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": device})
+}
+
+func (s *Server) handleCancelRip(c echo.Context) error {
+	var body struct {
+		Device string `json:"device"`
+	}
+	if err := c.Bind(&body); err != nil || strings.TrimSpace(body.Device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+	if !s.isConfiguredDevice(body.Device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	if !s.svc.CancelRip(body.Device) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "no active rip found for this drive"})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device})
+}
+
+func (s *Server) handleAutoEject(c echo.Context) error {
+	var body struct {
+		Device  string `json:"device"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := c.Bind(&body); err != nil || strings.TrimSpace(body.Device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+	if !s.isConfiguredDevice(body.Device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	s.mu.Lock()
+	s.autoEject[body.Device] = body.Enabled
+	s.mu.Unlock()
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device, "enabled": body.Enabled})
+}
+
+func (s *Server) isConfiguredDevice(device string) bool {
+	for _, dev := range s.devices {
+		if dev == device {
+			return true
+		}
+	}
+	return false
 }
 
 // handleListJobs returns the 100 most recent jobs.
@@ -490,7 +542,13 @@ func (s *Server) trackProgress() {
 			}
 			s.mu.Lock()
 			s.curStates[event.Device] = event
+			auto := event.Stage == "done" && s.autoEject[event.Device]
 			s.mu.Unlock()
+			if auto {
+				if err := ejectDevice(event.Device); err == nil {
+					s.svc.MarkDeviceIdle(event.Device)
+				}
+			}
 		}
 	}
 }

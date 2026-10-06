@@ -189,7 +189,8 @@ type RipService struct {
 	store    *store.Store
 
 	// ripMu guards the live per-device rip state below.
-	ripMu sync.Mutex
+	ripMu         sync.Mutex
+	activeCancels map[string]context.CancelFunc
 	// ripTitles maps a device to the current display/folder title of its
 	// in-flight rip. A live re-identify updates this so both progress updates
 	// and the final delivered filename pick up the corrected name.
@@ -458,6 +459,19 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 // the API key is not configured or lookup fails, the raw DiscName is used instead.
 // Returns an error if scan/rip/delivery steps fail. Notification is best-effort.
 func (s *RipService) RipDisc(ctx context.Context, device string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	s.ripMu.Lock()
+	if s.activeCancels == nil {
+		s.activeCancels = make(map[string]context.CancelFunc)
+	}
+	s.activeCancels[device] = cancel
+	s.ripMu.Unlock()
+	defer func() {
+		cancel()
+		s.ripMu.Lock()
+		delete(s.activeCancels, device)
+		s.ripMu.Unlock()
+	}()
 	run := &ripRun{}
 	defer s.endRipTitle(device)
 
@@ -469,7 +483,36 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 		}
 		run.restarted = true
 	}
-	// A cancelled context means shutdown or a user abort, not a failure.
+	// Cancellation is terminal, but remains distinct from a rip failure.
+	if errors.Is(err, context.Canceled) {
+		const message = "Rip canceled"
+		slog.Info("rip cancelled", "device", device, "disc", run.disc, "job", run.jobID)
+		if s.store != nil {
+			persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if run.jobID == "" {
+				job, createErr := s.store.CreateJob(persistCtx, device, run.disc, "")
+				if createErr != nil {
+					slog.Error("failed to create canceled rip job", "device", device, "error", createErr)
+				} else {
+					run.jobID = job.ID
+				}
+			}
+			if run.jobID != "" {
+				if persistErr := s.store.AddEvent(persistCtx, run.jobID, "cancelled", message, nil); persistErr != nil {
+					slog.Error("failed to record canceled rip event", "device", device, "job", run.jobID, "error", persistErr)
+				}
+				if persistErr := s.store.UpdateStatus(persistCtx, run.jobID, "cancelled"); persistErr != nil {
+					slog.Error("failed to mark rip as cancelled", "device", device, "job", run.jobID, "error", persistErr)
+				}
+			}
+			persistCancel()
+		}
+		s.emit(ProgressEvent{Device: device, Stage: "cancelled", Message: message})
+	} else if err != nil {
+		slog.Error("rip failed", "device", device, "disc", run.disc, "job", run.jobID, "error", err)
+	} else {
+		slog.Info("rip completed", "device", device, "disc", run.disc, "job", run.jobID, "title", run.title)
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.notifier.Notify(notify.Message{
 			Event:   notify.EventFailed,
@@ -483,11 +526,32 @@ func (s *RipService) RipDisc(ctx context.Context, device string) error {
 	return err
 }
 
+// CancelRip cancels the active pipeline on device, including scanning and
+// delivery. It returns false when that device has no active pipeline.
+func (s *RipService) CancelRip(device string) bool {
+	s.ripMu.Lock()
+	cancel := s.activeCancels[device]
+	s.ripMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+// HasActiveRip reports whether a pipeline is currently running on device.
+func (s *RipService) HasActiveRip(device string) bool {
+	s.ripMu.Lock()
+	defer s.ripMu.Unlock()
+	return s.activeCancels[device] != nil
+}
+
 func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) error {
 	// job tracks the DB record; zero value is safe when s.store == nil.
 	var job store.Job
 
 	// Step 1: Scan disc.
+	slog.Info("rip phase started", "phase", "scanning", "device", device, "restart", run.restarted)
 	s.emit(ProgressEvent{
 		Device:  device,
 		Stage:   "scanning",
@@ -501,6 +565,10 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		var err error
 		scanned, err = ripper.ScanInfo(ctx, "makemkvcon", device, s.cfg.MakeMKV.Key)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				return fmt.Errorf("scan device %q: %w", device, context.Canceled)
+			}
+			slog.Error("rip phase failed", "phase", "scanning", "device", device, "error", err)
 			scanDiag := diagnose.Scan(err)
 			friendlyMsg := scanDiag.Summary
 			s.emit(ProgressEvent{
@@ -511,11 +579,24 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				Message: friendlyMsg,
 			})
 			if s.store != nil {
-				if failedJob, createErr := s.store.CreateJob(ctx, device, "", ""); createErr == nil {
+				persistCtx := ctx
+				persistCancel := func() {}
+				if ctx.Err() != nil {
+					persistCtx, persistCancel = context.WithTimeout(context.Background(), 5*time.Second)
+				}
+				defer persistCancel()
+				if failedJob, createErr := s.store.CreateJob(persistCtx, device, "", ""); createErr == nil {
+					run.jobID = failedJob.ID
 					data := scanDiag.Data()
 					data["device"] = device
-					_ = s.store.AddEvent(ctx, failedJob.ID, "error", friendlyMsg, data)
-					_ = s.store.UpdateStatus(ctx, failedJob.ID, "error")
+					if eventErr := s.store.AddEvent(persistCtx, failedJob.ID, "error", friendlyMsg, data); eventErr != nil {
+						slog.Error("failed to record scan failure", "device", device, "job", failedJob.ID, "error", eventErr)
+					}
+					if statusErr := s.store.UpdateStatus(persistCtx, failedJob.ID, "error"); statusErr != nil {
+						slog.Error("failed to mark scan failure", "device", device, "job", failedJob.ID, "error", statusErr)
+					}
+				} else {
+					slog.Error("failed to create job for scan failure", "device", device, "error", createErr)
 				}
 			}
 			return fmt.Errorf("scan device %q: %w", device, err)
@@ -524,6 +605,8 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	run.scanned = scanned
 
 	discTypeStr := scanned.Type.String()
+	slog.Info("rip phase completed", "phase", "scanning", "device", device,
+		"disc", scanned.DiscName, "disc_type", discTypeStr, "title_count", len(scanned.Titles))
 
 	// Broadcast disc type to the drive card immediately after scan completes.
 	s.emit(ProgressEvent{
@@ -560,6 +643,8 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	mediaTitle := scanned.DiscName
 	tmdbConfirmedMovie := false
 	runtimeMin := 0
+	slog.Info("rip phase started", "phase", "identifying", "device", device,
+		"disc", scanned.DiscName, "tmdb_enabled", s.cfg.Metadata.TMDBApiKey != "")
 	if run.restarted {
 		// The user chose the movie by hand; don't second-guess it.
 		mediaTitle = s.currentTitle(device, mediaTitle)
@@ -687,6 +772,15 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			})
 		_ = s.store.UpdateStatusPattern(ctx, job.ID, "scanning", pattern)
 	}
+	mainTitleIndices := make([]int, 0, len(result.MainTitles))
+	for _, title := range result.MainTitles {
+		mainTitleIndices = append(mainTitleIndices, title.Index)
+	}
+	slog.Info("rip phase completed", "phase", "identifying", "device", device,
+		"disc", scanned.DiscName, "pattern", result.Pattern.String(),
+		"title_count", len(scanned.Titles), "classified_main_title_indices", mainTitleIndices,
+		"extra_title_count", len(result.ExtraTitles), "junk_title_count", len(result.JunkTitles),
+		"missing_metadata", result.MissingMetadata, "multi_angle", result.MultiAngle)
 
 	// Adopt the identified title unless the user already corrected it by hand
 	// while identification was running.
@@ -734,6 +828,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 
 			title, year, waitErr := s.awaitManualReidentify(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
 			if waitErr != nil {
+				if errors.Is(waitErr, context.Canceled) {
+					return waitErr
+				}
 				s.emit(ProgressEvent{
 					Device:  device,
 					Stage:   "error",
@@ -795,6 +892,8 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	// the one with the richest audio wins. Only applies before ripping starts;
 	// an edit during a rip is handled by RestartIfNeeded.
 	if canReselect(result) {
+		slog.Info("rip phase started", "phase", "scoring", "device", device,
+			"disc", scanned.DiscName, "candidate_title_count", len(result.AllTitles))
 		var ref time.Duration
 		switch rt := s.ripRuntime(device); {
 		case rt > 0:
@@ -816,6 +915,20 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 					map[string]any{"selected_index": t.Index, "previous_index": prev, "reference_minutes": int(ref.Minutes()), "score": ripper.ScoreTitle(t).Total})
 			}
 		}
+		if len(result.MainTitles) == 1 {
+			score := ripper.ScoreTitle(result.MainTitles[0])
+			slog.Info("rip phase completed", "phase", "scoring", "device", device,
+				"disc", scanned.DiscName, "selected_title_index", result.MainTitles[0].Index,
+				"score", score.Total, "score_label", score.Label(), "reference_runtime", ref.String())
+		} else {
+			slog.Info("rip phase completed", "phase", "scoring", "device", device,
+				"disc", scanned.DiscName, "selected_title_count", len(result.MainTitles),
+				"reference_runtime", ref.String())
+		}
+	} else {
+		slog.Info("rip phase skipped", "phase", "scoring", "device", device,
+			"disc", scanned.DiscName, "pattern", result.Pattern.String(),
+			"reason", "title scoring is only used to reselect a single movie cut")
 	}
 
 	if canReselect(result) && len(result.MainTitles) == 1 {
@@ -875,6 +988,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	etaTr := &etaTracker{}
 	for idx, title := range result.MainTitles {
 		cur := s.currentTitle(device, mediaTitle)
+		slog.Info("rip phase started", "phase", "analyzing", "device", device,
+			"disc", scanned.DiscName, "title_index", title.Index, "title_number", idx+1,
+			"title_count", totalTitles, "duration", title.Duration.String())
 		s.emit(ProgressEvent{
 			Device:  device,
 			Stage:   "analyzing",
@@ -900,6 +1016,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		// progress (0-100) to overall progress across all titles.
 		titleIdx := idx // capture for closure
 		lastReportedPct := -10
+		saveStarted := false
 		progressCb := func(_ int, percent int, phase ripper.RipPhase) {
 			// Read the live title each tick so a mid-rip re-identify is reflected.
 			cur := s.currentTitle(device, mediaTitle)
@@ -912,6 +1029,15 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 					Message: fmt.Sprintf("Analyzing disc for %s (%d%%)", cur, percent),
 				})
 				return
+			}
+			if !saveStarted {
+				saveStarted = true
+				slog.Info("rip phase completed", "phase", "analyzing", "device", device,
+					"disc", scanned.DiscName, "title_index", title.Index,
+					"title_number", idx+1, "title_count", totalTitles)
+				slog.Info("rip phase started", "phase", "ripping", "device", device,
+					"disc", scanned.DiscName, "title_index", title.Index,
+					"title_number", idx+1, "title_count", totalTitles)
 			}
 			// Never show 100% until the file is confirmed saved; makemkvcon also
 			// reports 100% when it gives up on an unreadable title.
@@ -956,6 +1082,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				progressCb,
 			)
 			if err == nil {
+				slog.Info("rip phase completed", "phase", "ripping", "device", device,
+					"disc", scanned.DiscName, "title_index", title.Index,
+					"title_number", idx+1, "title_count", totalTitles, "file_count", len(files))
 				break
 			}
 
@@ -984,6 +1113,16 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			return errRestart
 		}
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return fmt.Errorf("rip title %d: %w", title.Index, err)
+			}
+			failedPhase := "analyzing"
+			if saveStarted {
+				failedPhase = "ripping"
+			}
+			slog.Error("rip phase failed", "phase", failedPhase, "device", device,
+				"disc", scanned.DiscName, "title_index", title.Index,
+				"title_number", idx+1, "title_count", totalTitles, "error", err)
 			diag := diagnose.Rip(err)
 			s.emit(ProgressEvent{
 				Device:  device,
@@ -1049,6 +1188,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			return errRestart
 		}
 		if waitErr != nil {
+			if errors.Is(waitErr, context.Canceled) {
+				return waitErr
+			}
 			msg := "No title confirmation received; the ripped file was left in staging: " + ripOutputDir
 			s.emit(ProgressEvent{Device: device, Stage: "error", Title: s.currentTitle(device, mediaTitle), Message: msg})
 			_ = s.store.AddEvent(ctx, job.ID, "error", msg, map[string]any{"error": waitErr.Error()})
@@ -1104,6 +1246,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		deliverTitle := s.freezeTitle(device, mediaTitle)
 		run.title = deliverTitle
 		s.setAlternatesTitle(job.ID, deliverTitle)
+		slog.Info("rip phase started", "phase", "delivering", "device", device,
+			"disc", scanned.DiscName, "title", deliverTitle, "file_count", len(rippedFiles),
+			"destination", destDir)
 		if s.store != nil {
 			_ = s.store.UpdateStatus(ctx, job.ID, "delivering")
 		}
@@ -1135,6 +1280,11 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			scanned.DiscName,
 		)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return fmt.Errorf("deliver to NAS: %w", err)
+			}
+			slog.Error("rip phase failed", "phase", "delivering", "device", device,
+				"disc", scanned.DiscName, "title", deliverTitle, "destination", destDir, "error", err)
 			s.emit(ProgressEvent{
 				Device:  device,
 				Stage:   "error",
@@ -1152,6 +1302,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		// Update rippedFiles to point to destination paths for notification.
 		rippedFiles = deliverResult.Files
 		delivered = true
+		slog.Info("rip phase completed", "phase", "delivering", "device", device,
+			"disc", scanned.DiscName, "title", deliverTitle, "file_count", len(deliverResult.Files),
+			"destination", deliverResult.DestDir)
 
 		if s.store != nil {
 			var deliveredGB float64
@@ -1184,6 +1337,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		} else {
 			slog.Warn("skipping cleanup due to invalid path", "path", cleanedRipDir)
 		}
+	} else {
+		slog.Info("rip phase skipped", "phase", "delivering", "device", device,
+			"disc", scanned.DiscName, "reason", "no destination configured")
 	}
 
 	// Step 7: Send completion notification.
@@ -1261,7 +1417,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			Message: run.title + " completed (notification failed)",
 		})
 		if s.store != nil {
-			_ = s.store.UpdateStatus(ctx, job.ID, "done")
+			_ = s.store.UpdateJob(ctx, job.ID, run.title, job.Year, "done", job.Pattern)
 		}
 		return nil
 	}
@@ -1274,7 +1430,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		Message: run.title + " completed successfully",
 	})
 	if s.store != nil {
-		_ = s.store.UpdateStatus(ctx, job.ID, "done")
+		_ = s.store.UpdateJob(ctx, job.ID, run.title, job.Year, "done", job.Pattern)
 	}
 
 	return nil

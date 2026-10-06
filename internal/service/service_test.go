@@ -526,6 +526,75 @@ func TestRipDiscWithFakeMakeMKV(t *testing.T) {
 	}
 }
 
+func TestCancelRipEmitsCancelledDriveState(t *testing.T) {
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "makemkvcon")
+	content := `#!/bin/sh
+found_info=0
+for arg in "$@"; do
+	if [ "$arg" = "info" ]; then found_info=1; break; fi
+done
+if [ "$found_info" = "1" ]; then
+	cat <<'EOF'
+CINFO:30,0,"TEST_DISC"
+TCOUNT:1
+TINFO:0,2,0,"Main Feature"
+TINFO:0,8,0,"10"
+TINFO:0,9,0,"1:45:00"
+SINFO:0,0,1,6202,"Audio"
+EOF
+	exit 0
+fi
+exec sleep 60
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake makemkvcon: %v", err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	svc := New(cfg, nil)
+	subID, events := svc.EventBus().Subscribe()
+	defer svc.EventBus().Unsubscribe(subID)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.RipDisc(context.Background(), "/dev/sr0")
+	}()
+
+	deadline := time.After(5 * time.Second)
+	cancelRequested := false
+	for {
+		select {
+		case ev := <-events:
+			if ev.Stage == "analyzing" && !cancelRequested {
+				cancelRequested = true
+				if !svc.CancelRip("/dev/sr0") {
+					t.Fatal("CancelRip returned false for active rip")
+				}
+			}
+			if ev.Stage == "cancelled" {
+				if ev.Message != "Rip canceled" {
+					t.Fatalf("cancelled event message = %q, want %q", ev.Message, "Rip canceled")
+				}
+				if !cancelRequested {
+					t.Fatal("rip failed before cancellation was requested")
+				}
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("RipDisc() error = %v, want context.Canceled", err)
+				}
+				return
+			}
+		case err := <-done:
+			t.Fatalf("RipDisc() returned before failure event: %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for canceled rip failure event")
+		}
+	}
+}
+
 func TestRipDiscNoMainTitles(t *testing.T) {
 	installFakeMakeMKVCon(t)
 	t.Setenv("HOME", t.TempDir())
