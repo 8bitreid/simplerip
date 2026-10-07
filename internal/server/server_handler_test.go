@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +203,20 @@ func TestParseMakeMKVVersionFromStderr(t *testing.T) {
 	output := []byte("MakeMKV v2.0.0 linux(x64-release) started\nUse: makemkvcon [switches] Command [Parameters]\n")
 	if got, want := parseMakeMKVVersion(output), "MakeMKV v2.0.0"; got != want {
 		t.Fatalf("parseMakeMKVVersion() = %q, want %q", got, want)
+	}
+}
+
+func TestProbeMakeMKVVersionAcceptsNonZeroExitWithStderrBanner(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "makemkvcon")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' 'MakeMKV v2.1.0 linux(x64-release) started' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	got := probeMakeMKVVersion(context.Background())
+	if got.Version == nil || *got.Version != "MakeMKV v2.1.0" || got.Error != "" {
+		t.Fatalf("probeMakeMKVVersion() = %+v, want parsed banner despite non-zero exit", got)
 	}
 }
 

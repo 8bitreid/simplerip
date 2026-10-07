@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -100,10 +101,28 @@ func probeMakeMKVVersion(ctx context.Context) toolVersion {
 	if version := parseMakeMKVVersion(output); version != "" {
 		return toolVersion{Version: &version}
 	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return toolVersion{Error: fmt.Sprintf("makemkvcon: %v", err)}
+	}
+	if version, packageErr := probeMakeMKVPackageVersion(ctx); packageErr == nil {
+		return toolVersion{Version: &version}
+	}
 	if err != nil {
 		return toolVersion{Error: fmt.Sprintf("makemkvcon: %v", err)}
 	}
 	return toolVersion{Error: "makemkvcon returned no version information"}
+}
+
+func probeMakeMKVPackageVersion(ctx context.Context) (string, error) {
+	output, err := exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${Version}", "makemkv-bin").Output()
+	if err != nil {
+		return "", fmt.Errorf("querying makemkv-bin package version: %w", err)
+	}
+	version := strings.SplitN(strings.TrimSpace(string(output)), "-", 2)[0]
+	if version == "" {
+		return "", fmt.Errorf("makemkv-bin package returned no version")
+	}
+	return "MakeMKV v" + version, nil
 }
 
 func parseMakeMKVVersion(output []byte) string {
