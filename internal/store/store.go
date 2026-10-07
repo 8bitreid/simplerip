@@ -161,6 +161,24 @@ func (s *Store) UpdateJob(ctx context.Context, id, title string, year int, statu
 	return nil
 }
 
+// UpdateAutoIdentity updates a job's display identity only while no manual
+// correction event exists for it.
+func (s *Store) UpdateAutoIdentity(ctx context.Context, id, title string, year int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE jobs
+		 SET title=$2, year=$3, updated_at=now()
+		 WHERE id=$1 AND NOT EXISTS (
+		   SELECT 1 FROM job_events
+		   WHERE job_id=$1 AND stage='identify' AND data->>'correction'='true'
+		 )`,
+		id, title, year,
+	)
+	if err != nil {
+		return fmt.Errorf("updating automatic identity for job %s: %w", id, err)
+	}
+	return nil
+}
+
 // UpdateStatusPattern updates status and detection pattern, leaving the
 // identified title and year untouched.
 func (s *Store) UpdateStatusPattern(ctx context.Context, id, status, pattern string) error {

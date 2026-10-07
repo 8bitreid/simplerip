@@ -335,15 +335,7 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 					go func(dev string) {
 						defer busyDevices.MarkIdle(dev)
 
-						// Apply timeout from config to rip job
-						timeout := time.Duration(cfg.MakeMKV.TimeoutMinutes) * time.Minute
-						if timeout == 0 {
-							timeout = 120 * time.Minute // Default 2 hours
-						}
-						ripCtx, cancel := context.WithTimeout(ctx, timeout)
-						defer cancel()
-
-						if err := svc.RipDisc(ripCtx, dev); err != nil {
+						if err := svc.RipDisc(ctx, dev); err != nil {
 							slog.Error("rip failed", "device", dev, "error", err)
 						}
 					}(ev.Device)

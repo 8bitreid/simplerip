@@ -74,6 +74,7 @@ type MakeMKVConfig struct {
 
 type MetadataConfig struct {
 	TMDBApiKey        string `yaml:"tmdb_api_key"`
+	TMDBAccessToken   string `yaml:"tmdb_access_token"`
 	OMDbApiKey        string `yaml:"omdb_api_key"`
 	PreferredLanguage string `yaml:"preferred_language"`
 }
@@ -116,6 +117,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SIMPLERIP_UI_URL"); v != "" {
 		cfg.Notification.UIURL = v
+	}
+	if v := os.Getenv("TMDB_ACCESS_TOKEN"); v != "" {
+		cfg.Metadata.TMDBAccessToken = v
 	}
 }
 

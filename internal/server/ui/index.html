@@ -427,6 +427,12 @@ header h1 {
   display: none;
 }
 .tl-data.open { display: block; }
+.tl-tv-summary {
+  grid-column: 1 / -1;
+  margin: 4px 0 2px 198px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
 
 /* ── Re-identify ── */
 
@@ -570,7 +576,9 @@ function isManualSearchWait(stage, message) {
   const msg = String(message || '').toLowerCase();
   return canon === 'identify' && (
     msg.includes('waiting for manual movie search') ||
-    msg.includes('no main title detected')
+    msg.includes('waiting for manual media search') ||
+    msg.includes('no main title detected') ||
+    msg.includes('tv disc detected')
   );
 }
 
@@ -629,8 +637,37 @@ function renderResolveResults(device, results) {
         <div class="sr-meta">${r.year || '—'}${r.runtime ? ' · ' + r.runtime + ' min' : ''} · ${esc(r.media_type || 'movie')}</div>
       </div>
       <button class="sr-apply card-resolve-apply" data-device="${escAttr(device)}"
-        data-id="${r.id}" data-title="${escAttr(r.title)}" data-year="${r.year || 0}">Select</button>
+        data-id="${r.id}" data-title="${escAttr(r.title)}" data-year="${r.year || 0}"
+        data-type="${escAttr(r.media_type || 'movie')}">Select</button>
     </div>`).join('');
+}
+
+function selectionPayload(button) {
+  const payload = {
+    tmdb_id: parseInt(button.dataset.id, 10),
+    title: button.dataset.title,
+    year: parseInt(button.dataset.year, 10),
+    media_type: button.dataset.type || 'movie',
+  };
+  if (payload.media_type !== 'tv') return payload;
+
+  const seasonText = prompt(`What season is this disc of "${payload.title}"?`);
+  if (seasonText === null) return null;
+  const season = Number(seasonText.trim());
+  if (!Number.isInteger(season) || season < 1) {
+    alert('Enter a season number greater than zero.');
+    return null;
+  }
+  const episodeText = prompt('Starting episode number on this disc (optional). Leave blank to continue after the highest episode already saved for this season.');
+  if (episodeText === null) return null;
+  const episodeStart = episodeText.trim() === '' ? 0 : Number(episodeText.trim());
+  if (!Number.isInteger(episodeStart) || episodeStart < 1) {
+    alert('Enter a starting episode number greater than zero, or leave it blank.');
+    return null;
+  }
+  payload.season = season;
+  payload.episode_start = episodeStart;
+  return payload;
 }
 
 // ── Drive cards ──────────────────────────────────────────────────────────
@@ -730,11 +767,10 @@ function renderDrives() {
     input.addEventListener('keydown', e => { if (e.key === 'Enter') doCardSearch(input.dataset.device); });
   });
   grid.querySelectorAll('.card-resolve-apply').forEach(btn => {
-    btn.addEventListener('click', () => applyCardReidentify(btn.dataset.device, {
-      tmdb_id: parseInt(btn.dataset.id, 10),
-      title:   btn.dataset.title,
-      year:    parseInt(btn.dataset.year, 10),
-    }));
+    btn.addEventListener('click', () => {
+      const payload = selectionPayload(btn);
+      if (payload) applyCardReidentify(btn.dataset.device, payload);
+    });
   });
 }
 
@@ -1129,6 +1165,7 @@ function renderDetail(job, events) {
             <span class="tl-time">${esc(fmtTime(e.CreatedAt))}</span>
             ${badgeHTML(e.Stage)}
             <span class="tl-msg">${esc(e.Message)}</span>
+            ${tvIdentificationSummary(rawData)}
             ${hasData ? `<div class="tl-data" id="tdata-${i}">${esc(fmtJSON(rawData))}</div>` : ''}
           </div>`;
       }).join('');
@@ -1207,14 +1244,14 @@ function renderDetail(job, events) {
           <button class="sr-apply"
             data-id="${r.id}"
             data-title="${escAttr(r.title)}"
-            data-year="${r.year || 0}">Select</button>
+            data-year="${r.year || 0}"
+            data-type="${escAttr(r.media_type || 'movie')}">Select</button>
         </div>`).join('');
       results.querySelectorAll('.sr-apply').forEach(applyBtn => {
-        applyBtn.addEventListener('click', () => applyReidentify(job.ID, {
-          tmdb_id: parseInt(applyBtn.dataset.id, 10),
-          title:   applyBtn.dataset.title,
-          year:    parseInt(applyBtn.dataset.year, 10),
-        }));
+        applyBtn.addEventListener('click', () => {
+          const payload = selectionPayload(applyBtn);
+          if (payload) applyReidentify(job.ID, payload);
+        });
       });
     } catch (_) {
       results.innerHTML = '';

@@ -18,6 +18,7 @@ services:
     user: root
     environment:
       - MAKEMKV_KEY=${MAKEMKV_KEY:-}
+      - TMDB_ACCESS_TOKEN=${TMDB_ACCESS_TOKEN:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - SIMPLERIP_UI_URL=${SIMPLERIP_UI_URL:-}
     depends_on:

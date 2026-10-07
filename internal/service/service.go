@@ -41,6 +41,14 @@ type ProgressEvent struct {
 	ETASec      int    `json:"eta_seconds,omitempty"`  // estimated seconds remaining while ripping; 0 = unknown
 }
 
+type ManualSelection struct {
+	Title        string
+	Year         int
+	MediaType    string
+	Season       int
+	EpisodeStart int
+}
+
 func pickLongest(titles []disc.MKVTitle) (disc.MKVTitle, bool) {
 	if len(titles) == 0 {
 		return disc.MKVTitle{}, false
@@ -55,6 +63,11 @@ func pickLongest(titles []disc.MKVTitle) (disc.MKVTitle, bool) {
 }
 
 func findManualCorrection(events []store.JobEvent, since time.Time) (string, int, bool) {
+	selection, ok := findManualSelection(events, since)
+	return selection.Title, selection.Year, ok
+}
+
+func findManualSelection(events []store.JobEvent, since time.Time) (ManualSelection, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]
 		if ev.CreatedAt.Before(since) {
@@ -75,24 +88,51 @@ func findManualCorrection(events []store.JobEvent, since time.Time) (string, int
 			continue
 		}
 		title, _ := payload["title"].(string)
-		year := 0
 		switch v := payload["year"].(type) {
 		case float64:
-			year = int(v)
+			selection := ManualSelection{Title: title, Year: int(v)}
+			if selection = manualSelectionFromPayload(payload, selection); strings.TrimSpace(selection.Title) != "" {
+				return selection, true
+			}
 		case int:
-			year = v
+			selection := manualSelectionFromPayload(payload, ManualSelection{Title: title, Year: v})
+			if strings.TrimSpace(selection.Title) != "" {
+				return selection, true
+			}
+		default:
+			selection := manualSelectionFromPayload(payload, ManualSelection{Title: title})
+			if strings.TrimSpace(selection.Title) != "" {
+				return selection, true
+			}
 		}
-		if strings.TrimSpace(title) == "" {
-			continue
-		}
-		return title, year, true
 	}
-	return "", 0, false
+	return ManualSelection{}, false
 }
 
-func (s *RipService) awaitManualReidentify(ctx context.Context, jobID string, timeoutMin int) (string, int, error) {
+func manualSelectionFromPayload(payload map[string]any, selection ManualSelection) ManualSelection {
+	selection.MediaType, _ = payload["media_type"].(string)
+	selection.Season = intFromPayload(payload["season"])
+	selection.EpisodeStart = intFromPayload(payload["episode_start"])
+	if selection.MediaType == "" {
+		selection.MediaType = "movie"
+	}
+	return selection
+}
+
+func intFromPayload(value any) int {
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return 0
+	}
+}
+
+func (s *RipService) awaitManualSelection(ctx context.Context, jobID string, timeoutMin int) (ManualSelection, error) {
 	if s.store == nil {
-		return "", 0, errors.New("database not configured")
+		return ManualSelection{}, errors.New("database not configured")
 	}
 
 	waitCtx := ctx
@@ -109,24 +149,36 @@ func (s *RipService) awaitManualReidentify(ctx context.Context, jobID string, ti
 	for {
 		job, events, err := s.store.GetJob(waitCtx, jobID)
 		if err == nil {
-			if title, year, ok := findManualCorrection(events, start); ok {
+			if selection, ok := findManualSelection(events, start); ok {
 				if strings.TrimSpace(job.Title) != "" {
-					title = job.Title
-					year = job.Year
+					selection.Title = job.Title
+					selection.Year = job.Year
 				}
-				return title, year, nil
+				return selection, nil
 			}
 		}
 
 		select {
 		case <-waitCtx.Done():
 			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-				return "", 0, fmt.Errorf("manual title search timed out")
+				return ManualSelection{}, fmt.Errorf("manual title search timed out")
 			}
-			return "", 0, waitCtx.Err()
+			return ManualSelection{}, waitCtx.Err()
 		case <-tick.C:
 		}
 	}
+}
+
+func (s *RipService) latestManualSelection(ctx context.Context, jobID string) (ManualSelection, bool, error) {
+	if s.store == nil {
+		return ManualSelection{}, false, nil
+	}
+	_, events, err := s.store.GetJob(ctx, jobID)
+	if err != nil {
+		return ManualSelection{}, false, fmt.Errorf("load manual media selection: %w", err)
+	}
+	selection, ok := findManualSelection(events, time.Time{})
+	return selection, ok, nil
 }
 
 // EventBus is a simple channel-based fan-out for broadcasting progress events.
@@ -218,6 +270,14 @@ var (
 	newTMDBClient = metadata.NewClient
 	newOMDbClient = metadata.NewOMDbClient
 )
+
+func (s *RipService) tmdbConfigured() bool {
+	return s.cfg.Metadata.TMDBApiKey != "" || s.cfg.Metadata.TMDBAccessToken != ""
+}
+
+func (s *RipService) tmdbClient() *metadata.Client {
+	return newTMDBClient(s.cfg.Metadata.TMDBApiKey).WithAccessToken(s.cfg.Metadata.TMDBAccessToken)
+}
 
 // New creates a RipService with the given configuration.
 // st may be nil — all store calls become no-ops, preserving existing behaviour.
@@ -386,7 +446,7 @@ func (s *RipService) ripRuntime(device string) int {
 }
 
 // RuntimeFor looks up the reconciled runtime in minutes for a TMDB movie ID.
-// It returns 0 when unknown (no API key, lookup failure).
+// It returns 0 when unknown (no TMDB credential or lookup failure).
 func (s *RipService) RuntimeFor(ctx context.Context, tmdbID int) int {
 	if tmdbID <= 0 {
 		return 0
@@ -437,7 +497,7 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 	ctx := context.Background()
 
 	// Scan the disc with makemkvcon.
-	scanned, err := ripper.ScanInfo(ctx, "makemkvcon", device, s.cfg.MakeMKV.Key)
+	scanned, err := s.scanInfo(ctx, device)
 	if err != nil {
 		return nil, fmt.Errorf("scan device %q: %w", device, err)
 	}
@@ -445,6 +505,16 @@ func (s *RipService) ScanDisc(device string) (*ripper.ClassificationResult, erro
 	// Classify titles according to detection rules.
 	result := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
 	return &result, nil
+}
+
+func (s *RipService) scanInfo(ctx context.Context, device string) (*disc.ClassifiedDisc, error) {
+	timeoutMinutes := s.cfg.MakeMKV.TimeoutMinutes
+	if timeoutMinutes <= 0 {
+		timeoutMinutes = 120
+	}
+	scanCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMinutes)*time.Minute)
+	defer cancel()
+	return ripper.ScanInfo(scanCtx, "makemkvcon", device, s.cfg.MakeMKV.Key)
 }
 
 // RipDisc executes the full automated pipeline:
@@ -564,7 +634,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	scanned := run.scanned
 	if scanned == nil {
 		var err error
-		scanned, err = ripper.ScanInfo(ctx, "makemkvcon", device, s.cfg.MakeMKV.Key)
+		scanned, err = s.scanInfo(ctx, device)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 				return fmt.Errorf("scan device %q: %w", device, context.Canceled)
@@ -643,15 +713,91 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	// Use the longest title's duration as a proxy for the main feature runtime.
 	mediaTitle := scanned.DiscName
 	tmdbConfirmedMovie := false
+	mediaType := run.mediaType
+	season := run.season
+	episodeStart := run.episodeStart
+	episodeNumbers := run.episodeNumbers
+	autoTVMatch := false
+	tvSuggestion := ""
+	// Do not let an unrelated movie match hide a disc that looks like a TV set.
+	preliminaryDisc := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
 	runtimeMin := 0
+	manualIdentity := false
+	if !run.restarted {
+		selection, ok, selectionErr := s.latestManualSelection(ctx, job.ID)
+		if selectionErr != nil {
+			return selectionErr
+		}
+		if ok {
+			mediaType, season, episodeStart = selection.MediaType, selection.Season, selection.EpisodeStart
+			episodeNumbers = nil
+			job.Title, job.Year = selection.Title, selection.Year
+			mediaTitle = selection.Title
+			if selection.Year > 0 {
+				mediaTitle = fmt.Sprintf("%s (%d)", selection.Title, selection.Year)
+			}
+			manualIdentity = true
+			autoTVMatch = false
+		}
+	}
 	slog.Info("rip phase started", "phase", "identifying", "device", device,
-		"disc", scanned.DiscName, "tmdb_enabled", s.cfg.Metadata.TMDBApiKey != "")
+		"disc", scanned.DiscName, "tmdb_enabled", s.tmdbConfigured())
 	if run.restarted {
 		// The user chose the movie by hand; don't second-guess it.
 		mediaTitle = s.currentTitle(device, mediaTitle)
 		tmdbConfirmedMovie = true
 		runtimeMin = s.ripRuntime(device)
-	} else if s.cfg.Metadata.TMDBApiKey != "" && scanned.DiscName != "" {
+	} else if !manualIdentity && mediaType == "" && preliminaryDisc.Pattern == ripper.DiscPatternTV {
+		lookupCtx, lookupCancel := context.WithTimeout(ctx, 20*time.Second)
+		tv := s.identifyTV(lookupCtx, scanned.DiscName, preliminaryDisc.MainTitles)
+		lookupCancel()
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return context.Canceled
+		}
+		if tv.ShowCertain && tv.Show != nil {
+			autoTVMatch = true
+			mediaType = "tv"
+			mediaTitle = tv.Show.Title
+			if yr, _ := strconv.Atoi(tv.Show.Year); yr > 0 {
+				mediaTitle = fmt.Sprintf("%s (%d)", mediaTitle, yr)
+			}
+			season = tv.Season
+			episodeNumbers = tv.Episodes
+			run.mediaType, run.season = mediaType, season
+			run.episodeStart, run.episodeNumbers = 0, episodeNumbers
+			if s.store != nil {
+				year, _ := strconv.Atoi(tv.Show.Year)
+				job.Title, job.Year = tv.Show.Title, year
+				if err := s.store.UpdateAutoIdentity(ctx, job.ID, tv.Show.Title, year); err != nil {
+					slog.Error("failed to update automatic TV identity", "job", job.ID, "error", err)
+				}
+			} else if tv.Show != nil {
+				tvSuggestion = tv.Show.Title
+				if yr, _ := strconv.Atoi(tv.Show.Year); yr > 0 {
+					tvSuggestion = fmt.Sprintf("%s (%d)", tvSuggestion, yr)
+				}
+			}
+		}
+		if s.store != nil {
+			message := "TV identification evidence recorded"
+			if tv.LookupError != "" {
+				message += "; continuing with safe fallback: " + tv.LookupError
+			}
+			if tv.ShowCertain && tv.Season == 0 {
+				message += "; show matched, season unresolved"
+			}
+			if tv.ShowCertain && tv.Season > 0 && len(tv.Episodes) == 0 {
+				message += "; season matched, episode mapping unresolved"
+			}
+			if err := s.store.AddEvent(ctx, job.ID, "identify", message, tvIdentificationEventData(tv)); err != nil {
+				slog.Error("failed to record TV identification evidence", "job", job.ID, "error", err)
+			}
+		}
+		if tv.LookupError != "" {
+			slog.Warn("TV metadata lookup incomplete; continuing with disc evidence",
+				"disc", scanned.DiscName, "error", tv.LookupError)
+		}
+	} else if !manualIdentity && mediaType == "" && s.tmdbConfigured() && scanned.DiscName != "" && preliminaryDisc.Pattern != ripper.DiscPatternTV {
 		s.emit(ProgressEvent{
 			Device:   device,
 			Stage:    "identifying",
@@ -673,7 +819,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				}
 			}
 
-			tmdbClient := newTMDBClient(s.cfg.Metadata.TMDBApiKey)
+			tmdbClient := s.tmdbClient()
 			chosen, runtimeWinner, logMsg, err := metadata.BestMatch(ctx, tmdbClient, movies, longestDuration)
 			if err == nil {
 				if runtimeWinner && logMsg != "" {
@@ -685,6 +831,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 					tmdbConfirmedMovie = isConfidentMovieMatch(details.RuntimeMinutes, longestDuration)
 					yr, _ := strconv.Atoi(details.Year)
 					if tmdbConfirmedMovie {
+						mediaType = "movie"
 						mediaTitle = details.FolderName()
 						if s.store != nil {
 							matchReason := "best_match"
@@ -701,7 +848,10 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 									"match_reason":    matchReason,
 									"confirmed":       true,
 								})
-							_ = s.store.UpdateJob(ctx, job.ID, details.Title, yr, "identifying", "")
+							if err := s.store.UpdateAutoIdentity(ctx, job.ID, details.Title, yr); err != nil {
+								slog.Error("failed to update automatic movie identity", "job", job.ID, "error", err)
+							}
+							job.Title, job.Year = details.Title, yr
 						}
 					} else {
 						slog.Warn("tmdb match unconfirmed: runtime does not match disc feature",
@@ -748,11 +898,24 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		}
 	}
 
+	if selection, ok, err := s.latestManualSelection(ctx, job.ID); err != nil {
+		return err
+	} else if ok {
+		mediaType, season, episodeStart = selection.MediaType, selection.Season, selection.EpisodeStart
+		episodeNumbers = nil
+		autoTVMatch = false
+		job.Title, job.Year = selection.Title, selection.Year
+		run.mediaType, run.season, run.episodeStart = mediaType, season, episodeStart
+		run.episodeNumbers = nil
+		mediaTitle = selection.Title
+		if selection.Year > 0 {
+			mediaTitle = fmt.Sprintf("%s (%d)", selection.Title, selection.Year)
+		}
+	}
+
 	// Step 3: Classify titles.
-	// If TMDB already confirmed this is a movie, suppress the TV-cluster rule
-	// so a disc with 3+ same-duration copies of the same film isn't misclassified.
 	detCfg := s.cfg.Detection
-	if tmdbConfirmedMovie {
+	if tmdbConfirmedMovie && mediaType != "tv" && preliminaryDisc.Pattern != ripper.DiscPatternTV {
 		detCfg.TVThreshold = 99
 	}
 	result := ripper.ClassifyTitles(scanned.Titles, detCfg)
@@ -761,18 +924,53 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	if s.store != nil {
 		pattern := strings.ToLower(result.Pattern.String())
 		mainIndex := -1
+		mainIndices := make([]int, 0, len(result.MainTitles))
 		if len(result.MainTitles) > 0 {
 			mainIndex = result.MainTitles[0].Index
+		}
+		for _, title := range result.MainTitles {
+			mainIndices = append(mainIndices, title.Index)
+		}
+		extraIndices := make([]int, 0, len(result.ExtraTitles))
+		for _, title := range result.ExtraTitles {
+			extraIndices = append(extraIndices, title.Index)
 		}
 		_ = s.store.AddEvent(ctx, job.ID, "scan",
 			fmt.Sprintf("found %d titles, pattern: %s", len(scanned.Titles), pattern),
 			map[string]any{
-				"titles":     scanned.Titles,
-				"pattern":    pattern,
-				"main_index": mainIndex,
+				"titles":        scanned.Titles,
+				"pattern":       pattern,
+				"main_index":    mainIndex,
+				"main_indices":  mainIndices,
+				"extra_indices": extraIndices,
 			})
 		_ = s.store.UpdateStatusPattern(ctx, job.ID, "scanning", pattern)
 	}
+
+	if result.Pattern == ripper.DiscPatternTV && (!autoTVMatch || season == 0 || len(episodeNumbers) != len(result.MainTitles)) {
+		identificationMessage := "TV disc detected. Search for the show and select its season."
+		switch {
+		case autoTVMatch && season > 0:
+			identificationMessage = fmt.Sprintf("TV disc detected. Matched %s; episode order is unresolved, correct or confirm the episode numbers.", mediaTitle)
+		case autoTVMatch:
+			identificationMessage = fmt.Sprintf("TV disc detected. Matched %s; season and episode numbers are unresolved.", mediaTitle)
+		case tvSuggestion != "":
+			identificationMessage = fmt.Sprintf("TV disc detected. Possible show suggestion: %s; not selected automatically. Search to confirm or correct it.", tvSuggestion)
+		}
+		s.emit(ProgressEvent{
+			Device:  device,
+			Stage:   "identifying",
+			Title:   mediaTitle,
+			Percent: 0,
+			Message: identificationMessage,
+		})
+		s.notifyTVSelection(job.ID, scanned.DiscName, device, mediaTitle)
+		if s.store != nil {
+			_ = s.store.AddEvent(ctx, job.ID, "identify", "TV metadata unresolved; continuing without guessing season or episode order", map[string]any{"action": "tv_manual_search_available"})
+			_ = s.store.UpdateStatus(ctx, job.ID, "identifying")
+		}
+	}
+
 	mainTitleIndices := make([]int, 0, len(result.MainTitles))
 	for _, title := range result.MainTitles {
 		mainTitleIndices = append(mainTitleIndices, title.Index)
@@ -791,7 +989,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 
 	// With a TMDB key configured, an unconfirmed match means the disc will be
 	// delivered under its raw label unless someone corrects it.
-	if len(result.MainTitles) > 0 && s.cfg.Metadata.TMDBApiKey != "" && !tmdbConfirmedMovie {
+	if len(result.MainTitles) > 0 && s.tmdbConfigured() && !tmdbConfirmedMovie && !(autoTVMatch && mediaType == "tv") {
 		s.notifier.Notify(notify.Message{
 			Event:   notify.EventNeedsInput,
 			JobID:   job.ID,
@@ -806,16 +1004,16 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	// In daemon mode, we always rip MainTitles immediately.
 	// For now, skip extras — future enhancement will integrate Discord callbacks.
 	if len(result.MainTitles) == 0 {
-		if !run.restarted {
+		if !run.restarted && mediaType == "" {
 			s.emit(ProgressEvent{
 				Device:  device,
 				Stage:   "identifying",
 				Title:   s.currentTitle(device, mediaTitle),
 				Percent: 0,
-				Message: "No main title detected. Waiting for manual movie search...",
+				Message: "No main title detected. Waiting for manual media search...",
 			})
 			if s.store != nil {
-				_ = s.store.AddEvent(ctx, job.ID, "identify", "no clear main title, waiting for manual movie search", map[string]any{"action": "await_manual_search"})
+				_ = s.store.AddEvent(ctx, job.ID, "identify", "no clear main title, waiting for manual media search", map[string]any{"action": "await_manual_search"})
 				_ = s.store.UpdateStatus(ctx, job.ID, "identifying")
 			}
 			s.notifier.Notify(notify.Message{
@@ -824,10 +1022,10 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				Disc:    scanned.DiscName,
 				Device:  device,
 				Title:   mediaTitle,
-				Summary: fmt.Sprintf("No main title detected (%s pattern, %d titles). Waiting for a manual movie search in the UI.", strings.ToLower(result.Pattern.String()), len(scanned.Titles)),
+				Summary: fmt.Sprintf("No main title detected (%s pattern, %d titles). Waiting for a manual movie or TV search in the UI.", strings.ToLower(result.Pattern.String()), len(scanned.Titles)),
 			})
 
-			title, year, waitErr := s.awaitManualReidentify(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
+			selection, waitErr := s.awaitManualSelection(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
 			if waitErr != nil {
 				if errors.Is(waitErr, context.Canceled) {
 					return waitErr
@@ -840,16 +1038,22 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 					Message: fmt.Sprintf("No main titles found and no manual selection received: %v", waitErr),
 				})
 				if s.store != nil {
-					_ = s.store.AddEvent(ctx, job.ID, "error", "manual movie search timed out after no main title", map[string]any{"error": waitErr.Error()})
+					_ = s.store.AddEvent(ctx, job.ID, "error", "manual media search timed out after no main title", map[string]any{"error": waitErr.Error()})
 					_ = s.store.UpdateStatus(ctx, job.ID, "error")
 				}
 				return fmt.Errorf("no main titles found on disc %q", device)
 			}
 
-			if year > 0 {
-				mediaTitle = fmt.Sprintf("%s (%d)", title, year)
+			mediaType, season, episodeStart = selection.MediaType, selection.Season, selection.EpisodeStart
+			episodeNumbers = nil
+			autoTVMatch = false
+			job.Title, job.Year = selection.Title, selection.Year
+			run.mediaType, run.season, run.episodeStart = mediaType, season, episodeStart
+			run.episodeNumbers = nil
+			if selection.Year > 0 {
+				mediaTitle = fmt.Sprintf("%s (%d)", selection.Title, selection.Year)
 			} else {
-				mediaTitle = title
+				mediaTitle = selection.Title
 			}
 			s.beginRipTitle(device, mediaTitle)
 			run.title = mediaTitle
@@ -982,6 +1186,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	}
 
 	var rippedFiles []string
+	var rippedTitleIndices []int
 	totalTitles := len(result.MainTitles)
 	if s.store != nil {
 		_ = s.store.UpdateStatus(ctx, job.ID, "ripping")
@@ -1154,13 +1359,31 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		}
 
 		rippedFiles = append(rippedFiles, files...)
+		for range files {
+			rippedTitleIndices = append(rippedTitleIndices, title.Index)
+		}
+	}
+
+	if selection, ok, err := s.latestManualSelection(ctx, job.ID); err != nil {
+		return err
+	} else if ok {
+		mediaType, season, episodeStart = selection.MediaType, selection.Season, selection.EpisodeStart
+		episodeNumbers = nil
+		autoTVMatch = false
+		job.Title, job.Year = selection.Title, selection.Year
+		run.mediaType, run.season, run.episodeStart = mediaType, season, episodeStart
+		run.episodeNumbers = nil
+		mediaTitle = selection.Title
+		if selection.Year > 0 {
+			mediaTitle = fmt.Sprintf("%s (%d)", selection.Title, selection.Year)
+		}
 	}
 
 	// An automatic identification whose runtime doesn't fit the ripped title is
 	// probably the wrong movie. Hold the file in staging instead of delivering
 	// it under that name, and wait for the user to confirm or correct the title.
 	// Editing the title (even to the same one) releases the hold.
-	tmdbConfigured := s.cfg.Metadata.TMDBApiKey != ""
+	tmdbConfigured := s.tmdbConfigured()
 	if s.store != nil && needsConfirmation(result.MainTitles, len(rippedFiles), s.titleIsLocked(device), tmdbConfirmedMovie, tmdbConfigured, runtimeMin) {
 		held := int(result.MainTitles[0].Duration.Minutes())
 		var summary string
@@ -1183,7 +1406,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			Event: notify.EventDurationMismatch, JobID: job.ID, Disc: scanned.DiscName, Device: device,
 			Title: s.currentTitle(device, mediaTitle), Summary: summary,
 		})
-		title, year, waitErr := s.awaitManualReidentify(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
+		selection, waitErr := s.awaitManualSelection(ctx, job.ID, s.cfg.Notification.ResponseTimeoutMin)
 		if errors.Is(context.Cause(ctx), errRestart) {
 			s.restartCleanup(device, stagingDir, ripOutputDir, job.ID, result.MainTitles[0].Index)
 			return errRestart
@@ -1198,9 +1421,15 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			_ = s.store.UpdateStatus(ctx, job.ID, "error")
 			return fmt.Errorf("title not confirmed for disc %q: %w", device, waitErr)
 		}
-		mediaTitle = title
-		if year > 0 {
-			mediaTitle = fmt.Sprintf("%s (%d)", title, year)
+		mediaType, season, episodeStart = selection.MediaType, selection.Season, selection.EpisodeStart
+		episodeNumbers = nil
+		autoTVMatch = false
+		job.Title, job.Year = selection.Title, selection.Year
+		run.mediaType, run.season, run.episodeStart = mediaType, season, episodeStart
+		run.episodeNumbers = nil
+		mediaTitle = selection.Title
+		if selection.Year > 0 {
+			mediaTitle = fmt.Sprintf("%s (%d)", selection.Title, selection.Year)
 		}
 		runtimeMin = s.ripRuntime(device)
 		run.confirmed = true
@@ -1263,8 +1492,71 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 
 		// Name the file(s) after the title (Jellyfin: "Title (Year)/Title (Year).mkv")
 		// instead of makemkvcon's "title_t00.mkv".
-		isTV := result.Pattern == ripper.DiscPatternTV
-		if renamed, rerr := output.RenameForDeliveryPattern(rippedFiles, deliverTitle, isTV); rerr != nil {
+		isTV := mediaType == "tv" || (mediaType == "" && result.Pattern == ripper.DiscPatternTV)
+		deliverSubdir := deliverTitle
+		if isTV {
+			mapped := autoTVMatch && season > 0 && len(rippedFiles) == len(result.MainTitles) &&
+				len(rippedTitleIndices) == len(rippedFiles) &&
+				len(episodeNumbers) == len(result.MainTitles)
+			if mapped {
+				titleIndices := append([]int(nil), rippedTitleIndices...)
+				episodes := make([]int, len(result.MainTitles))
+				for i, titleIndex := range titleIndices {
+					episodes[i] = episodeNumbers[titleIndex]
+					if episodes[i] < 1 {
+						mapped = false
+					}
+				}
+				if mapped {
+					if err := output.ValidateTVEpisodeNumbers(destDir, deliverTitle, season, episodes); err != nil {
+						slog.Warn("inferred TV episode names conflict; delivering without episode numbering",
+							"show", deliverTitle, "season", season, "error", err)
+						mapped = false
+					} else {
+						renamed, rerr := output.RenameForDeliveryEpisodeNumbers(rippedFiles, titleIndices, episodes)
+						if rerr != nil {
+							return fmt.Errorf("name inferred TV episodes: %w", rerr)
+						}
+						rippedFiles = renamed
+						deliverSubdir = output.TVSeasonDirectory(deliverTitle, season)
+					}
+				}
+			}
+			if mapped {
+				// The episode number for each title came from explicit title
+				// metadata or a unique runtime match, never MakeMKV index order.
+			} else if autoTVMatch {
+				label := metadata.QueryFromDirName(scanned.DiscName)
+				if label == "" {
+					label = "unidentified-disc"
+				}
+				if mediaTitle != scanned.DiscName {
+					if season > 0 {
+						deliverSubdir = filepath.Join(output.TVSeasonDirectory(deliverTitle, season), "unidentified - "+label)
+					} else {
+						deliverSubdir = filepath.Join(deliverTitle, "unidentified - "+label)
+					}
+				} else {
+					deliverSubdir = label
+				}
+			} else if season > 0 {
+				start, err := output.TVEpisodeStart(destDir, deliverTitle, season, episodeStart, len(rippedFiles))
+				if err != nil {
+					return fmt.Errorf("choose TV episode numbers: %w", err)
+				}
+				renamed, rerr := output.RenameForDeliveryEpisodes(rippedFiles, start)
+				if rerr != nil {
+					return fmt.Errorf("name TV episodes: %w", rerr)
+				}
+				rippedFiles = renamed
+				deliverSubdir = output.TVSeasonDirectory(deliverTitle, season)
+			} else {
+				deliverSubdir = metadata.QueryFromDirName(scanned.DiscName)
+				if deliverSubdir == "" {
+					deliverSubdir = "unidentified-disc"
+				}
+			}
+		} else if renamed, rerr := output.RenameForDeliveryPattern(rippedFiles, deliverTitle, false); rerr != nil {
 			slog.Warn("could not rename ripped files; delivering with original names", "error", rerr)
 		} else {
 			rippedFiles = renamed
@@ -1276,7 +1568,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			rippedFiles,
 			ripOutputDir,
 			destDir,
-			deliverTitle,
+			deliverSubdir,
 			deliverTitle,
 			scanned.DiscName,
 		)
@@ -1566,13 +1858,13 @@ func ExecuteRename(plans []RenamePlan, baseDir string) ([]string, error) {
 
 // EnrichMovie fetches full TMDB detail + OMDb metadata for the chosen movie
 // result. If an OMDb API key is configured, runtimes are cross-referenced and
-// reconciled. Returns an error if the TMDB API key is not configured.
+// reconciled. Returns an error if no TMDB credential is configured.
 func (s *RipService) EnrichMovie(ctx context.Context, chosen metadata.MovieResult) (*metadata.MovieDetails, error) {
-	if s.cfg.Metadata.TMDBApiKey == "" {
-		return nil, fmt.Errorf("metadata.tmdb_api_key not configured")
+	if !s.tmdbConfigured() {
+		return nil, fmt.Errorf("metadata.tmdb_api_key or metadata.tmdb_access_token not configured")
 	}
 
-	tmdbClient := newTMDBClient(s.cfg.Metadata.TMDBApiKey)
+	tmdbClient := s.tmdbClient()
 
 	var omdbClient *metadata.OMDbClient
 	if s.cfg.Metadata.OMDbApiKey != "" {
@@ -1585,13 +1877,13 @@ func (s *RipService) EnrichMovie(ctx context.Context, chosen metadata.MovieResul
 // SearchMovie searches TMDB for movies matching query. When the initial query
 // returns no results, it retries with progressively shorter queries by dropping
 // the last word until results are found or all words are exhausted.
-// Returns an error if the TMDB API key is not configured or no results are found.
+// Returns an error if no TMDB credential is configured or no results are found.
 func (s *RipService) SearchMovie(ctx context.Context, query string) ([]metadata.MovieResult, error) {
-	if s.cfg.Metadata.TMDBApiKey == "" {
-		return nil, fmt.Errorf("metadata.tmdb_api_key not configured")
+	if !s.tmdbConfigured() {
+		return nil, fmt.Errorf("metadata.tmdb_api_key or metadata.tmdb_access_token not configured")
 	}
 
-	client := newTMDBClient(s.cfg.Metadata.TMDBApiKey)
+	client := s.tmdbClient()
 
 	words := strings.Fields(query)
 	for len(words) > 0 {
@@ -1606,6 +1898,29 @@ func (s *RipService) SearchMovie(ctx context.Context, query string) ([]metadata.
 		words = words[:len(words)-1]
 	}
 
+	return nil, fmt.Errorf("no TMDB results for %q", query)
+}
+
+// SearchMedia searches for movies and TV shows, retrying progressively shorter
+// queries when TMDB returns no supported media results.
+func (s *RipService) SearchMedia(ctx context.Context, query string) ([]metadata.MediaSearchResult, error) {
+	if !s.tmdbConfigured() {
+		return nil, fmt.Errorf("metadata.tmdb_api_key or metadata.tmdb_access_token not configured")
+	}
+
+	client := s.tmdbClient()
+	words := strings.Fields(query)
+	for len(words) > 0 {
+		q := strings.Join(words, " ")
+		results, err := client.SearchMulti(ctx, q)
+		if err != nil {
+			return nil, fmt.Errorf("tmdb multi search %q: %w", q, err)
+		}
+		if len(results) > 0 {
+			return results, nil
+		}
+		words = words[:len(words)-1]
+	}
 	return nil, fmt.Errorf("no TMDB results for %q", query)
 }
 
@@ -1720,6 +2035,10 @@ func (s *RipService) ScanInfoFromReader(r io.Reader, deviceLabel string) (*rippe
 // failure can be reported with the disc, job and title it concerned.
 type ripRun struct {
 	jobID, disc, title string
+	mediaType          string
+	season             int
+	episodeStart       int
+	episodeNumbers     map[int]int
 
 	// Kept across restarts so a restart reuses the scan and the job.
 	scanned   *disc.ClassifiedDisc
@@ -1889,6 +2208,17 @@ func newNotifier(cfg config.NotificationConfig) *notify.Dispatcher {
 		notify.EventFailed:           cfg.Events.Failed,
 		notify.EventDurationMismatch: cfg.Events.DurationMismatch,
 	}, cfg.UIURL)
+}
+
+func (s *RipService) notifyTVSelection(jobID, discName, device, title string) {
+	s.notifier.Notify(notify.Message{
+		Event:   notify.EventNeedsInput,
+		JobID:   jobID,
+		Disc:    discName,
+		Device:  device,
+		Title:   title,
+		Summary: "TV metadata is unresolved. Open SimpleRip to inspect the evidence, confirm or correct the show, and choose a season if known.",
+	})
 }
 
 // canReselect reports whether the disc has a single-feature shape where

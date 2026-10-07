@@ -48,6 +48,7 @@ makemkv:
 
 metadata:
   tmdb_api_key: tmdb-secret
+  tmdb_access_token: tmdb-access-secret
   preferred_language: fra
 `)
 
@@ -106,6 +107,9 @@ metadata:
 	}
 	if cfg.Metadata.TMDBApiKey != "tmdb-secret" {
 		t.Errorf("TMDBApiKey = %q", cfg.Metadata.TMDBApiKey)
+	}
+	if cfg.Metadata.TMDBAccessToken != "tmdb-access-secret" {
+		t.Errorf("TMDBAccessToken = %q", cfg.Metadata.TMDBAccessToken)
 	}
 	if cfg.Metadata.PreferredLanguage != "fra" {
 		t.Errorf("PreferredLanguage = %q", cfg.Metadata.PreferredLanguage)
@@ -272,6 +276,7 @@ notification:
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	n := cfg.Notification
 	if n.DiscordWebhookURL != "https://discord.test/api/webhooks/1/tok" || n.UIURL != "http://ui:8080" {
 		t.Fatalf("env should override file: %+v", n)
@@ -281,5 +286,20 @@ notification:
 	}
 	if !n.Events.Failed || !n.Events.NeedsInput || !n.Events.MultiTitle || !n.Events.DurationMismatch {
 		t.Fatalf("unset events should default on: %+v", n.Events)
+	}
+}
+
+func TestTMDBAccessTokenEnvOverride(t *testing.T) {
+	t.Setenv("TMDB_ACCESS_TOKEN", "env-access-token")
+	path := writeConfig(t, `
+metadata:
+  tmdb_access_token: file-access-token
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metadata.TMDBAccessToken != "env-access-token" {
+		t.Fatalf("TMDBAccessToken = %q, want environment override", cfg.Metadata.TMDBAccessToken)
 	}
 }

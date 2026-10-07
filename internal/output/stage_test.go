@@ -53,7 +53,6 @@ func TestDeliver(t *testing.T) {
 	if err := os.WriteFile(mkv2, []byte("fake mkv content 2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	dest := t.TempDir()
 
 	result, err := output.Deliver(
@@ -91,6 +90,57 @@ func TestDeliver(t *testing.T) {
 	}
 	if len(log.Files) != 2 {
 		t.Errorf("log.Files len = %d, want 2", len(log.Files))
+	}
+}
+
+func TestDeliverNestedDirectory(t *testing.T) {
+	installFakeRsync(t)
+	staging := t.TempDir()
+	source := filepath.Join(staging, "episode-01.mkv")
+	if err := os.WriteFile(source, []byte("episode"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	result, err := output.Deliver(context.Background(), []string{source}, staging, dest,
+		filepath.Join("The Wire (2002)", "season-1"), "The Wire (2002)", "DISC")
+	if err != nil {
+		t.Fatalf("Deliver(): %v", err)
+	}
+	want := filepath.Join(dest, "The Wire (2002)", "season-1", "episode-01.mkv")
+	if len(result.Files) != 1 || result.Files[0] != want {
+		t.Fatalf("delivered files = %v, want %q", result.Files, want)
+	}
+	firstLog := filepath.Join(result.DestDir, "rip.json")
+	if _, err := os.Stat(firstLog); err != nil {
+		t.Fatalf("first rip log missing: %v", err)
+	}
+
+	secondSource := filepath.Join(staging, "episode-02.mkv")
+	if err := os.WriteFile(secondSource, []byte("second episode"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := output.Deliver(context.Background(), []string{secondSource}, staging, dest,
+		filepath.Join("The Wire (2002)", "season-1"), "The Wire (2002)", "DISC 2")
+	if err != nil {
+		t.Fatalf("second Deliver(): %v", err)
+	}
+	if _, err := os.Stat(firstLog); err != nil {
+		t.Fatalf("first rip log was overwritten: %v", err)
+	}
+	data, err := os.ReadFile(firstLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first output.RipLog
+	if err := json.Unmarshal(data, &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.DiscName != "DISC" {
+		t.Fatalf("first rip log was overwritten with disc %q", first.DiscName)
+	}
+	logs, err := filepath.Glob(filepath.Join(second.DestDir, "rip-*.json"))
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("additional rip log files = %v, err=%v; want one", logs, err)
 	}
 }
 
@@ -176,5 +226,80 @@ func TestRenameForDeliveryPattern_TV(t *testing.T) {
 	}
 	if filepath.Base(renamed[0]) != "Breaking Bad S01 - E01.mkv" || filepath.Base(renamed[1]) != "Breaking Bad S01 - E02.mkv" {
 		t.Fatalf("unexpected TV episode names: %v", renamed)
+	}
+}
+
+func TestTVEpisodeNamingAndNextNumber(t *testing.T) {
+	dest := t.TempDir()
+	seasonDir := filepath.Join(dest, "The Wire (2002)", "season-1")
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"episode-01.mkv", "episode-02.mkv"} {
+		if err := os.WriteFile(filepath.Join(seasonDir, name), []byte("existing"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	start, err := output.TVEpisodeStart(dest, "The Wire (2002)", 1, 0, 2)
+	if err != nil {
+		t.Fatalf("TVEpisodeStart(): %v", err)
+	}
+	if start != 3 {
+		t.Fatalf("next episode = %d, want 3", start)
+	}
+	if _, err := output.TVEpisodeStart(dest, "The Wire (2002)", 1, 2, 1); err == nil {
+		t.Fatal("expected collision on an existing requested episode")
+	}
+
+	staging := t.TempDir()
+	a := filepath.Join(staging, "title_t00.mkv")
+	b := filepath.Join(staging, "title_t01.mkv")
+	for _, path := range []string{a, b} {
+		if err := os.WriteFile(path, []byte("episode"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renamed, err := output.RenameForDeliveryEpisodes([]string{a, b}, start)
+	if err != nil {
+		t.Fatalf("RenameForDeliveryEpisodes(): %v", err)
+	}
+	if filepath.Base(renamed[0]) != "episode-03.mkv" || filepath.Base(renamed[1]) != "episode-04.mkv" {
+		t.Fatalf("episode paths = %v", renamed)
+	}
+}
+
+func TestRenameForDeliveryEpisodeNumbers(t *testing.T) {
+	staging := t.TempDir()
+	files := []string{
+		filepath.Join(staging, "title_t04.mkv"),
+		filepath.Join(staging, "title_t01.mkv"),
+	}
+	for _, file := range files {
+		if err := os.WriteFile(file, []byte("episode"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renamed, err := output.RenameForDeliveryEpisodeNumbers(files, []int{4, 1}, []int{9, 2})
+	if err != nil {
+		t.Fatalf("RenameForDeliveryEpisodeNumbers(): %v", err)
+	}
+	if filepath.Base(renamed[0]) != "episode-09.mkv" || filepath.Base(renamed[1]) != "episode-02.mkv" {
+		t.Fatalf("mapped episode paths = %v", renamed)
+	}
+
+	dest := t.TempDir()
+	if err := output.ValidateTVEpisodeNumbers(dest, "Show (2000)", 1, []int{9, 2}); err != nil {
+		t.Fatalf("ValidateTVEpisodeNumbers() = %v", err)
+	}
+	seasonDir := filepath.Join(dest, output.TVSeasonDirectory("Show (2000)", 1))
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seasonDir, "episode-09.mkv"), []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := output.ValidateTVEpisodeNumbers(dest, "Show (2000)", 1, []int{9}); err == nil {
+		t.Fatal("expected an existing mapped episode to be rejected")
 	}
 }

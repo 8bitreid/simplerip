@@ -341,18 +341,18 @@ type searchResultJSON struct {
 	MediaType string `json:"media_type"`
 }
 
-// handleSearch queries TMDB and returns up to 5 matching movies.
+// handleSearch queries TMDB's multi-search endpoint for movies and TV shows.
 func (s *Server) handleSearch(c echo.Context) error {
 	q := strings.TrimSpace(c.QueryParam("q"))
 	if q == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "q is required"})
 	}
 
-	results, err := s.svc.SearchMovie(c.Request().Context(), q)
+	results, err := s.svc.SearchMedia(c.Request().Context(), q)
 	if err != nil {
 		msg := err.Error()
-		if strings.Contains(msg, "tmdb_api_key not configured") {
-			return c.JSON(http.StatusNotImplemented, map[string]string{"error": "TMDB API key not configured"})
+		if strings.Contains(msg, "not configured") {
+			return c.JSON(http.StatusNotImplemented, map[string]string{"error": "TMDB API key or access token not configured"})
 		}
 		if strings.Contains(msg, "no TMDB results") {
 			return c.JSON(http.StatusOK, []searchResultJSON{})
@@ -362,13 +362,12 @@ func (s *Server) handleSearch(c echo.Context) error {
 
 	out := make([]searchResultJSON, 0, len(results))
 	for _, r := range results {
-		yr, _ := strconv.Atoi(r.Year())
+		yr, _ := strconv.Atoi(r.Year)
 		out = append(out, searchResultJSON{
 			ID:        r.ID,
 			Title:     r.Title,
 			Year:      yr,
-			Runtime:   0, // not available from TMDB search endpoint
-			MediaType: "movie",
+			MediaType: r.MediaType,
 		})
 	}
 	return c.JSON(http.StatusOK, out)
@@ -376,9 +375,12 @@ func (s *Server) handleSearch(c echo.Context) error {
 
 // reidentifyRequest is the body for POST /api/jobs/:id/reidentify.
 type reidentifyRequest struct {
-	TMDBID int    `json:"tmdb_id"`
-	Title  string `json:"title"`
-	Year   int    `json:"year"`
+	TMDBID       int    `json:"tmdb_id"`
+	Title        string `json:"title"`
+	Year         int    `json:"year"`
+	MediaType    string `json:"media_type"`
+	Season       int    `json:"season"`
+	EpisodeStart int    `json:"episode_start"`
 }
 
 // handleReidentify applies a manual metadata correction to an existing job.
@@ -393,6 +395,25 @@ func (s *Server) handleReidentify(c echo.Context) error {
 	var body reidentifyRequest
 	if err := c.Bind(&body); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	body.MediaType = strings.ToLower(strings.TrimSpace(body.MediaType))
+	if body.MediaType == "" {
+		body.MediaType = "movie"
+	}
+	if body.MediaType != "movie" && body.MediaType != "tv" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "media_type must be movie or tv"})
+	}
+	if strings.TrimSpace(body.Title) == "" || body.TMDBID <= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "a title and valid TMDB ID are required"})
+	}
+	if body.MediaType == "tv" && body.Season < 1 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "season must be at least 1 for a TV show"})
+	}
+	if body.EpisodeStart < 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "episode_start cannot be negative"})
+	}
+	if body.MediaType == "movie" && (body.Season != 0 || body.EpisodeStart != 0) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "season and episode_start are only valid for TV shows"})
 	}
 
 	// Verify the job exists and capture its current status/pattern so a manual
@@ -412,17 +433,20 @@ func (s *Server) handleReidentify(c echo.Context) error {
 
 	// Pin the chosen movie's runtime before the correction event is written:
 	// a rip waiting on manual input wakes on that event and reads it.
-	if !isFinished(existing.Status) {
+	if !isFinished(existing.Status) && body.MediaType == "movie" {
 		s.svc.SetRipRuntime(existing.Device, s.svc.RuntimeFor(ctx, body.TMDBID))
 	}
 
 	_ = s.store.AddEvent(ctx, id, "identify",
 		fmt.Sprintf("manual correction: %s (%d)", body.Title, body.Year),
 		map[string]any{
-			"tmdb_id":    body.TMDBID,
-			"title":      body.Title,
-			"year":       body.Year,
-			"correction": true,
+			"tmdb_id":       body.TMDBID,
+			"title":         body.Title,
+			"year":          body.Year,
+			"media_type":    body.MediaType,
+			"season":        body.Season,
+			"episode_start": body.EpisodeStart,
+			"correction":    true,
 		})
 
 	if err := s.store.UpdateJob(ctx, id, body.Title, body.Year, existing.Status, existing.Pattern); err != nil {

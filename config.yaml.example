@@ -60,7 +60,8 @@ makemkv:
   #   export MAKEMKV_KEY="your-key-here"
   # Get a free beta key at https://www.makemkv.com/forum/viewtopic.php?t=1053
 
-  # Kill makemkvcon and raise an error after this many minutes.
+  # Maximum duration for each makemkvcon scan or title rip. Multi-title discs
+  # can take longer than this overall because each title gets its own timeout.
   # Blu-ray rips typically take 20–60 min; 120 gives a comfortable margin.
   timeout_minutes: 120
 
@@ -90,6 +91,10 @@ metadata:
   # TMDB API key for title and year lookup.
   # Register for a free key at https://www.themoviedb.org/settings/api
   tmdb_api_key: ""
+
+  # TMDB v4 API Read Access Token. When set, TMDB requests use Authorization: Bearer.
+  # Can also be supplied via TMDB_ACCESS_TOKEN.
+  tmdb_access_token: ""
 
   # OMDb API key for runtime cross-reference via IMDb ID.
   # Register for a free key at https://www.omdbapi.com/apikey.aspx

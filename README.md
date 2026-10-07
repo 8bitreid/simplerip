@@ -80,6 +80,7 @@ output:
 
 metadata:
   tmdb_api_key: ""           # https://www.themoviedb.org/settings/api
+  tmdb_access_token: ""      # TMDB v4 API Read Access Token (Bearer), or set TMDB_ACCESS_TOKEN
   omdb_api_key: ""           # https://www.omdbapi.com/apikey.aspx
 
 notification:
@@ -91,6 +92,7 @@ notification:
 ```
 
 See [config.yaml.example](config.yaml.example) for all options. The file `config/config.yaml` is gitignored.
+When `tmdb_access_token` (or `TMDB_ACCESS_TOKEN`) is set, it is used as a Bearer token and takes precedence over `tmdb_api_key`. The UI searches TMDB `/search/multi` and offers both movies and TV shows.
 
 ---
 
@@ -190,11 +192,17 @@ If no response is received within `response_timeout_minutes`, extras are skipped
 
 | Condition | Action |
 |-----------|--------|
-| 3+ titles within 60 s of each other | TV mode — rip all automatically |
+| 3+ titles in a similar-duration cluster | TV mode — rip the episode-like cluster; keep duration outliers as extras |
 | 2 titles, same duration | Double feature — ask via Discord |
 | 1 long title (>40 min) + shorter others | Rip main immediately, ask about extras |
 | Ambiguous | Ask via Discord |
 | Under 2 minutes | Silently ignored (junk) |
+
+When TMDB credentials are configured, TV discs are searched using a normalized disc label and, when available, meaningful MakeMKV title names. Similarity and the lead over competing results must support a clear show match before the show name is used automatically. Identification evidence, candidate titles, separate show/season/episode confidence, and lookup errors are recorded in job history; a suggestion is not a probability. An uncertain show keeps the safe disc-label naming and remains searchable/correctable in the UI. Movie lookup behavior is unchanged.
+
+Season inference is separate from show identification. SimpleRip compares the runtimes of the episode-like title cluster with every regular season's episode runtimes when TMDB provides complete data for no more than 20 seasons; it chooses a season only when at least three titles support a close and distinctive match. Explicit season/episode markers in all relevant MakeMKV title names can also identify both directly. Episode numbers are otherwise inferred only when individual runtimes uniquely identify episodes; MakeMKV title indexes are never assumed to be viewing order. `DISC1`/volume labels are removed from the search query but are never treated as season numbers.
+
+If season or episode order remains unknown, ripping continues without waiting indefinitely for a metadata lookup or a manual response. Output is kept under a disc-specific unsorted directory (or an unsorted subdirectory of a confidently matched show/season), retaining MakeMKV's filenames rather than inventing episode numbers. The UI's manual search/correction flow remains available. A manually selected show and season remains authoritative; with a manually chosen season and no starting episode, the existing behavior continues after the highest saved episode number. TMDB lookup failures are recorded and use the same safe fallback. These inferences use only disc metadata and the configured TMDB integration; SimpleRip does not inspect video frames or require another service.
 
 ---
 

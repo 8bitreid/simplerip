@@ -250,12 +250,54 @@ func TestHandleSearch_EmptyQuery(t *testing.T) {
 }
 
 func TestHandleSearch_NoTMDBKey(t *testing.T) {
-	// config.Defaults() has empty TMDB key, so SearchMovie returns 501-triggering error.
+	// config.Defaults() has no TMDB credentials, so search is unavailable.
 	s := newTestServer(nil)
 	rr := doRequest(t, s, http.MethodGet, "/api/search?q=dune", nil)
 
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501", rr.Code)
+	}
+}
+
+func TestHandleReidentify_TVSelectionRequiresSeasonAndPersistsSelection(t *testing.T) {
+	var eventData map[string]any
+	st := &mockStore{
+		getJob: func(_ context.Context, id string) (store.Job, []store.JobEvent, error) {
+			return store.Job{ID: id, Device: "/dev/sr0", Status: "identifying"}, nil, nil
+		},
+		addEvent: func(_ context.Context, _, _, _ string, data any) error {
+			encoded, err := json.Marshal(data)
+			if err != nil {
+				return err
+			}
+			return json.Unmarshal(encoded, &eventData)
+		},
+	}
+	s := newTestServer(st)
+
+	rr := doRequest(t, s, http.MethodPost, "/api/jobs/job-1/reidentify", []byte(`{
+		"tmdb_id": 1438,
+		"title": "The Wire",
+		"year": 2002,
+		"media_type": "tv",
+		"season": 2,
+		"episode_start": 4
+	}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if eventData["media_type"] != "tv" || eventData["season"] != float64(2) || eventData["episode_start"] != float64(4) {
+		t.Fatalf("persisted selection = %#v", eventData)
+	}
+
+	rr = doRequest(t, s, http.MethodPost, "/api/jobs/job-1/reidentify", []byte(`{
+		"tmdb_id": 1438,
+		"title": "The Wire",
+		"year": 2002,
+		"media_type": "tv"
+	}`))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing season status = %d, want 400", rr.Code)
 	}
 }
 

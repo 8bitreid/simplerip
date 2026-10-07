@@ -276,6 +276,104 @@ func TestRipService_ScanDisc_TV(t *testing.T) {
 	}
 }
 
+func TestIdentifyTVUsesExplicitEpisodeMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/search/tv" || r.URL.Query().Get("query") != "the wire" {
+			t.Errorf("unexpected TMDB TV request: %s", r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, `{"results":[{"id":1438,"name":"The Wire","first_air_date":"2002-06-02"}]}`)
+	}))
+	defer server.Close()
+	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+	cfg := config.Defaults()
+	cfg.Metadata.TMDBApiKey = "tmdb-key"
+	svc := New(cfg, nil)
+
+	result := svc.identifyTV(context.Background(), "The-Wire-DISC1", []disc.MKVTitle{
+		{Index: 4, Name: "S02E03", Duration: 59 * time.Minute},
+		{Index: 1, Name: "S02E01", Duration: 58 * time.Minute},
+		{Index: 3, Name: "S02E02", Duration: 60 * time.Minute},
+	})
+	if !result.ShowCertain || result.Show == nil || result.Show.Title != "The Wire" {
+		t.Fatalf("show match = %+v", result)
+	}
+	if result.Season != 2 || result.Episodes[4] != 3 || result.Episodes[1] != 1 || result.Episodes[3] != 2 {
+		t.Fatalf("explicit season/episode mapping = %+v", result)
+	}
+	if result.LookupError != "" {
+		t.Fatalf("unexpected lookup error: %s", result.LookupError)
+	}
+}
+
+func TestIdentifyTVKeepsWeakCandidateAsSuggestion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"results":[{"id":42,"name":"The Office","first_air_date":"2001-01-01"}]}`)
+	}))
+	defer server.Close()
+	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+	cfg := config.Defaults()
+	cfg.Metadata.TMDBApiKey = "tmdb-key"
+	svc := New(cfg, nil)
+
+	result := svc.identifyTV(context.Background(), "Completely Different Disc", []disc.MKVTitle{
+		{Index: 0, Name: "Title 0", Duration: 22 * time.Minute},
+		{Index: 1, Name: "Title 1", Duration: 22 * time.Minute},
+		{Index: 2, Name: "Title 2", Duration: 22 * time.Minute},
+	})
+	if result.ShowCertain {
+		t.Fatalf("weak match must not be selected: %+v", result)
+	}
+	if result.Show != nil {
+		t.Fatalf("weak unrelated candidate should not be surfaced as a show suggestion: %+v", result.Show)
+	}
+}
+
+func TestIdentifyTVInfersDistinctiveSeasonRuntimes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/search/tv":
+			_, _ = fmt.Fprint(w, `{"results":[{"id":51,"name":"Blue Show","first_air_date":"2010-01-01"}]}`)
+		case "/3/tv/51":
+			_, _ = fmt.Fprint(w, `{"id":51,"name":"Blue Show","seasons":[{"season_number":1},{"season_number":2}]}`)
+		case "/3/tv/51/season/1":
+			_, _ = fmt.Fprint(w, `{"season_number":1,"episodes":[{"episode_number":1,"runtime":20},{"episode_number":2,"runtime":22},{"episode_number":3,"runtime":24}]}`)
+		case "/3/tv/51/season/2":
+			_, _ = fmt.Fprint(w, `{"season_number":2,"episodes":[{"episode_number":1,"runtime":42},{"episode_number":2,"runtime":43},{"episode_number":3,"runtime":42}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+	cfg := config.Defaults()
+	cfg.Metadata.TMDBApiKey = "tmdb-key"
+	svc := New(cfg, nil)
+
+	result := svc.identifyTV(context.Background(), "Blue-Show-DISC2", []disc.MKVTitle{
+		{Index: 7, Duration: 24*time.Minute + 5*time.Second},
+		{Index: 2, Duration: 20*time.Minute + 3*time.Second},
+		{Index: 4, Duration: 22*time.Minute + 2*time.Second},
+	})
+	if !result.ShowCertain || result.Show == nil || result.Season != 1 {
+		t.Fatalf("runtime season match = %+v", result)
+	}
+	if result.Episodes[7] != 3 || result.Episodes[2] != 1 || result.Episodes[4] != 2 {
+		t.Fatalf("runtime episode mapping = %v", result.Episodes)
+	}
+}
+
+func TestFindManualSelectionTakesPrecedenceOverAutomaticTVEvidence(t *testing.T) {
+	now := time.Now()
+	events := []store.JobEvent{
+		{Stage: "identify", CreatedAt: now, Data: json.RawMessage(`{"action":"tv_identification","suggested_title":"Automatic"}`)},
+		{Stage: "identify", CreatedAt: now.Add(time.Second), Data: json.RawMessage(`{"correction":true,"title":"Chosen Show","year":2004,"media_type":"tv","season":3,"episode_start":5}`)},
+	}
+	selection, ok := findManualSelection(events, now.Add(-time.Minute))
+	if !ok || selection.Title != "Chosen Show" || selection.Season != 3 || selection.EpisodeStart != 5 {
+		t.Fatalf("manual selection = %+v, ok=%v", selection, ok)
+	}
+}
+
 func TestRipService_ScanDisc_MissingMetadata(t *testing.T) {
 	cfg := config.Defaults()
 	svc := New(cfg, nil)
@@ -536,6 +634,7 @@ for arg in "$@"; do
 done
 if [ "$found_info" = "1" ]; then
 	cat <<'EOF'
+CINFO:1,0,"DVD"
 CINFO:30,0,"TEST_DISC"
 TCOUNT:1
 TINFO:0,2,0,"Main Feature"
@@ -610,6 +709,50 @@ func TestRipDiscNoMainTitles(t *testing.T) {
 	}
 }
 
+func TestTVDiscSendsInputNeededNotification(t *testing.T) {
+	bodies := make(chan []byte, 1)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read webhook body: %v", err)
+		}
+		bodies <- body
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hook.Close()
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Notification.DiscordWebhookURL = hook.URL
+	cfg.Notification.UIURL = "http://ui.test:8080"
+	svc := New(cfg, nil)
+	defer svc.notifier.Wait(context.Background())
+	svc.notifyTVSelection("job-123", "TEST_TV_DISC", "/dev/sr0", "TEST_TV_DISC")
+
+	select {
+	case body := <-bodies:
+		var payload struct {
+			Embeds []struct {
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				URL         string `json:"url"`
+			} `json:"embeds"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode notification: %v", err)
+		}
+		if len(payload.Embeds) != 1 {
+			t.Fatalf("embeds = %d, want 1", len(payload.Embeds))
+		}
+		embed := payload.Embeds[0]
+		if embed.Title != "Input needed" || !strings.Contains(embed.Description, "choose a season if known") || embed.URL != cfg.Notification.UIURL {
+			t.Fatalf("unexpected TV selection notification: %+v", embed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no TV selection notification received")
+	}
+}
+
 func TestRipDiscRetriesThenSucceeds(t *testing.T) {
 	installFakeMakeMKVConFailOnce(t)
 
@@ -647,9 +790,12 @@ func TestRipDiscRetryDisabledFails(t *testing.T) {
 func TestFindManualCorrection(t *testing.T) {
 	now := time.Now().UTC()
 	manualPayload, _ := json.Marshal(map[string]any{
-		"correction": true,
-		"title":      "Anne of Green Gables",
-		"year":       1985,
+		"correction":    true,
+		"title":         "Anne of Green Gables",
+		"year":          1985,
+		"media_type":    "tv",
+		"season":        1,
+		"episode_start": 4,
 	})
 
 	events := []store.JobEvent{
@@ -666,6 +812,10 @@ func TestFindManualCorrection(t *testing.T) {
 	}
 	if year != 1985 {
 		t.Fatalf("year = %d, want %d", year, 1985)
+	}
+	selection, ok := findManualSelection(events, now.Add(-90*time.Second))
+	if !ok || selection.MediaType != "tv" || selection.Season != 1 || selection.EpisodeStart != 4 {
+		t.Fatalf("TV selection = %+v, ok=%v", selection, ok)
 	}
 }
 
@@ -811,6 +961,40 @@ func TestSearchMovie_RetryTable(t *testing.T) {
 				t.Fatalf("result count = %d, want %d", len(got), tc.wantCount)
 			}
 		})
+	}
+}
+
+func TestSearchMedia_UsesBearerAndRetriesShorterQuery(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/search/multi" {
+			t.Fatalf("path = %q, want /3/search/multi", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer read-token" {
+			t.Fatalf("Authorization = %q, want Bearer read-token", got)
+		}
+		queries = append(queries, r.URL.Query().Get("query"))
+		if len(queries) == 1 {
+			_, _ = fmt.Fprint(w, `{"results":[]}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"results":[{"id":387,"name":"SpongeBob SquarePants","first_air_date":"1999-05-01","media_type":"tv"}]}`)
+	}))
+	defer server.Close()
+	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+
+	cfg := config.Defaults()
+	cfg.Metadata.TMDBAccessToken = "read-token"
+	svc := New(cfg, nil)
+	got, err := svc.SearchMedia(context.Background(), "spongebob squarepants")
+	if err != nil {
+		t.Fatalf("SearchMedia() error = %v", err)
+	}
+	if !reflect.DeepEqual(queries, []string{"spongebob squarepants", "spongebob"}) {
+		t.Fatalf("queries = %v", queries)
+	}
+	if len(got) != 1 || got[0].MediaType != "tv" || got[0].Year != "1999" {
+		t.Fatalf("SearchMedia() = %+v", got)
 	}
 }
 

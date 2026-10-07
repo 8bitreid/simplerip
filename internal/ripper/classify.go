@@ -51,7 +51,7 @@ type ClassificationResult struct {
 // Rule priority (first match wins):
 //  0. All titles have zero/missing duration → Missing metadata (ask user)
 //     0.5. Multi-angle disc detection (same duration, same chapters, angle markers)
-//  1. 3+ titles within DurationTolerance of each other → TV (rip all)
+//  1. 3+ titles within DurationTolerance of each other → TV (rip the cluster)
 //  2. Exactly 2 feature-length titles within DurationTolerance → Double (ask)
 //  3. Exactly 1 feature-length title → Movie (rip main, ask about rest)
 //  4. Everything else → Ambiguous (ask about all)
@@ -142,11 +142,46 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 
 	// Rule 1: TV
 	if len(largest) >= cfg.TVThreshold {
+		isEpisodeClusterTitle := func(candidate disc.MKVTitle) bool {
+			for _, episode := range largest {
+				delta := candidate.Duration - episode.Duration
+				if delta < 0 {
+					delta = -delta
+				}
+				if delta <= tolerance {
+					return true
+				}
+			}
+			return false
+		}
+		type titleIdentity struct {
+			index      int
+			name       string
+			duration   time.Duration
+			chapters   int
+			sourceFile string
+		}
+		identity := func(t disc.MKVTitle) titleIdentity {
+			return titleIdentity{t.Index, t.Name, t.Duration, t.ChapterCount, t.SourceFileName}
+		}
+		clusterTitles := make(map[titleIdentity]bool, len(largest))
+		for _, t := range largest {
+			clusterTitles[identity(t)] = true
+		}
+		var main, extras []disc.MKVTitle
+		for _, t := range candidates {
+			if clusterTitles[identity(t)] || isEpisodeClusterTitle(t) {
+				main = append(main, t)
+			} else {
+				extras = append(extras, t)
+			}
+		}
 		return ClassificationResult{
-			Pattern:    DiscPatternTV,
-			MainTitles: candidates,
-			JunkTitles: junk,
-			AllTitles:  candidates,
+			Pattern:     DiscPatternTV,
+			MainTitles:  main,
+			ExtraTitles: extras,
+			JunkTitles:  junk,
+			AllTitles:   candidates,
 		}
 	}
 
