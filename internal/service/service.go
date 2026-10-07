@@ -1202,7 +1202,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			Stage:   "analyzing",
 			Title:   cur,
 			Percent: 0,
-			Message: fmt.Sprintf("Analyzing disc for %s (title %d of %d)", cur, idx+1, totalTitles),
+			Message: fmt.Sprintf("Analyzing title %d of %d (MakeMKV title index %d)", idx+1, totalTitles, title.Index),
 		})
 
 		if s.store != nil {
@@ -1232,7 +1232,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 					Stage:   "analyzing",
 					Title:   cur,
 					Percent: percent,
-					Message: fmt.Sprintf("Analyzing disc for %s (%d%%)", cur, percent),
+					Message: fmt.Sprintf("Analyzing title %d of %d (MakeMKV title index %d, %d%%)", titleIdx+1, totalTitles, title.Index, percent),
 				})
 				return
 			}

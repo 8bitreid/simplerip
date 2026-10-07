@@ -669,6 +669,10 @@ exec sleep 60
 		select {
 		case ev := <-events:
 			if ev.Stage == "analyzing" && !cancelRequested {
+				wantMessage := "Analyzing title 1 of 1 (MakeMKV title index 0)"
+				if ev.Message != wantMessage {
+					t.Fatalf("analyzing event message = %q, want %q", ev.Message, wantMessage)
+				}
 				cancelRequested = true
 				if !svc.CancelRip("/dev/sr0") {
 					t.Fatal("CancelRip returned false for active rip")
