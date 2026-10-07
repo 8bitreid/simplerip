@@ -29,7 +29,7 @@ const jobsPageSize = 100
 var indexHTML []byte
 
 var ejectDevice = func(device string) error {
-	return exec.Command("eject", device).Run()
+	return exec.Command("eject", "-T", device).Run()
 }
 
 // jobStore is the persistence interface the server depends on.
@@ -183,13 +183,13 @@ func (s *Server) handleEject(c echo.Context) error {
 	}
 	// The service tracks active pipelines by device. Progress events can lag or
 	// remain stale (for example, after a worker exits), so they must not block
-	// ejecting an otherwise idle drive.
+	// toggling the tray on an otherwise idle drive.
 	if s.svc.HasActiveRip(device) {
-		return c.JSON(http.StatusConflict, map[string]string{"error": "a rip is in process; ejecting now would cancel it. Cancel the rip first or wait for it to finish."})
+		return c.JSON(http.StatusConflict, map[string]string{"error": "a rip is in process; toggling the tray now could interrupt it. Cancel the rip first or wait for it to finish."})
 	}
 
 	if err := ejectDevice(device); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("eject failed: %v", err)})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("tray toggle failed: %v", err)})
 	}
 
 	// Immediately show the drive as idle in UI while poller confirms state.

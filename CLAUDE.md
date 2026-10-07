@@ -174,6 +174,7 @@ makemkv:
 
 metadata:
   tmdb_api_key: ""             # https://www.themoviedb.org/settings/api
+  tmdb_access_token: ""        # TMDB v4 API Read Access Token (Bearer); env: TMDB_ACCESS_TOKEN
   omdb_api_key: ""             # https://www.omdbapi.com/apikey.aspx
   preferred_language: eng
 ```
@@ -233,7 +234,7 @@ The organize command is no longer required in the automated workflow — metadat
 happens before ripping so files are delivered with final names immediately.
 
 ## What still needs building
-- TV show episode detection and naming (TMDB API doesn't provide per-episode disc metadata)
+- TV show episode detection and naming from disc metadata; current TV output uses user-selected season and sequential temporary `episode-NN.mkv` names
 - Interactive extras selection workflow (Discord → n8n → SimpleRip callback integration)
 - Ambiguous disc handling workflow (requires n8n callback system)
 
