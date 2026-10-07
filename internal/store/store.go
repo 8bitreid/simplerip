@@ -270,6 +270,32 @@ func (s *Store) ListJobs(ctx context.Context, limit, offset int) ([]Job, error) 
 	return jobs, rows.Err()
 }
 
+func (s *Store) JobStatusCounts(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT status, count(*) FROM jobs
+		 WHERE status IN ('done', 'error', 'cancelled')
+		 GROUP BY status`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("counting jobs by status: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int64, 3)
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, fmt.Errorf("scanning job status count: %w", err)
+		}
+		counts[status] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating job status counts: %w", err)
+	}
+	return counts, nil
+}
+
 func (s *Store) GetJob(ctx context.Context, id string) (Job, []JobEvent, error) {
 	row := s.pool.QueryRow(ctx,
 		`SELECT id, device, disc_label, title, year, status, pattern, disc_type, created_at, finished_at, updated_at

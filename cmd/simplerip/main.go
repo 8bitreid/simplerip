@@ -285,6 +285,7 @@ The server provides:
   - Web UI at /
   - WebSocket progress stream at /ws/progress
   - JSON status endpoint at /api/status
+  - Build and system info at /api/info
 
 The server will stream real-time progress updates for any active rip jobs.
 
@@ -307,7 +308,11 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 		}
 
 		svc := service.New(cfg, st)
-		srv := server.New(svc, st, cfg.MakeMKV.Devices)
+		srv := server.New(svc, st, cfg.MakeMKV.Devices, cfg, server.BuildMetadata{
+			Version:   Version,
+			Commit:    Commit,
+			BuildDate: BuildDate,
+		})
 
 		port := cfg.Server.Port
 		if port == 0 {

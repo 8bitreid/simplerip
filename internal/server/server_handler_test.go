@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,11 +20,12 @@ import (
 // ── mock store ────────────────────────────────────────────────────────────────
 
 type mockStore struct {
-	listJobs  func(ctx context.Context, limit, offset int) ([]store.Job, error)
-	getJob    func(ctx context.Context, id string) (store.Job, []store.JobEvent, error)
-	addEvent  func(ctx context.Context, jobID, stage, message string, data any) error
-	updateJob func(ctx context.Context, id, title string, year int, status, pattern string) error
-	deleteJob func(ctx context.Context, id string) error
+	listJobs     func(ctx context.Context, limit, offset int) ([]store.Job, error)
+	statusCounts map[string]int64
+	getJob       func(ctx context.Context, id string) (store.Job, []store.JobEvent, error)
+	addEvent     func(ctx context.Context, jobID, stage, message string, data any) error
+	updateJob    func(ctx context.Context, id, title string, year int, status, pattern string) error
+	deleteJob    func(ctx context.Context, id string) error
 }
 
 func (m *mockStore) DeleteJob(ctx context.Context, id string) error {
@@ -34,6 +36,10 @@ func (m *mockStore) DeleteJob(ctx context.Context, id string) error {
 }
 
 func (m *mockStore) DeleteFinishedJobs(ctx context.Context) (int64, error) { return 3, nil }
+
+func (m *mockStore) JobStatusCounts(ctx context.Context) (map[string]int64, error) {
+	return m.statusCounts, nil
+}
 
 func (m *mockStore) ListJobs(ctx context.Context, limit, offset int) ([]store.Job, error) {
 	if m.listJobs != nil {
@@ -76,6 +82,10 @@ func newTestServer(st jobStore) *Server {
 		e:         e,
 		svc:       service.New(config.Defaults(), nil),
 		store:     st,
+		cfg:       config.Defaults(),
+		build:     BuildMetadata{Version: "dev", Commit: "unknown", BuildDate: "unknown"},
+		hostname:  "test-host",
+		startedAt: time.Now().UTC(),
 		ctx:       ctx,
 		cancel:    cancel,
 		curStates: map[string]service.ProgressEvent{},
@@ -104,6 +114,81 @@ func decodeJSON(t *testing.T, rr *httptest.ResponseRecorder, dst any) {
 		t.Fatalf("decode response body: %v (body: %s)", err, rr.Body.String())
 	}
 }
+
+func TestHandleInfoShapeAndSecretRedaction(t *testing.T) {
+	st := &mockStore{statusCounts: map[string]int64{"done": 8, "error": 2, "cancelled": 1}}
+	s := newTestServer(st)
+	s.cfg.Output.StagingDir = t.TempDir()
+	s.cfg.Output.NASPath = "rsync://nas-user:nas-password@nas.example.com/archive"
+	s.cfg.Metadata.TMDBApiKey = "tmdb-key-secret"
+	s.cfg.Metadata.TMDBAccessToken = "tmdb-token-secret"
+	s.cfg.Notification.WebhookURL = "https://n8n.example.com/webhook/webhook-secret"
+	s.cfg.Notification.DiscordWebhookURL = "https://discord.example.com/webhook/discord-secret"
+	s.build = BuildMetadata{Version: "v1.2.3", Commit: "abc1234", BuildDate: "2026-10-07T12:00:00Z"}
+	s.curStates["/dev/sr0"] = service.ProgressEvent{Device: "/dev/sr0", DriveStatus: "disc_present"}
+	s.infoCache.tools = toolVersions{
+		MakeMKV: toolVersion{Version: stringPointer("MakeMKV v1.18.3")},
+		FFprobe: toolVersion{Version: stringPointer("ffprobe version 7.1")},
+	}
+	s.infoCache.deliveryReachable = true
+	s.infoCache.deliveryExpiresAt = time.Now().Add(time.Minute)
+
+	rr := doRequest(t, s, http.MethodGet, "/api/info", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/info status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var got map[string]json.RawMessage
+	body := rr.Body.Bytes()
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode info response shape: %v (body: %s)", err, body)
+	}
+	wantFields := []string{
+		"name", "version", "commit", "build_date", "go_version", "hostname",
+		"started_at", "uptime_seconds", "drives_detected", "tools", "delivery",
+		"staging", "integrations", "stats",
+	}
+	if len(got) != len(wantFields) {
+		t.Fatalf("response has %d top-level fields, want %d: %s", len(got), len(wantFields), rr.Body.String())
+	}
+	for _, key := range wantFields {
+		if _, ok := got[key]; !ok {
+			t.Errorf("response missing field %q", key)
+		}
+	}
+	for _, secret := range []string{
+		"nas-user", "nas-password", "tmdb-key-secret", "tmdb-token-secret",
+		"webhook-secret", "discord-secret",
+	} {
+		if strings.Contains(string(body), secret) {
+			t.Errorf("response exposed secret %q", secret)
+		}
+	}
+
+	var response infoResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("decode info response: %v", err)
+	}
+	if response.Name != "SimpleRip" || response.Version != "v1.2.3" || response.Commit != "abc1234" {
+		t.Errorf("build identity = (%q, %q, %q)", response.Name, response.Version, response.Commit)
+	}
+	if response.DrivesDetected != 1 {
+		t.Errorf("drives_detected = %d, want 1", response.DrivesDetected)
+	}
+	if response.Delivery.Destination != "rsync://redacted@nas.example.com/archive" || !response.Delivery.Reachable {
+		t.Errorf("delivery = %+v", response.Delivery)
+	}
+	if !response.Integrations.TMDBConfigured || !response.Integrations.DiscordConfigured {
+		t.Errorf("integration configuration = %+v", response.Integrations)
+	}
+	if response.Stats != (ripStats{Done: 8, Error: 2, Cancelled: 1}) {
+		t.Errorf("stats = %+v", response.Stats)
+	}
+	if response.Staging.FreeBytes == nil || response.Staging.TotalBytes == nil || response.Staging.Error != "" {
+		t.Errorf("staging info = %+v", response.Staging)
+	}
+}
+
+func stringPointer(value string) *string { return &value }
 
 // ── GET /api/jobs ─────────────────────────────────────────────────────────────
 

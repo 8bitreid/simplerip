@@ -7,7 +7,9 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 
+	"github.com/8bitreid/simplerip/internal/config"
 	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/service"
 	"github.com/8bitreid/simplerip/internal/store"
@@ -41,6 +44,13 @@ type jobStore interface {
 	UpdateJob(ctx context.Context, id, title string, year int, status, pattern string) error
 	DeleteJob(ctx context.Context, id string) error
 	DeleteFinishedJobs(ctx context.Context) (int64, error)
+	JobStatusCounts(ctx context.Context) (map[string]int64, error)
+}
+
+type BuildMetadata struct {
+	Version   string
+	Commit    string
+	BuildDate string
 }
 
 // Server wraps the Echo HTTP server and provides WebSocket progress streaming.
@@ -49,6 +59,11 @@ type Server struct {
 	svc        *service.RipService
 	store      jobStore
 	devices    []string
+	cfg        *config.Config
+	build      BuildMetadata
+	hostname   string
+	startedAt  time.Time
+	infoCache  infoCache
 	mu         sync.RWMutex
 	curStates  map[string]service.ProgressEvent // device -> latest event
 	autoEject  map[string]bool
@@ -60,12 +75,24 @@ type Server struct {
 // New creates a new Server with the given RipService and optional store.
 // st may be nil — job history endpoints return appropriate error responses
 // when no database is configured.
-func New(svc *service.RipService, st *store.Store, devices []string) *Server {
+func New(svc *service.RipService, st *store.Store, devices []string, cfg *config.Config, build BuildMetadata) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
+	if cfg == nil {
+		cfg = config.Defaults()
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		slog.Error("getting hostname for server info", "error", err)
+		hostname = "unknown"
+	}
 	s := &Server{
 		e:         echo.New(),
 		svc:       svc,
 		devices:   append([]string(nil), devices...),
+		cfg:       cfg,
+		build:     build,
+		hostname:  hostname,
+		startedAt: time.Now().UTC(),
 		ctx:       ctx,
 		cancel:    cancel,
 		curStates: make(map[string]service.ProgressEvent),
@@ -84,6 +111,9 @@ func New(svc *service.RipService, st *store.Store, devices []string) *Server {
 	if st != nil {
 		s.store = st
 	}
+
+	s.infoCache.tools = probeToolVersions()
+	s.refreshDeliveryReachability(time.Now())
 
 	s.e.HideBanner = true
 	s.e.HidePort = true
@@ -104,6 +134,7 @@ func (s *Server) registerRoutes() {
 	s.e.GET("/", s.handleIndex)
 	s.e.GET("/ws/progress", s.handleProgressWS)
 	s.e.GET("/api/status", s.handleStatus)
+	s.e.GET("/api/info", s.handleInfo)
 	s.e.GET("/api/devices", s.handleDevices)
 	s.e.POST("/api/eject", s.handleEject)
 	s.e.POST("/api/eject/:device", s.handleEject)
