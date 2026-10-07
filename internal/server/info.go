@@ -24,6 +24,10 @@ const (
 )
 
 var rsyncCredentialPattern = regexp.MustCompile(`(^|//)[^/@]+@`)
+var (
+	ffprobeVersionPattern = regexp.MustCompile(`^ffprobe version\s+(\S+)`)
+	makeMKVVersionPattern = regexp.MustCompile(`MakeMKV v[\d.]+`)
+)
 
 type toolVersion struct {
 	Version *string `json:"version"`
@@ -86,22 +90,45 @@ func probeToolVersions() toolVersions {
 	ctx, cancel := context.WithTimeout(context.Background(), infoProbeTimeout)
 	defer cancel()
 	return toolVersions{
-		MakeMKV: probeToolVersion(ctx, "makemkvcon", "--version"),
-		FFprobe: probeToolVersion(ctx, "ffprobe", "-version"),
+		MakeMKV: probeMakeMKVVersion(ctx),
+		FFprobe: probeFFprobeVersion(ctx),
 	}
 }
 
-func probeToolVersion(ctx context.Context, name, arg string) toolVersion {
-	output, err := exec.CommandContext(ctx, name, arg).CombinedOutput()
+func probeMakeMKVVersion(ctx context.Context) toolVersion {
+	output, err := exec.CommandContext(ctx, "makemkvcon").CombinedOutput()
+	if version := parseMakeMKVVersion(output); version != "" {
+		return toolVersion{Version: &version}
+	}
 	if err != nil {
-		return toolVersion{Error: fmt.Sprintf("%s: %v", name, err)}
+		return toolVersion{Error: fmt.Sprintf("makemkvcon: %v", err)}
 	}
-	for _, line := range strings.Split(string(output), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			return toolVersion{Version: &line}
-		}
+	return toolVersion{Error: "makemkvcon returned no version information"}
+}
+
+func parseMakeMKVVersion(output []byte) string {
+	return makeMKVVersionPattern.FindString(string(output))
+}
+
+func probeFFprobeVersion(ctx context.Context) toolVersion {
+	output, err := exec.CommandContext(ctx, "ffprobe", "-version").CombinedOutput()
+	if err != nil {
+		return toolVersion{Error: fmt.Sprintf("ffprobe: %v", err)}
 	}
-	return toolVersion{Error: name + " returned no version information"}
+	version := parseFFprobeVersion(output)
+	if version == "" {
+		return toolVersion{Error: "ffprobe returned no version information"}
+	}
+	return toolVersion{Version: &version}
+}
+
+func parseFFprobeVersion(output []byte) string {
+	firstLine, _, _ := strings.Cut(string(output), "\n")
+	match := ffprobeVersionPattern.FindStringSubmatch(strings.TrimSpace(firstLine))
+	if len(match) < 2 {
+		return ""
+	}
+	return match[1]
 }
 
 func (s *Server) refreshDeliveryReachability(now time.Time) {

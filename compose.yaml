@@ -26,6 +26,7 @@ services:
       - TMDB_ACCESS_TOKEN=${TMDB_ACCESS_TOKEN:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - SIMPLERIP_UI_URL=${SIMPLERIP_UI_URL:-}
+      - SIMPLERIP_HOST=${SIMPLERIP_HOST:-}
     depends_on:
       db:
         condition: service_healthy

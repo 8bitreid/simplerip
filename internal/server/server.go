@@ -80,10 +80,14 @@ func New(svc *service.RipService, st *store.Store, devices []string, cfg *config
 	if cfg == nil {
 		cfg = config.Defaults()
 	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		slog.Error("getting hostname for server info", "error", err)
-		hostname = "unknown"
+	hostname := strings.TrimSpace(os.Getenv("SIMPLERIP_HOST"))
+	if hostname == "" {
+		var err error
+		hostname, err = os.Hostname()
+		if err != nil {
+			slog.Error("getting hostname for server info", "error", err)
+			hostname = "unknown"
+		}
 	}
 	s := &Server{
 		e:         echo.New(),

@@ -128,7 +128,7 @@ func TestHandleInfoShapeAndSecretRedaction(t *testing.T) {
 	s.curStates["/dev/sr0"] = service.ProgressEvent{Device: "/dev/sr0", DriveStatus: "disc_present"}
 	s.infoCache.tools = toolVersions{
 		MakeMKV: toolVersion{Version: stringPointer("MakeMKV v1.18.3")},
-		FFprobe: toolVersion{Version: stringPointer("ffprobe version 7.1")},
+		FFprobe: toolVersion{Version: stringPointer("7.1")},
 	}
 	s.infoCache.deliveryReachable = true
 	s.infoCache.deliveryExpiresAt = time.Now().Add(time.Minute)
@@ -189,6 +189,20 @@ func TestHandleInfoShapeAndSecretRedaction(t *testing.T) {
 }
 
 func stringPointer(value string) *string { return &value }
+
+func TestParseFFprobeVersion(t *testing.T) {
+	output := []byte("ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2024 the FFmpeg developers\nbuilt with gcc\n")
+	if got, want := parseFFprobeVersion(output), "6.1.1-3ubuntu5"; got != want {
+		t.Fatalf("parseFFprobeVersion() = %q, want %q", got, want)
+	}
+}
+
+func TestParseMakeMKVVersionFromStderr(t *testing.T) {
+	output := []byte("MakeMKV v2.0.0 linux(x64-release) started\nUse: makemkvcon [switches] Command [Parameters]\n")
+	if got, want := parseMakeMKVVersion(output), "MakeMKV v2.0.0"; got != want {
+		t.Fatalf("parseMakeMKVVersion() = %q, want %q", got, want)
+	}
+}
 
 // ── GET /api/jobs ─────────────────────────────────────────────────────────────
 
