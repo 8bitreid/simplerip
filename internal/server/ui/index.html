@@ -189,6 +189,40 @@ header h1 {
 @media (max-width: 900px) {
   .app { padding: 16px 12px 32px; }
   .layout { grid-template-columns: minmax(0, 1fr); }
+  body { padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
+  .panel { display: none; }
+  .layout[data-tab="drives"] .panel[data-panel="drives"] { display: grid; }
+  .layout[data-tab="rips"] .panel[data-panel="rips"],
+  .layout[data-tab="info"] .panel[data-panel="info"] { display: block; }
+  .tabbar {
+    position: fixed;
+    z-index: 100;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    justify-content: space-around;
+    gap: 8px;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+  }
+  .tabbar button {
+    flex: 1;
+    min-height: 40px;
+    padding: 8px 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font: inherit;
+    cursor: pointer;
+  }
+  .tabbar button[aria-current="page"] {
+    color: var(--text);
+    border-color: var(--accent);
+    background: rgba(99,102,241,0.15);
+  }
 }
 
 .drive-card {
@@ -685,6 +719,30 @@ let jobsHasMore = false;
 let jobsLoadingMore = false;
 let selectedJobId = null;
 let jobsRefreshTimer = null;
+const layout = document.querySelector('.layout');
+const validTabs = new Set(['drives', 'rips', 'info']);
+
+function setActiveTab(tab, save = true) {
+  if (!validTabs.has(tab) || !layout) return;
+  layout.dataset.tab = tab;
+  document.querySelectorAll('.tabbar [data-go]').forEach(button => {
+    if (button.dataset.go === tab) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  });
+  if (save) {
+    try { localStorage.setItem('tab', tab); } catch (_) {}
+  }
+}
+
+function initTabs() {
+  let storedTab = '';
+  try { storedTab = localStorage.getItem('tab') || ''; } catch (_) {}
+  const tab = validTabs.has(storedTab) ? storedTab : 'drives';
+  setActiveTab(tab);
+  document.querySelectorAll('.tabbar [data-go]').forEach(button => {
+    button.addEventListener('click', () => setActiveTab(button.dataset.go));
+  });
+}
 
 // ── Rendering helpers ────────────────────────────────────────────────────
 
@@ -1541,6 +1599,7 @@ function connectWS() {
 
 // ── Boot ─────────────────────────────────────────────────────────────────
 
+initTabs();
 loadDevices();
 loadJobs();
 loadDriveStatuses();
