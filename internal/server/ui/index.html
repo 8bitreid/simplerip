@@ -172,6 +172,10 @@ header h1 {
   font-size: 12px;
 }
 
+.tabbar {
+  display: none;
+}
+
 /* ── Drive grid ── */
 
 .drives-grid {
@@ -617,10 +621,10 @@ header h1 {
 </head>
 <body>
 <div class="app">
-  <div class="layout">
+  <div class="layout" data-tab="drives">
     <aside class="sidebar">
       <header><h1>SimpleRip</h1></header>
-      <div id="info-card" class="info-card">
+      <div id="info-card" class="info-card panel" data-panel="info">
         <h2>SimpleRip</h2>
         <div class="info-card-body">
           <div class="info-empty">Loading system info…</div>
@@ -628,8 +632,8 @@ header h1 {
       </div>
     </aside>
     <main class="main-content">
-      <div id="drives-grid" class="drives-grid"></div>
-      <div>
+      <div id="drives-grid" class="drives-grid panel" data-panel="drives"></div>
+      <div class="panel" data-panel="rips">
         <div class="section-title">Recent Rips <button id="clear-jobs" class="btn" style="margin-left:12px;display:none">Clear all</button></div>
         <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
         <button id="load-more-jobs" class="btn" style="display:none;margin:12px auto">Load more rips</button>
@@ -637,6 +641,11 @@ header h1 {
       </div>
     </main>
   </div>
+  <nav class="tabbar" aria-label="Dashboard sections">
+    <button type="button" data-go="drives">Drives</button>
+    <button type="button" data-go="rips">Recent Rips</button>
+    <button type="button" data-go="info">Info</button>
+  </nav>
 </div>
 
 <script>
