@@ -78,6 +78,81 @@ header h1 {
   letter-spacing: -0.02em;
 }
 
+.info-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.info-card h2 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.info-card-body {
+  display: grid;
+  gap: 8px;
+}
+
+.info-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.info-row strong,
+.info-row span {
+  color: var(--text);
+}
+
+.info-row .muted {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.info-value {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.info-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  display: inline-block;
+}
+
+.status-dot.ok { background: var(--green); }
+.status-dot.warn { background: var(--yellow); }
+.status-dot.bad { background: var(--red); }
+
+.info-warning {
+  color: var(--yellow);
+}
+
+.info-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 /* ── Drive grid ── */
 
 .drives-grid {
@@ -526,6 +601,12 @@ header h1 {
   <div class="layout">
     <aside class="sidebar">
       <header><h1>SimpleRip</h1></header>
+      <div id="info-card" class="info-card">
+        <h2>SimpleRip</h2>
+        <div class="info-card-body">
+          <div class="info-empty">Loading system info…</div>
+        </div>
+      </div>
     </aside>
     <main class="main-content">
       <div id="drives-grid" class="drives-grid"></div>
@@ -1010,6 +1091,96 @@ function showToast(text) {
   setTimeout(() => el.remove(), 8000);
 }
 
+function fmtUptime(totalSeconds) {
+  if (!Number.isFinite(totalSeconds)) return 'Unavailable';
+  const secs = Math.max(0, Math.floor(totalSeconds));
+  const days = Math.floor(secs / 86400);
+  const hours = Math.floor((secs % 86400) / 3600);
+  const mins = Math.floor((secs % 3600) / 60);
+  const remainder = secs % 60;
+  if (days > 0) return `${days}d ${hours}h ${mins}m`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  if (mins > 0) return `${mins}m ${remainder}s`;
+  return `${remainder}s`;
+}
+
+function statusDotHTML(ok, warn) {
+  const cls = ok ? 'ok' : (warn ? 'warn' : 'bad');
+  return `<span class="status-dot ${cls}"></span>`;
+}
+
+function renderInfoCard(info) {
+  const el = document.getElementById('info-card');
+  if (!el) return;
+  if (!info) {
+    el.innerHTML = '<h2>SimpleRip</h2><div class="info-card-body"><div class="info-empty">System info unavailable.</div></div>';
+    return;
+  }
+
+  const version = info.version || 'dev';
+  const commit = info.commit ? String(info.commit).slice(0, 7) : 'unknown';
+  const buildDate = info.build_date ? new Date(info.build_date).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'unknown';
+  const uptime = info.started_at ? fmtUptime((Date.now() - new Date(info.started_at).getTime()) / 1000) : 'Unavailable';
+  const host = info.hostname || 'unknown';
+  const makemkv = info.tools && info.tools.makemkvcon && info.tools.makemkvcon.version ? info.tools.makemkvcon.version : 'unavailable';
+  const ffprobe = info.tools && info.tools.ffprobe && info.tools.ffprobe.version ? info.tools.ffprobe.version : 'unavailable';
+  const deliveryTarget = info.delivery && info.delivery.destination ? info.delivery.destination : 'not configured';
+  const deliveryReachable = !!(info.delivery && info.delivery.reachable);
+  const staging = info.staging || {};
+  const freeBytes = Number(staging.free_bytes || 0);
+  const totalBytes = Number(staging.total_bytes || 0);
+  const stagingPct = totalBytes > 0 ? (freeBytes / totalBytes) * 100 : 0;
+  const stagingWarn = stagingPct < 10 || freeBytes < 50 * 1024 * 1024 * 1024;
+  const tmdb = !!(info.integrations && info.integrations.tmdb_configured);
+  const discord = !!(info.integrations && info.integrations.discord_configured);
+  const done = Number(info.stats && info.stats.done ? info.stats.done : 0);
+  const errors = Number(info.stats && info.stats.error ? info.stats.error : 0);
+
+  el.innerHTML = `
+    <h2>SimpleRip</h2>
+    <div class="info-card-body">
+      <div class="info-row"><span>Version</span><div class="info-value"><strong>${esc(version)}</strong><div class="muted">${esc(commit)} · ${esc(buildDate)}</div></div></div>
+      <div class="info-row"><span>Uptime</span><div class="info-value"><strong>${esc(uptime)}</strong></div></div>
+      <div class="info-row"><span>Host</span><div class="info-value"><strong>${esc(host)}</strong></div></div>
+      <div class="info-row"><span>makemkvcon</span><div class="info-value"><strong>${esc(String(makemkv))}</strong></div></div>
+      <div class="info-row"><span>ffprobe</span><div class="info-value"><strong>${esc(String(ffprobe))}</strong></div></div>
+      <div class="info-row"><span>Delivery</span><div class="info-value"><span class="info-status">${statusDotHTML(deliveryReachable, !deliveryReachable)}<strong>${esc(deliveryTarget)}</strong></span></div></div>
+      <div class="info-row"><span>Staging</span><div class="info-value"><span class="info-status ${stagingWarn ? 'info-warning' : ''}">${staging.free_bytes ? `${esc((freeBytes / (1024 * 1024 * 1024)).toFixed(1))} GB free` : 'Unavailable'}</span></div></div>
+      <div class="info-row"><span>TMDB</span><div class="info-value"><span class="info-status">${statusDotHTML(tmdb, !tmdb)}<strong>${tmdb ? 'configured' : 'missing'}</strong></span></div></div>
+      <div class="info-row"><span>Discord</span><div class="info-value"><span class="info-status">${statusDotHTML(discord, !discord)}<strong>${discord ? 'configured' : 'missing'}</strong></span></div></div>
+      <div class="info-row"><span>Rips</span><div class="info-value"><strong>${done} done · ${errors} error</strong></div></div>
+    </div>
+  `;
+}
+
+function updateInfoUptime() {
+  if (!document.getElementById('info-card')) return;
+  const card = document.getElementById('info-card');
+  const start = card.dataset.startedAt;
+  if (!start) return;
+  const started = new Date(start);
+  if (Number.isNaN(started.getTime())) return;
+  const uptime = fmtUptime((Date.now() - started.getTime()) / 1000);
+  const uptimeNode = card.querySelector('.info-row:nth-child(2) .info-value strong');
+  if (uptimeNode) uptimeNode.textContent = uptime;
+}
+
+async function loadSystemInfo() {
+  try {
+    const response = await fetch('/api/info');
+    if (!response.ok) throw new Error('system info request failed');
+    const info = await response.json();
+    const card = document.getElementById('info-card');
+    if (card) {
+      card.dataset.startedAt = info.started_at || '';
+    }
+    renderInfoCard(info);
+    updateInfoUptime();
+  } catch (_) {
+    renderInfoCard(null);
+  }
+}
+
 // ── Jobs list ────────────────────────────────────────────────────────────
 
 async function loadJobs() {
@@ -1346,7 +1517,10 @@ function connectWS() {
 loadDevices();
 loadJobs();
 loadDriveStatuses();
+loadSystemInfo();
 setInterval(loadDriveStatuses, 5000);
+setInterval(loadSystemInfo, 30000);
+setInterval(updateInfoUptime, 1000);
 connectWS();
 </script>
 </body>
