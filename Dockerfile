@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
-        -ldflags="-s -w -X github.com/8bitreid/simplerip/cmd/simplerip.Version=${VERSION} -X github.com/8bitreid/simplerip/cmd/simplerip.Commit=${COMMIT} -X github.com/8bitreid/simplerip/cmd/simplerip.BuildDate=${BUILD_DATE}" \
+        -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
         -o /simplerip \
         ./cmd/simplerip
 

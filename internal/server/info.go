@@ -164,7 +164,9 @@ func (s *Server) handleInfo(c echo.Context) error {
 
 	var stats ripStats
 	if s.store != nil {
-		counts, err := s.store.JobStatusCounts(c.Request().Context())
+		statsCtx, cancel := context.WithTimeout(c.Request().Context(), infoProbeTimeout)
+		defer cancel()
+		counts, err := s.store.JobStatusCounts(statsCtx)
 		if err != nil {
 			slog.Error("reading rip history counts", "error", err)
 			return c.JSON(500, map[string]string{"error": "unable to read rip history counts"})

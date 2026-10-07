@@ -1,6 +1,11 @@
 services:
   simplerip:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     image: simplerip:local
     ports:
       - "8080:8080"
