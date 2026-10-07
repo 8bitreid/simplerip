@@ -223,7 +223,30 @@ header h1 {
     border-color: var(--accent);
     background: rgba(99,102,241,0.15);
   }
-}
+    .tab-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      margin-left: 5px;
+      padding: 0 5px;
+      border-radius: 999px;
+      background: var(--red);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
+      vertical-align: middle;
+    }
+    .tab-badge.tab-badge-dot {
+      width: 8px;
+      min-width: 8px;
+      height: 8px;
+      padding: 0;
+    }
+    .tab-badge[hidden] { display: none; }
+  }
 
 .drive-card {
   background: var(--surface);
@@ -676,8 +699,8 @@ header h1 {
     </main>
   </div>
   <nav class="tabbar" aria-label="Dashboard sections">
-    <button type="button" data-go="drives">Drives</button>
-    <button type="button" data-go="rips">Recent Rips</button>
+    <button type="button" data-go="drives">Drives<span id="drives-tab-badge" class="tab-badge tab-badge-dot" hidden></span></button>
+    <button type="button" data-go="rips">Recent Rips<span id="rips-tab-badge" class="tab-badge" hidden></span></button>
     <button type="button" data-go="info">Info</button>
   </nav>
 </div>
@@ -729,6 +752,7 @@ function setActiveTab(tab, save = true) {
     if (button.dataset.go === tab) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   });
+  updateTabBadges();
   if (save) {
     try { localStorage.setItem('tab', tab); } catch (_) {}
   }
@@ -742,6 +766,23 @@ function initTabs() {
   document.querySelectorAll('.tabbar [data-go]').forEach(button => {
     button.addEventListener('click', () => setActiveTab(button.dataset.go));
   });
+}
+
+function updateTabBadges() {
+  const activeTab = layout && layout.dataset.tab;
+  const drivesBadge = document.getElementById('drives-tab-badge');
+  const hasActiveDrive = Object.values(driveStates).some(isDriveActive);
+  if (drivesBadge) drivesBadge.hidden = !hasActiveDrive || activeTab === 'drives';
+
+  const ripsBadge = document.getElementById('rips-tab-badge');
+  if (ripsBadge) {
+    const recentErrors = jobs
+      .filter(job => isTerminal(job.Status))
+      .slice(0, 20)
+      .filter(job => String(job.Status).toLowerCase() === 'error').length;
+    ripsBadge.textContent = recentErrors > 9 ? '9+' : String(recentErrors);
+    ripsBadge.hidden = recentErrors === 0 || activeTab === 'rips';
+  }
 }
 
 // ── Rendering helpers ────────────────────────────────────────────────────
@@ -891,6 +932,7 @@ function scheduleJobsRefresh() {
 }
 
 function renderDrives() {
+  updateTabBadges();
   const grid = document.getElementById('drives-grid');
   // Re-rendering replaces the DOM, which would drop focus and typed text on
   // every progress tick. Skip while the user is typing in a card's search box.
@@ -1310,6 +1352,7 @@ async function loadDevices() {
 }
 
 function renderJobs() {
+  updateTabBadges();
   const el = document.getElementById('jobs-table');
   const historical = jobs.filter(j => isTerminal(j.Status));
   document.getElementById('clear-jobs').style.display = historical.length ? '' : 'none';
