@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -25,16 +26,41 @@ import (
 	"github.com/8bitreid/simplerip/internal/store"
 )
 
-const version = "0.1.0-dev"
+var (
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildDate = "unknown"
+)
 
 // cfgPath holds the value of the --config persistent flag.
 var cfgPath string
 
 func main() {
 	configureLogger()
+	setBuildCommitFallback()
+	slog.Info("starting SimpleRip", "version", Version, "commit", Commit, "build_date", BuildDate)
 	if err := rootCmd.Execute(); err != nil {
 		slog.Error("command failed", "error", err)
 		os.Exit(1)
+	}
+}
+
+func setBuildCommitFallback() {
+	if Commit != "unknown" {
+		return
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" && setting.Value != "" {
+			Commit = setting.Value
+			if len(Commit) > 7 {
+				Commit = Commit[:7]
+			}
+			return
+		}
 	}
 }
 
@@ -363,7 +389,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the simplerip version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println(version)
+		fmt.Println(Version)
 	},
 }
 

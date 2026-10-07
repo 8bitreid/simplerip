@@ -3,6 +3,10 @@ FROM golang:1.25-alpine AS gobuilder
 
 WORKDIR /src
 
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
 # Cache module downloads separately from source.
 COPY go.mod go.sum ./
 RUN go mod download
@@ -10,7 +14,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
-        -ldflags="-s -w" \
+        -ldflags="-s -w -X github.com/8bitreid/simplerip/cmd/simplerip.Version=${VERSION} -X github.com/8bitreid/simplerip/cmd/simplerip.Commit=${COMMIT} -X github.com/8bitreid/simplerip/cmd/simplerip.BuildDate=${BUILD_DATE}" \
         -o /simplerip \
         ./cmd/simplerip
 
