@@ -50,9 +50,21 @@ body {
 }
 
 .app {
-  max-width: 1100px;
+  max-width: 1600px;
   margin: 0 auto;
-  padding: 20px 16px 48px;
+  padding: 20px 24px 48px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.sidebar,
+.main-content {
+  min-width: 0;
 }
 
 header {
@@ -70,9 +82,15 @@ header h1 {
 
 .drives-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+  align-items: start;
   margin-bottom: 28px;
+}
+
+@media (max-width: 900px) {
+  .app { padding: 16px 12px 32px; }
+  .layout { grid-template-columns: minmax(0, 1fr); }
 }
 
 .drive-card {
@@ -101,18 +119,16 @@ header h1 {
   font-size: 15px;
   font-weight: 600;
   margin-bottom: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .drive-subtitle {
   font-size: 12px;
   color: var(--text-muted);
   margin-bottom: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .drive-idle {
@@ -507,13 +523,19 @@ header h1 {
 </head>
 <body>
 <div class="app">
-  <header><h1>SimpleRip</h1></header>
-  <div id="drives-grid" class="drives-grid"></div>
-  <div>
-    <div class="section-title">Recent Rips <button id="clear-jobs" class="btn" style="margin-left:12px;display:none">Clear all</button></div>
-    <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
-    <button id="load-more-jobs" class="btn" style="display:none;margin:12px auto">Load more rips</button>
-    <div id="detail-panel" style="display:none"></div>
+  <div class="layout">
+    <aside class="sidebar">
+      <header><h1>SimpleRip</h1></header>
+    </aside>
+    <main class="main-content">
+      <div id="drives-grid" class="drives-grid"></div>
+      <div>
+        <div class="section-title">Recent Rips <button id="clear-jobs" class="btn" style="margin-left:12px;display:none">Clear all</button></div>
+        <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
+        <button id="load-more-jobs" class="btn" style="display:none;margin:12px auto">Load more rips</button>
+        <div id="detail-panel" style="display:none"></div>
+      </div>
+    </main>
   </div>
 </div>
 
