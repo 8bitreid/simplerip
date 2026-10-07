@@ -122,14 +122,33 @@ header h1 {
   align-items: flex-end;
   text-align: right;
   min-width: 0;
-  overflow-wrap: anywhere;
+  max-width: 65%;
+  overflow: hidden;
+}
+
+.info-value > strong,
+.info-value .muted,
+.info-status strong {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .info-status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   white-space: nowrap;
+}
+
+.info-status .status-dot {
+  flex: 0 0 8px;
 }
 
 .status-dot {
@@ -1118,7 +1137,6 @@ function renderInfoCard(info) {
   }
 
   const version = info.version || 'dev';
-  const commit = info.commit ? String(info.commit).slice(0, 7) : 'unknown';
   const buildDate = info.build_date ? new Date(info.build_date).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'unknown';
   const uptime = info.started_at ? fmtUptime((Date.now() - new Date(info.started_at).getTime()) / 1000) : 'Unavailable';
   const host = info.hostname || 'unknown';
@@ -1139,7 +1157,7 @@ function renderInfoCard(info) {
   el.innerHTML = `
     <h2>SimpleRip</h2>
     <div class="info-card-body">
-      <div class="info-row"><span>Version</span><div class="info-value"><strong>${esc(version)}</strong><div class="muted">${esc(commit)} · ${esc(buildDate)}</div></div></div>
+      <div class="info-row"><span>Version</span><div class="info-value"><strong>${esc(version)}</strong><div class="muted">${esc(buildDate)}</div></div></div>
       <div class="info-row"><span>Uptime</span><div class="info-value"><strong>${esc(uptime)}</strong></div></div>
       <div class="info-row"><span>Host</span><div class="info-value"><strong>${esc(host)}</strong></div></div>
       <div class="info-row"><span>makemkvcon</span><div class="info-value"><strong>${esc(String(makemkv))}</strong></div></div>
