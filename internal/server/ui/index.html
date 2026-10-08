@@ -380,6 +380,7 @@ header h1 {
 }
 @media (prefers-reduced-motion: reduce) {
   .prog-fill.indeterminate { animation: none; width: 100%; opacity: 0.4; }
+  .job-chevron, .job-detail { transition: none; }
 }
 
 .eject-btn {
@@ -507,18 +508,33 @@ header h1 {
 .has-tip:hover::after, .has-tip:focus::after { opacity: 1; }
 .job-row {
   display: grid;
-  grid-template-columns: 1fr auto auto auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto auto;
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  width: 100%;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 0.12s;
   min-width: 0;
 }
-.job-row:last-child { border-bottom: none; }
 .job-row:hover    { background: var(--surface2); }
 .job-row.selected { background: var(--surface2); }
+
+.job-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+.job-entry:last-child { border-bottom: none; }
+.job-chevron { transition: transform 0.18s ease; }
+.job-row[aria-expanded="true"] .job-chevron { transform: rotate(90deg); }
+.job-delete { margin-right: 10px; }
 
 .job-title-col { min-width: 0; }
 .job-title-text {
@@ -532,11 +548,21 @@ header h1 {
 
 /* ── Detail panel ── */
 
+.job-detail {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 0.2s ease, opacity 0.2s ease;
+}
+.job-detail.open { grid-template-rows: 1fr; opacity: 1; }
+.job-detail-inner { min-height: 0; overflow: hidden; }
+
 .detail-panel {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  margin-top: 10px;
+  margin: 0 10px 10px;
   padding: 20px;
 }
 
@@ -694,7 +720,6 @@ header h1 {
         <div class="section-title">Recent Rips <button id="clear-jobs" class="btn" style="margin-left:12px;display:none">Clear all</button></div>
         <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
         <button id="load-more-jobs" class="btn" style="display:none;margin:12px auto">Load more rips</button>
-        <div id="detail-panel" style="display:none"></div>
       </div>
     </main>
   </div>
@@ -741,6 +766,7 @@ let jobs = [];
 let jobsHasMore = false;
 let jobsLoadingMore = false;
 let selectedJobId = null;
+let detailPanel = null;
 let jobsRefreshTimer = null;
 const layout = document.querySelector('.layout');
 const validTabs = new Set(['drives', 'rips', 'info']);
@@ -1357,6 +1383,12 @@ function renderJobs() {
   const historical = jobs.filter(j => isTerminal(j.Status));
   document.getElementById('clear-jobs').style.display = historical.length ? '' : 'none';
   updateLoadMoreButton();
+  const focused = detailPanel && detailPanel.contains(document.activeElement)
+    ? document.activeElement
+    : null;
+  const selectionStart = focused && typeof focused.selectionStart === 'number' ? focused.selectionStart : null;
+  const selectionEnd = focused && typeof focused.selectionEnd === 'number' ? focused.selectionEnd : null;
+  if (detailPanel) detailPanel.remove();
   if (!historical.length) {
     el.innerHTML = '<div class="jobs-empty">No completed rips yet.</div>';
     return;
@@ -1364,10 +1396,12 @@ function renderJobs() {
   el.innerHTML = historical.map(j => {
     const title = j.Title || j.DiscLabel || '—';
     const year  = j.Year && !title.includes(`(${j.Year})`) ? ` (${j.Year})` : '';
-    const sel   = j.ID === selectedJobId ? ' selected' : '';
+    const isOpen = j.ID === selectedJobId;
 
     return `
-      <div class="job-row${sel}" data-id="${escAttr(j.ID)}">
+      <div class="job-entry" data-entry-id="${escAttr(j.ID)}">
+      <button type="button" class="job-row${isOpen ? ' selected' : ''}" id="job-row-${escAttr(j.ID)}"
+        data-id="${escAttr(j.ID)}" aria-expanded="${isOpen}" aria-controls="detail-panel">
         <div class="job-title-col">
           <div class="job-title-text">${esc(title)}${esc(year)}</div>
         </div>
@@ -1375,9 +1409,12 @@ function renderJobs() {
         <span class="job-meta">${j.DiscType && j.DiscType !== 'unknown' ? esc(fmtDiscType(j.DiscType)) : ''}</span>
         <span class="job-meta">${fmtDate(j.FinishedAt || j.CreatedAt)}</span>
         ${j.Status === 'error' && (j.ErrorSummary || j.ErrorHint)
-          ? `<span class="badge badge-error has-tip" tabindex="0" data-tip="${escAttr([j.ErrorSummary, j.ErrorHint && 'Try this: ' + j.ErrorHint].filter(Boolean).join('\n\n'))}">error ⓘ</span>`
+          ? `<span class="badge badge-error has-tip" data-tip="${escAttr([j.ErrorSummary, j.ErrorHint && 'Try this: ' + j.ErrorHint].filter(Boolean).join('\n\n'))}">error ⓘ</span>`
           : badgeHTML(j.Status)}
-        <button class="btn job-delete" data-id="${escAttr(j.ID)}" title="Delete from history">🗑</button>
+        <span class="job-chevron" aria-hidden="true">›</span>
+      </button>
+      <button type="button" class="btn job-delete" data-id="${escAttr(j.ID)}"
+        title="Delete from history" aria-label="Delete rip from history">🗑</button>
       </div>`;
   }).join('');
   el.querySelectorAll('.job-row').forEach(row => {
@@ -1386,6 +1423,15 @@ function renderJobs() {
   el.querySelectorAll('.job-delete').forEach(btn => {
     btn.addEventListener('click', e => { e.stopPropagation(); deleteJob(btn.dataset.id); });
   });
+  if (detailPanel && selectedJobId) {
+    const entry = Array.from(el.querySelectorAll('.job-entry'))
+      .find(item => item.dataset.entryId === selectedJobId);
+    if (entry) entry.appendChild(detailPanel);
+  }
+  if (focused && focused.isConnected) {
+    focused.focus({ preventScroll: true });
+    if (selectionStart !== null && selectionEnd !== null) focused.setSelectionRange(selectionStart, selectionEnd);
+  }
 }
 
 document.getElementById('load-more-jobs').addEventListener('click', () => fetchJobsPage(false));
@@ -1412,7 +1458,7 @@ async function deleteJob(id) {
   if (!confirm('Delete this rip from history? Delivered files are not touched.')) return;
   const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!r.ok && r.status !== 404) { alert('Delete failed'); return; }
-  if (selectedJobId === id) { selectedJobId = null; document.getElementById('detail-panel').style.display = 'none'; }
+  if (selectedJobId === id) { selectedJobId = null; if (detailPanel) detailPanel.remove(); }
   await loadJobs();
 }
 
@@ -1421,31 +1467,68 @@ document.getElementById('clear-jobs').addEventListener('click', async () => {
   const r = await fetch('/api/jobs', { method: 'DELETE' });
   if (!r.ok) { alert('Clear failed'); return; }
   selectedJobId = null;
-  document.getElementById('detail-panel').style.display = 'none';
+  if (detailPanel) detailPanel.remove();
   await loadJobs();
 });
 
 // ── Detail panel ─────────────────────────────────────────────────────────
 
 async function openJob(id) {
-  const panel = document.getElementById('detail-panel');
   if (selectedJobId === id) {
+    const row = document.getElementById(`job-row-${CSS.escape(id)}`);
     selectedJobId = null;
-    panel.style.display = 'none';
-    renderJobs();
+    if (row) {
+      row.setAttribute('aria-expanded', 'false');
+      row.classList.remove('selected');
+    }
+    if (detailPanel) {
+      const panel = detailPanel;
+      panel.inert = true;
+      panel.classList.remove('open');
+      const finishCollapse = () => {
+        if (!selectedJobId && !panel.classList.contains('open')) panel.remove();
+      };
+      const onTransitionEnd = event => {
+        if (event.target === panel && event.propertyName === 'opacity') {
+          panel.removeEventListener('transitionend', onTransitionEnd);
+          finishCollapse();
+        }
+      };
+      panel.addEventListener('transitionend', onTransitionEnd);
+      setTimeout(() => {
+        panel.removeEventListener('transitionend', onTransitionEnd);
+        finishCollapse();
+      }, 250);
+    }
     return;
   }
   selectedJobId = id;
+  if (!detailPanel) {
+    detailPanel = document.createElement('div');
+    detailPanel.id = 'detail-panel';
+    detailPanel.className = 'job-detail';
+    detailPanel.setAttribute('role', 'region');
+    detailPanel.setAttribute('aria-label', 'Rip details');
+  }
+  detailPanel.inert = false;
+  detailPanel.classList.remove('open');
+  detailPanel.innerHTML = '<div class="job-detail-inner"><div class="detail-panel" style="color:var(--text-muted)">Loading…</div></div>';
   renderJobs();
-  panel.style.display = 'block';
-  panel.innerHTML = '<div style="padding:20px;color:var(--text-muted)">Loading…</div>';
+  const row = document.getElementById(`job-row-${CSS.escape(id)}`);
+  if (row) row.scrollIntoView({ block: 'nearest' });
+  requestAnimationFrame(() => {
+    if (selectedJobId === id && detailPanel) detailPanel.classList.add('open');
+  });
   try {
     const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
     if (!r.ok) throw new Error('not found');
     const { job, events } = await r.json();
+    if (selectedJobId !== id) return;
     renderDetail(job, events || []);
   } catch (_) {
-    panel.innerHTML = `<div class="detail-panel"><div style="color:var(--red);padding:4px">Failed to load job.</div></div>`;
+    if (selectedJobId === id) {
+      detailPanel.innerHTML = `<div class="job-detail-inner"><div class="detail-panel"><div style="color:var(--red);padding:4px">Failed to load job.</div></div></div>`;
+    }
   }
 }
 
@@ -1489,7 +1572,7 @@ document.addEventListener('click', e => {
 });
 
 function renderDetail(job, events) {
-  const panel = document.getElementById('detail-panel');
+  const panel = detailPanel;
   const title = job.Title || job.DiscLabel || '—';
   const year  = job.Year ? ` (${job.Year})` : '';
 
@@ -1509,7 +1592,7 @@ function renderDetail(job, events) {
       }).join('');
 
   panel.innerHTML = `
-    <div class="detail-panel">
+    <div class="job-detail-inner"><div class="detail-panel">
       <div class="detail-header">
         <div>
           <div class="detail-title">${esc(title)}${esc(year)}</div>
@@ -1520,11 +1603,10 @@ function renderDetail(job, events) {
             <span>${fmtDate(job.CreatedAt)}</span>
           </div>
         </div>
-        <button class="close-btn" id="det-close">✕</button>
       </div>
       <div class="timeline">${timelineHTML}</div>
       ${alternatesHTML(job, events)}
-      <div class="reid-section">
+      ${['done', 'error', 'cancelled'].includes(String(job.Status || '').toLowerCase()) ? `<div class="reid-section">
         <div class="reid-heading">Re-identify</div>
         <div class="search-row">
           <input class="search-input" id="reid-q" type="text"
@@ -1534,14 +1616,8 @@ function renderDetail(job, events) {
         </div>
         <div id="reid-results" class="search-results"></div>
         <div id="reid-msg"></div>
-      </div>
-    </div>`;
-
-  document.getElementById('det-close').addEventListener('click', () => {
-    selectedJobId = null;
-    panel.style.display = 'none';
-    renderJobs();
-  });
+      </div>` : ''}
+    </div></div></div>`;
 
   panel.querySelectorAll('.tl-event').forEach(row => {
     row.addEventListener('click', () => {
@@ -1551,6 +1627,7 @@ function renderDetail(job, events) {
   });
 
   const qInput  = document.getElementById('reid-q');
+  if (!qInput) return;
   const btn     = document.getElementById('reid-btn');
   const results = document.getElementById('reid-results');
   const msg     = document.getElementById('reid-msg');
@@ -1619,11 +1696,9 @@ async function applyReidentify(jobId, payload) {
       return;
     }
     msg.innerHTML = `<div class="msg-success">Updated to "${esc(data.Title || payload.title)}". ${esc(data.message || '')}</div>`;
+    const title = detailPanel && detailPanel.querySelector('.detail-title');
+    if (title) title.textContent = `${data.Title || payload.title}${data.Year ? ` (${data.Year})` : ''}`;
     await loadJobs();
-    // Re-render the detail panel with fresh data
-    const selectedId = selectedJobId;
-    selectedJobId = null;
-    await openJob(selectedId);
   } catch (_) {
     msg.innerHTML = '<div class="msg-error">Request failed.</div>';
   }
