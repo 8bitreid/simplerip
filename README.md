@@ -198,6 +198,14 @@ If no response is received within `response_timeout_minutes`, extras are skipped
 | Ambiguous | Ask via Discord |
 | Under 2 minutes | Silently ignored (junk) |
 
+TV discs rip their selected titles in one `makemkvcon` invocation. The batch
+timeout is `batch_analyze_budget_minutes` plus
+`batch_save_budget_minutes` multiplied by the number of selected titles
+(defaults: 45 minutes for analysis and 10 minutes per title save). If a batch
+fails partway through, completed title files are kept and only missing titles
+are retried individually. Movie ripping continues to use one invocation per
+title.
+
 When TMDB credentials are configured, TV discs are searched using a normalized disc label and, when available, meaningful MakeMKV title names. Similarity and the lead over competing results must support a clear show match before the show name is used automatically. Identification evidence, candidate titles, separate show/season/episode confidence, and lookup errors are recorded in job history; a suggestion is not a probability. An uncertain show keeps the safe disc-label naming and remains searchable/correctable in the UI. Movie lookup behavior is unchanged.
 
 Season inference is separate from show identification. SimpleRip compares the runtimes of the episode-like title cluster with every regular season's episode runtimes when TMDB provides complete data for no more than 20 seasons; it chooses a season only when at least three titles support a close and distinctive match. Explicit season/episode markers in all relevant MakeMKV title names can also identify both directly. Episode numbers are otherwise inferred only when individual runtimes uniquely identify episodes; MakeMKV title indexes are never assumed to be viewing order. `DISC1`/volume labels are removed from the search query but are never treated as season numbers.

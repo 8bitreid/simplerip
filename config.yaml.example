@@ -60,10 +60,13 @@ makemkv:
   #   export MAKEMKV_KEY="your-key-here"
   # Get a free beta key at https://www.makemkv.com/forum/viewtopic.php?t=1053
 
-  # Maximum duration for each makemkvcon scan or title rip. Multi-title discs
-  # can take longer than this overall because each title gets its own timeout.
-  # Blu-ray rips typically take 20–60 min; 120 gives a comfortable margin.
+  # Maximum duration for each scan, movie rip, or single-title retry.
   timeout_minutes: 120
+
+  # TV discs are ripped in one MakeMKV invocation. Its timeout is the analyze
+  # budget plus this per-title save budget multiplied by the selected title count.
+  batch_analyze_budget_minutes: 45
+  batch_save_budget_minutes: 10
 
   # Read buffer size in MB. Larger values improve performance with slow or
   # uneven disc reads. Default is 256. Increase for faster drives.

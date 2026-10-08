@@ -470,6 +470,10 @@ func (s *Server) handleReidentify(c echo.Context) error {
 	// a rip waiting on manual input wakes on that event and reads it.
 	if !isFinished(existing.Status) && body.MediaType == "movie" {
 		s.svc.SetRipRuntime(existing.Device, s.svc.RuntimeFor(ctx, body.TMDBID))
+	} else if !isFinished(existing.Status) && body.MediaType == "tv" {
+		// A TV edit only renames; clear any earlier movie runtime so it can't
+		// restart a TV batch whose selected titles haven't changed.
+		s.svc.SetRipRuntime(existing.Device, 0)
 	}
 
 	_ = s.store.AddEvent(ctx, id, "identify",

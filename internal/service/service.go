@@ -517,6 +517,300 @@ func (s *RipService) scanInfo(ctx context.Context, device string) (*disc.Classif
 	return ripper.ScanInfo(scanCtx, "makemkvcon", device, s.cfg.MakeMKV.Key)
 }
 
+func (s *RipService) ripTVTitles(
+	ctx context.Context,
+	device, discName, mediaTitle string,
+	job store.Job,
+	titles []disc.MKVTitle,
+	outputDir string,
+	discType disc.DiscType,
+) ([]string, []int, error) {
+	total := len(titles)
+	if total == 0 {
+		return nil, nil, fmt.Errorf("no TV titles selected")
+	}
+	analyzeBudget := s.cfg.MakeMKV.BatchAnalyzeBudgetMinutes
+	if analyzeBudget < 1 {
+		analyzeBudget = 45
+	}
+	saveBudget := s.cfg.MakeMKV.BatchSaveBudgetMinutes
+	if saveBudget < 1 {
+		saveBudget = 10
+	}
+	timeoutMinutes, err := ripper.CalculateBatchTimeoutMinutes(analyzeBudget, saveBudget, total)
+	if err != nil {
+		return nil, nil, fmt.Errorf("calculate TV batch timeout: %w", err)
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < time.Duration(timeoutMinutes)*time.Minute {
+		slog.Warn("parent context deadline is shorter than the TV batch timeout",
+			"device", device, "batch_timeout_minutes", timeoutMinutes,
+			"parent_remaining", time.Until(deadline).String())
+	}
+
+	slog.Info("rip phase started", "phase", "analyzing", "device", device,
+		"disc", discName, "title_count", total, "batch", true)
+	s.emit(ProgressEvent{
+		Device:  device,
+		Stage:   "analyzing",
+		Title:   s.currentTitle(device, mediaTitle),
+		Percent: 0,
+		Message: fmt.Sprintf("Analyzing %d selected TV titles", total),
+	})
+	if s.store != nil {
+		for _, title := range titles {
+			audioDesc := fmt.Sprintf("%.1fh, %d audio tracks", title.Duration.Hours(), title.AudioTrackCount)
+			_ = s.store.AddEvent(ctx, job.ID, "score",
+				fmt.Sprintf("selected title %d: %s", title.Index, audioDesc),
+				map[string]any{
+					"selected_index": title.Index,
+					"duration":       title.Duration.String(),
+					"size_gb":        title.SizeGB,
+					"audio_tracks":   title.AudioTrackCount,
+					"chapters":       title.ChapterCount,
+				})
+		}
+	}
+
+	positions := make(map[int]int, total)
+	titleNames := make(map[int]string, total)
+	for i, title := range titles {
+		positions[title.Index] = i
+		titleNames[title.Index] = title.Name
+	}
+	etaTr := &etaTracker{}
+	analyzeStartedAt := time.Now()
+	lastReportedPct := -10
+	saveStarted := false
+	progressCb := func(titleIndex, percent int, phase ripper.RipPhase) {
+		cur := s.currentTitle(device, mediaTitle)
+		if phase == ripper.PhaseAnalyze {
+			s.emit(ProgressEvent{
+				Device:  device,
+				Stage:   "analyzing",
+				Title:   cur,
+				Percent: percent,
+				Message: fmt.Sprintf("Analyzing %d selected TV titles (%d%%)", total, percent),
+			})
+			return
+		}
+		if !saveStarted {
+			saveStarted = true
+			slog.Info("rip phase completed", "phase", "analyzing", "device", device,
+				"disc", discName, "title_count", total, "duration", time.Since(analyzeStartedAt).String())
+			slog.Info("rip phase started", "phase", "ripping", "device", device,
+				"disc", discName, "title_count", total, "batch", true)
+		}
+		overall := percent
+		titleLabel := fmt.Sprintf("%d of %d", 1, total)
+		if position, ok := positions[titleIndex]; ok {
+			overall = (position*100 + percent) / total
+			titleLabel = fmt.Sprintf("%d of %d", position+1, total)
+			if name := strings.TrimSpace(titleNames[titleIndex]); name != "" {
+				titleLabel += ": " + name
+			}
+		}
+		overall = min(overall, 99)
+		remaining := etaTr.Update(time.Now(), overall)
+		s.emit(ProgressEvent{
+			Device:  device,
+			Stage:   "ripping",
+			Title:   cur,
+			Percent: overall,
+			Message: fmt.Sprintf("Ripping TV title %s (%d%%)", titleLabel, overall),
+			ETASec:  int(remaining.Seconds()),
+		})
+		if s.store != nil && overall >= lastReportedPct+10 {
+			lastReportedPct = (overall / 10) * 10
+			_ = s.store.AddEvent(ctx, job.ID, "rip", fmt.Sprintf("progress: %d%%", overall), nil)
+		}
+	}
+
+	batchOutputDir, err := os.MkdirTemp(outputDir, "batch-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create TV batch output directory: %w", err)
+	}
+	batchFiles, batchErr := ripper.RipTitles(
+		ctx, device, titles, batchOutputDir, s.cfg.MakeMKV.Key, timeoutMinutes,
+		cacheMBForDisc(s.cfg.MakeMKV.CacheMB, discType),
+		s.cfg.MakeMKV.ReadErrorLimit, s.cfg.MakeMKV.NoProgressMin, progressCb,
+	)
+	if errors.Is(context.Cause(ctx), errRestart) {
+		return nil, nil, errRestart
+	}
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	mappedFiles, err := ripper.MapTitleFiles(titles, batchFiles)
+	if err != nil {
+		return nil, nil, fmt.Errorf("map MakeMKV batch outputs: %w", err)
+	}
+	if batchErr != nil {
+		// RipTitles already deleted unfinished outputs; everything it returned is
+		// a finished title, whichever title the error names.
+		slog.Warn("TV batch rip ended with an error; preserving completed title files",
+			"disc", discName, "error", batchErr, "completed_title_count", len(mappedFiles),
+			"selected_title_count", total)
+	}
+
+	missing := make([]disc.MKVTitle, 0, total-len(mappedFiles))
+	for _, title := range titles {
+		if _, ok := mappedFiles[title.Index]; !ok {
+			missing = append(missing, title)
+		}
+	}
+	if len(missing) > 0 {
+		slog.Info("rip phase started", "phase", "recovering", "device", device,
+			"disc", discName, "missing_title_count", len(missing), "batch_error", batchErr)
+		for _, title := range missing {
+			position := positions[title.Index]
+			slog.Info("rip phase started", "phase", "analyzing", "device", device,
+				"disc", discName, "title_index", title.Index, "title_number", position+1,
+				"title_count", total, "fallback", true)
+			singleTimeout := s.cfg.MakeMKV.TimeoutMinutes
+			if singleTimeout < 1 {
+				singleTimeout = 120
+			}
+			retryLimit := s.cfg.MakeMKV.MaxRipRetries
+			if retryLimit < 0 {
+				retryLimit = 0
+			}
+			var ripErr error
+			var titleFile string
+			for attempt := 1; attempt <= retryLimit+1; attempt++ {
+				attemptDir, err := os.MkdirTemp(outputDir, fmt.Sprintf("fallback-title-%d-", title.Index))
+				if err != nil {
+					return nil, nil, fmt.Errorf("create recovery output directory for title %d: %w", title.Index, err)
+				}
+				fallbackSaveStarted := false
+				fallbackStartedAt := time.Now()
+				fallbackProgress := func(_ int, pct int, phase ripper.RipPhase) {
+					overall := min((position*100+pct)/total, 99)
+					if phase == ripper.PhaseAnalyze {
+						s.emit(ProgressEvent{
+							Device:  device,
+							Stage:   "analyzing",
+							Title:   s.currentTitle(device, mediaTitle),
+							Percent: overall,
+							Message: fmt.Sprintf("Analyzing recovery title %d of %d (%d%%)", position+1, total, pct),
+						})
+						return
+					}
+					if phase == ripper.PhaseSave && !fallbackSaveStarted {
+						fallbackSaveStarted = true
+						slog.Info("rip phase completed", "phase", "analyzing", "device", device,
+							"disc", discName, "title_index", title.Index,
+							"duration", time.Since(fallbackStartedAt).String(), "fallback", true)
+						slog.Info("rip phase started", "phase", "ripping", "device", device,
+							"disc", discName, "title_index", title.Index, "fallback", true)
+					}
+					remaining := etaTr.Update(time.Now(), overall)
+					s.emit(ProgressEvent{
+						Device:  device,
+						Stage:   "ripping",
+						Title:   s.currentTitle(device, mediaTitle),
+						Percent: overall,
+						Message: fmt.Sprintf("Recovering TV title %d of %d (%d%%)", position+1, total, overall),
+						ETASec:  int(remaining.Seconds()),
+					})
+				}
+				_, ripErr = ripper.RipTitle(
+					ctx, device, title, attemptDir, s.cfg.MakeMKV.Key,
+					singleTimeout, cacheMBForDisc(s.cfg.MakeMKV.CacheMB, discType),
+					s.cfg.MakeMKV.ReadErrorLimit, s.cfg.MakeMKV.NoProgressMin, fallbackProgress,
+				)
+				if errors.Is(context.Cause(ctx), errRestart) {
+					return nil, nil, errRestart
+				}
+				if ctx.Err() != nil {
+					if cleanupErr := os.RemoveAll(attemptDir); cleanupErr != nil {
+						return nil, nil, fmt.Errorf("remove canceled title %d recovery output: %w", title.Index, cleanupErr)
+					}
+					return nil, nil, ctx.Err()
+				}
+				allFiles, listErr := listMKVFiles(attemptDir)
+				if listErr != nil {
+					if cleanupErr := os.RemoveAll(attemptDir); cleanupErr != nil {
+						return nil, nil, fmt.Errorf("%v; remove failed recovery output directory: %w", listErr, cleanupErr)
+					}
+					return nil, nil, listErr
+				}
+				fallbackFiles, mapErr := ripper.MapTitleFiles([]disc.MKVTitle{title}, allFiles)
+				if mapErr != nil {
+					if cleanupErr := os.RemoveAll(attemptDir); cleanupErr != nil {
+						return nil, nil, fmt.Errorf("%v; remove failed recovery output directory: %w", mapErr, cleanupErr)
+					}
+					return nil, nil, mapErr
+				}
+				titleFile = fallbackFiles[title.Index]
+				if ripErr == nil {
+					if titleFile == "" {
+						ripErr = fmt.Errorf("MakeMKV did not create an output for title index %d", title.Index)
+					} else {
+						slog.Info("rip phase completed", "phase", "ripping", "device", device,
+							"disc", discName, "title_index", title.Index,
+							"title_number", position+1, "title_count", total,
+							"fallback", true, "duration", time.Since(fallbackStartedAt).String())
+						break
+					}
+				}
+				if ripErr != nil {
+					if err := os.RemoveAll(attemptDir); err != nil {
+						return nil, nil, fmt.Errorf("remove failed title %d recovery output: %w", title.Index, err)
+					}
+					titleFile = ""
+				}
+				if attempt < retryLimit+1 {
+					slog.Warn("retrying missing TV title", "disc", discName,
+						"title_index", title.Index, "attempt", attempt+1,
+						"attempts", retryLimit+1, "error", ripErr)
+				}
+			}
+			if ripErr != nil || titleFile == "" {
+				return nil, nil, fmt.Errorf("recover TV title %d: %w", title.Index, ripErr)
+			}
+			mappedFiles[title.Index] = titleFile
+		}
+	}
+
+	rippedFiles := make([]string, 0, total)
+	titleIndices := make([]int, 0, total)
+	for _, title := range titles {
+		file, ok := mappedFiles[title.Index]
+		if !ok {
+			return nil, nil, fmt.Errorf("TV title index %d has no mapped output file", title.Index)
+		}
+		rippedFiles = append(rippedFiles, file)
+		titleIndices = append(titleIndices, title.Index)
+		if s.store != nil {
+			fi, _ := os.Stat(file)
+			sizeGB := 0.0
+			if fi != nil {
+				sizeGB = float64(fi.Size()) / (1024 * 1024 * 1024)
+			}
+			_ = s.store.AddEvent(ctx, job.ID, "rip",
+				fmt.Sprintf("complete: %s (%.1f GB)", filepath.Base(file), sizeGB),
+				map[string]any{"file": filepath.Base(file), "size_gb": sizeGB})
+		}
+	}
+	slog.Info("rip phase completed", "phase", "ripping", "device", device,
+		"disc", discName, "title_count", total, "file_count", len(rippedFiles), "batch", true)
+	return rippedFiles, titleIndices, nil
+}
+
+func listMKVFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read rip output directory %q: %w", dir, err)
+	}
+	var files []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".mkv") {
+			files = append(files, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return files, nil
+}
+
 // RipDisc executes the full automated pipeline:
 //  1. Scan the disc with makemkvcon to get raw disc data (DiscName, titles, durations)
 //  2. Classify titles according to detection rules (TV/Movie/Ambiguous patterns)
@@ -1192,7 +1486,44 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		_ = s.store.UpdateStatus(ctx, job.ID, "ripping")
 	}
 	etaTr := &etaTracker{}
-	for idx, title := range result.MainTitles {
+	isTVBatch := mediaType == "tv" || (mediaType == "" && result.Pattern == ripper.DiscPatternTV)
+	titlesToRip := result.MainTitles
+	if isTVBatch {
+		var ripErr error
+		rippedFiles, rippedTitleIndices, ripErr = s.ripTVTitles(
+			ctx, device, scanned.DiscName, mediaTitle, job,
+			result.MainTitles, ripOutputDir, scanned.Type,
+		)
+		if errors.Is(ripErr, errRestart) || errors.Is(context.Cause(ctx), errRestart) {
+			s.restartCleanup(device, stagingDir, ripOutputDir, job.ID, -1)
+			return errRestart
+		}
+		if ripErr != nil {
+			if errors.Is(ripErr, context.Canceled) {
+				return ripErr
+			}
+			slog.Error("rip phase failed", "phase", "ripping", "device", device,
+				"disc", scanned.DiscName, "title_count", totalTitles, "error", ripErr)
+			diag := diagnose.Rip(ripErr)
+			s.emit(ProgressEvent{
+				Device:  device,
+				Stage:   "error",
+				Title:   s.currentTitle(device, mediaTitle),
+				Percent: 0,
+				Message: diag.Summary,
+			})
+			if s.store != nil {
+				_ = s.store.AddEvent(ctx, job.ID, "error", diag.Summary, diag.Data())
+				_ = s.store.UpdateStatus(ctx, job.ID, "error")
+			}
+			return fmt.Errorf("rip TV titles: %w", ripErr)
+		}
+		if s.store != nil {
+			_ = s.store.UpdateStatus(ctx, job.ID, "ripping")
+		}
+		titlesToRip = nil
+	}
+	for idx, title := range titlesToRip {
 		cur := s.currentTitle(device, mediaTitle)
 		slog.Info("rip phase started", "phase", "analyzing", "device", device,
 			"disc", scanned.DiscName, "title_index", title.Index, "title_number", idx+1,
@@ -2082,11 +2413,15 @@ func (s *RipService) unregisterRestart(device string) {
 // start over when the pinned runtime points at a different title than the one
 // being ripped. It returns false when the current selection is still right or
 // the rip can no longer be restarted (not ripping yet, or delivering).
+//
+// A TV batch is one MakeMKV process, so a restart cancels the whole batch.
+// That only happens when the selected titles would change (a movie edit whose
+// runtime picks a single title); TV edits clear the runtime and only rename.
 func (s *RipService) RestartIfNeeded(device string) bool {
 	s.ripMu.Lock()
 	defer s.ripMu.Unlock()
 	st, ok := s.restarts[device]
-	if !ok || st.restarting || !st.reselect || s.titleFrozen[device] {
+	if !ok || st.restarting || !st.reselect || s.titleFrozen[device] || s.pinnedRuntime[device] <= 0 {
 		return false
 	}
 	t, found := pickByRuntime(st.all, s.pinnedRuntime[device])
@@ -2117,7 +2452,9 @@ func (s *RipService) EditMessage(device string, restarted bool) string {
 		return "Saved. Track selection will use the corrected movie."
 	}
 	cur := "none"
-	if len(st.selected) > 0 {
+	if len(st.selected) > 1 {
+		cur = fmt.Sprintf("%d selected titles", len(st.selected))
+	} else if len(st.selected) == 1 {
 		cur = fmt.Sprintf("title %d (%dm)", st.selected[0].Index, int(st.selected[0].Duration.Minutes()))
 	}
 	switch {

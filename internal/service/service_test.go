@@ -20,6 +20,7 @@ import (
 	"github.com/8bitreid/simplerip/internal/config"
 	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/metadata"
+	"github.com/8bitreid/simplerip/internal/output"
 	"github.com/8bitreid/simplerip/internal/ripper"
 	"github.com/8bitreid/simplerip/internal/store"
 )
@@ -621,6 +622,114 @@ func TestRipDiscWithFakeMakeMKV(t *testing.T) {
 	matches, _ := filepath.Glob(filepath.Join(cfg.Output.StagingDir, "*", "*.mkv"))
 	if len(matches) == 0 {
 		t.Fatal("expected at least one ripped mkv file in staging dir")
+	}
+}
+
+func TestRipTVTitlesBatchAndRecoversOnlyMissingTitle(t *testing.T) {
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "makemkvcon")
+	content := `#!/bin/sh
+found_info=0
+for arg in "$@"; do
+	if [ "$arg" = "info" ]; then found_info=1; break; fi
+done
+if [ "$found_info" = "1" ]; then
+	cat <<'EOF'
+CINFO:1,0,"DVD"
+CINFO:30,0,"TEST_TV_DISC"
+TCOUNT:3
+TINFO:0,2,0,"Episode One"
+TINFO:0,8,0,"2"
+TINFO:0,9,0,"0:11:00"
+TINFO:1,2,0,"Episode Two"
+TINFO:1,8,0,"2"
+TINFO:1,9,0,"0:11:00"
+TINFO:2,2,0,"Episode Three"
+TINFO:2,8,0,"2"
+TINFO:2,9,0,"0:11:00"
+EOF
+	exit 0
+fi
+
+found_batch=0
+want_title=0
+title=""
+for arg in "$@"; do
+	if [ "$arg" = "all" ]; then found_batch=1; fi
+	if [ "$want_title" = "1" ]; then title="$arg"; want_title=0; fi
+	if [ "$arg" = "dev:/dev/sr0" ]; then want_title=1; fi
+done
+for last; do :; done
+outdir="$last"
+if [ "$found_batch" = "1" ]; then
+	echo batch >> "$CALLS_FILE"
+	printf 'PRGC:1,0,"Episode One"\n'
+	printf 'PRGV:0,0,100\n'
+	printf 'MSG:5014,131072,2,"Saving 2 titles into directory x"\n'
+	printf 'PRGC:1,0,"Episode One"\n'
+	printf 'PRGV:0,0,100\n'
+	printf 'PRGC:1,2,"Episode Three"\n'
+	printf 'PRGV:100,100,100\n'
+	touch "$outdir/Disc_t00.mkv" "$outdir/Disc_t02.mkv"
+	exit 0
+fi
+echo "title:$title" >> "$CALLS_FILE"
+if [ "$title" = "1" ]; then
+	printf 'MSG:5014,131072,1,"Saving 1 title into directory x"\n'
+	printf 'PRGV:100,100,100\n'
+	touch "$outdir/Disc_t01.mkv"
+	exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake makemkvcon: %v", err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	callsFile := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("CALLS_FILE", callsFile)
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = ""
+	cfg.MakeMKV.NoProgressMin = 0
+	svc := New(cfg, nil)
+	if err := svc.RipDisc(context.Background(), "/dev/sr0"); err != nil {
+		t.Fatalf("RipDisc() error = %v", err)
+	}
+
+	var matches []string
+	err := filepath.WalkDir(cfg.Output.StagingDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(path), ".mkv") {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("staged MKVs = %v, want one file for each selected TV title", matches)
+	}
+	got := make(map[string]bool, len(matches))
+	for _, match := range matches {
+		got[filepath.Base(match)] = true
+	}
+	for _, name := range []string{"Disc_t00.mkv", "Disc_t01.mkv", "Disc_t02.mkv"} {
+		if !got[name] {
+			t.Errorf("staged files are missing %s: %v", name, matches)
+		}
+	}
+	calls, err := os.ReadFile(callsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCalls := strings.Fields(string(calls)); !reflect.DeepEqual(gotCalls, []string{"batch", "title:1"}) {
+		t.Fatalf("MakeMKV invocations = %v, want one batch and one recovery for title 1", gotCalls)
 	}
 }
 
@@ -1540,11 +1649,126 @@ func TestRestartIfNeededRules(t *testing.T) {
 	}
 }
 
-// TestMain strips notification env vars so no test can reach a real webhook.
+func TestRestartIfNeededTVBatchOnlyWhenSelectionChanges(t *testing.T) {
+	episodes := []disc.MKVTitle{
+		{Index: 0, Duration: 22 * time.Minute},
+		{Index: 1, Duration: 22 * time.Minute},
+		{Index: 2, Duration: 22 * time.Minute},
+	}
+	feature := disc.MKVTitle{Index: 3, Duration: 95 * time.Minute}
+	s := New(&config.Config{}, nil)
+	s.beginRipTitle("/dev/sr0", "Disc")
+	cancels := 0
+	s.restarts["/dev/sr0"] = &restartState{
+		cancel:   func(error) { cancels++ },
+		all:      append(append([]disc.MKVTitle(nil), episodes...), feature),
+		selected: episodes,
+		reselect: true, // e.g. an ambiguous disc the user identified as TV
+	}
+
+	if s.RestartIfNeeded("/dev/sr0") || cancels != 0 {
+		t.Fatal("rename-only edit with no runtime must not cancel the batch")
+	}
+	s.SetRipRuntime("/dev/sr0", 95)
+	s.SetRipRuntime("/dev/sr0", 0) // a later TV edit clears the movie runtime
+	if s.RestartIfNeeded("/dev/sr0") || cancels != 0 {
+		t.Fatal("stale movie runtime must not cancel the batch after a TV edit")
+	}
+	if msg := s.EditMessage("/dev/sr0", false); !strings.Contains(msg, "3 selected titles") {
+		t.Fatalf("EditMessage() = %q, want the batch described as 3 selected titles", msg)
+	}
+	s.SetRipRuntime("/dev/sr0", 95)
+	if !s.RestartIfNeeded("/dev/sr0") || cancels != 1 {
+		t.Fatal("movie edit that selects a different title must cancel the whole batch")
+	}
+}
+
+func TestRipTVTitlesPairsFilesWithZeroBasedTitleIndexes(t *testing.T) {
+	binDir := t.TempDir()
+	// The batch finishes D3_t00, dies while writing D3_t01, and never reaches
+	// D3_t02; single-title recovery then writes the missing two.
+	content := `#!/bin/sh
+want_title=0
+title=""
+for arg in "$@"; do
+	if [ "$want_title" = "1" ]; then title="$arg"; want_title=0; fi
+	if [ "$arg" = "dev:/dev/sr0" ]; then want_title=1; fi
+done
+for last; do :; done
+if [ "$title" = "all" ]; then
+	printf 'MSG:5014,131072,2,"Saving 3 titles into directory x"\n'
+	touch "$last/D3_t00.mkv"
+	sleep 0.3
+	touch "$last/D3_t01.mkv"
+	printf 'PRGV:0,0,65536\n'
+	exit 1
+fi
+printf 'MSG:5014,131072,2,"Saving 1 titles into directory x"\n'
+touch "$last/D3_t0$title.mkv"
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "makemkvcon"), []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := config.Defaults()
+	cfg.MakeMKV.NoProgressMin = 0
+	svc := New(cfg, nil)
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 11 * time.Minute},
+		{Index: 1, Duration: 11 * time.Minute},
+		{Index: 2, Duration: 11 * time.Minute},
+	}
+	files, indices, err := svc.ripTVTitles(context.Background(), "/dev/sr0", "D3", "Show",
+		store.Job{}, titles, t.TempDir(), disc.DiscTypeUnknown)
+	if err != nil {
+		t.Fatalf("ripTVTitles() error = %v", err)
+	}
+	if !reflect.DeepEqual(indices, []int{0, 1, 2}) {
+		t.Fatalf("title indices = %v, want [0 1 2]", indices)
+	}
+	for i, file := range files {
+		if want := fmt.Sprintf("D3_t%02d.mkv", indices[i]); filepath.Base(file) != want {
+			t.Fatalf("file for title index %d = %s, want %s", indices[i], filepath.Base(file), want)
+		}
+	}
+
+	// episodeNumbers is keyed by zero-based title index: D3_t02 is episode 3.
+	episodeNumbers := map[int]int{0: 1, 1: 2, 2: 3}
+	episodes := make([]int, len(indices))
+	for i, index := range indices {
+		episodes[i] = episodeNumbers[index]
+	}
+	renamed, err := output.RenameForDeliveryEpisodeNumbers(files, indices, episodes)
+	if err != nil {
+		t.Fatalf("RenameForDeliveryEpisodeNumbers() error = %v", err)
+	}
+	if got := filepath.Base(renamed[2]); got != "episode-03.mkv" {
+		t.Fatalf("D3_t02.mkv renamed to %s, want episode-03.mkv", got)
+	}
+	for _, file := range renamed {
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("renamed episode missing: %v", err)
+		}
+	}
+}
+
+// TestMain strips notification env vars so no test can reach a real webhook,
+// and points HOME at a throwaway directory so no test can write the
+// developer's real ~/.MakeMKV/settings.conf.
 func TestMain(m *testing.M) {
 	os.Unsetenv("DISCORD_WEBHOOK_URL")
 	os.Unsetenv("SIMPLERIP_UI_URL")
-	os.Exit(m.Run())
+	home, err := os.MkdirTemp("", "simplerip-test-home-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("HOME", home)
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
 }
 
 func TestRipCompleteNotificationBody(t *testing.T) {

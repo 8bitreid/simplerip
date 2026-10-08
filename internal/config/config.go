@@ -63,13 +63,15 @@ type ServerConfig struct {
 }
 
 type MakeMKVConfig struct {
-	Key            string   `yaml:"key"`
-	TimeoutMinutes int      `yaml:"timeout_minutes"`
-	CacheMB        int      `yaml:"cache_mb"`
-	ReadErrorLimit int      `yaml:"read_error_limit"`
-	NoProgressMin  int      `yaml:"no_progress_minutes"`
-	MaxRipRetries  int      `yaml:"max_rip_retries"`
-	Devices        []string `yaml:"devices"`
+	Key                       string   `yaml:"key"`
+	TimeoutMinutes            int      `yaml:"timeout_minutes"`
+	BatchAnalyzeBudgetMinutes int      `yaml:"batch_analyze_budget_minutes"`
+	BatchSaveBudgetMinutes    int      `yaml:"batch_save_budget_minutes"`
+	CacheMB                   int      `yaml:"cache_mb"`
+	ReadErrorLimit            int      `yaml:"read_error_limit"`
+	NoProgressMin             int      `yaml:"no_progress_minutes"`
+	MaxRipRetries             int      `yaml:"max_rip_retries"`
+	Devices                   []string `yaml:"devices"`
 }
 
 type MetadataConfig struct {
@@ -146,11 +148,13 @@ func defaults() Config {
 			Port: 8080,
 		},
 		MakeMKV: MakeMKVConfig{
-			TimeoutMinutes: 120,
-			CacheMB:        0, // 0 = auto-select by disc type (DVD→512, Blu-ray→1024)
-			ReadErrorLimit: 100,
-			NoProgressMin:  15,
-			MaxRipRetries:  1,
+			TimeoutMinutes:            120,
+			BatchAnalyzeBudgetMinutes: 45,
+			BatchSaveBudgetMinutes:    10,
+			CacheMB:                   0, // 0 = auto-select by disc type (DVD→512, Blu-ray→1024)
+			ReadErrorLimit:            100,
+			NoProgressMin:             15,
+			MaxRipRetries:             1,
 		},
 		Metadata: MetadataConfig{
 			PreferredLanguage: "eng",

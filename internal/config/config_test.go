@@ -38,6 +38,8 @@ notification:
 makemkv:
   key: BETA_KEY_ABCDEF
   timeout_minutes: 180
+  batch_analyze_budget_minutes: 60
+  batch_save_budget_minutes: 12
   cache_mb: 768
   read_error_limit: 140
   no_progress_minutes: 20
@@ -89,6 +91,12 @@ metadata:
 	}
 	if cfg.MakeMKV.TimeoutMinutes != 180 {
 		t.Errorf("TimeoutMinutes = %d, want 180", cfg.MakeMKV.TimeoutMinutes)
+	}
+	if cfg.MakeMKV.BatchAnalyzeBudgetMinutes != 60 {
+		t.Errorf("BatchAnalyzeBudgetMinutes = %d, want 60", cfg.MakeMKV.BatchAnalyzeBudgetMinutes)
+	}
+	if cfg.MakeMKV.BatchSaveBudgetMinutes != 12 {
+		t.Errorf("BatchSaveBudgetMinutes = %d, want 12", cfg.MakeMKV.BatchSaveBudgetMinutes)
 	}
 	if cfg.MakeMKV.CacheMB != 768 {
 		t.Errorf("CacheMB = %d, want 768", cfg.MakeMKV.CacheMB)
@@ -149,6 +157,12 @@ output:
 	}
 	if cfg.MakeMKV.TimeoutMinutes != 120 {
 		t.Errorf("default TimeoutMinutes = %d, want 120", cfg.MakeMKV.TimeoutMinutes)
+	}
+	if cfg.MakeMKV.BatchAnalyzeBudgetMinutes != 45 {
+		t.Errorf("default BatchAnalyzeBudgetMinutes = %d, want 45", cfg.MakeMKV.BatchAnalyzeBudgetMinutes)
+	}
+	if cfg.MakeMKV.BatchSaveBudgetMinutes != 10 {
+		t.Errorf("default BatchSaveBudgetMinutes = %d, want 10", cfg.MakeMKV.BatchSaveBudgetMinutes)
 	}
 	if cfg.MakeMKV.CacheMB != 0 {
 		t.Errorf("default CacheMB = %d, want 0 (auto)", cfg.MakeMKV.CacheMB)
@@ -245,6 +259,10 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.MakeMKV.TimeoutMinutes != 120 {
 		t.Fatalf("TimeoutMinutes = %d, want 120", cfg.MakeMKV.TimeoutMinutes)
+	}
+	if cfg.MakeMKV.BatchAnalyzeBudgetMinutes != 45 || cfg.MakeMKV.BatchSaveBudgetMinutes != 10 {
+		t.Fatalf("batch budgets = %d/%d, want 45/10",
+			cfg.MakeMKV.BatchAnalyzeBudgetMinutes, cfg.MakeMKV.BatchSaveBudgetMinutes)
 	}
 	if cfg.MakeMKV.CacheMB != 0 || cfg.MakeMKV.ReadErrorLimit != 100 || cfg.MakeMKV.NoProgressMin != 15 || cfg.MakeMKV.MaxRipRetries != 1 {
 		t.Fatalf("unexpected makemkv defaults: %+v", cfg.MakeMKV)
