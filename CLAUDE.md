@@ -126,7 +126,14 @@ makemkvcon can hang (known Linux issue, especially with Blu-ray drives).
 All makemkvcon calls use context.WithTimeout. RipTitle returns ErrRipTimeout
 (a distinct sentinel error) on deadline exceeded — callers can distinguish
 timeout from other failures. Progress lines (PRGV) are parsed and logged as
-"title <index>: <pct>%" to stdout in real time.
+"title <index>: <pct>%" to stdout in real time. RipTitle/RipTitles take a
+`ripper.RipOptions` struct (key, timeout, cache, read-error limit, stall limit,
+progress callback); in the service, build it with `s.ripOptions(...)`.
+
+External programs (makemkvcon, ffprobe, rsync, eject, udevadm, dpkg-query) are
+never looked up via PATH. Always run them as `exec.Command(tools.Path("name"), ...)`,
+which resolves to an absolute path in fixed system directories
+(`internal/tools`).
 
 ## Project structure
 ```
@@ -144,7 +151,9 @@ internal/output/stage.go       rsync delivery, size verification, rip.json audit
 internal/output/clean.go       FlattenSubdirs, groupByDuration, ExecuteDedupe
 internal/notify/discord.go     webhook payload builders (RipComplete, Extras, Ambiguous)
 internal/server/webhook.go     HTTP callback server, per-job response channels
-internal/config/config.go      load config.yaml, apply defaults, MAKEMKV_KEY override
+internal/config/config.go      load config.yaml, apply defaults, env overrides
+                               (MAKEMKV_KEY, TMDB_ACCESS_TOKEN, DATABASE_URL, ...)
+internal/tools/tools.go        resolve external programs to absolute paths
 ```
 
 ## config.yaml structure
@@ -203,15 +212,25 @@ broken at merge time. The Docker publish workflow fires automatically on merge.
 Fixture support: `simplerip scan -fixture <file>` replays captured makemkvcon output
 without a physical disc. Use this in tests via `ScanInfoFromReader()` in makemkv.go.
 
+To fake an external program in a test, write an executable script to a temp
+dir and call `tools.UseDirForTest(t, dir)`. Setting PATH has no effect.
+
 ## Deployment
 Docker Compose. Multi-stage Dockerfile:
-- Stage 1: Go binary (golang:1.22-alpine)
-- Stage 2: makemkvcon built from source (ubuntu:24.04, MAKEMKV_VERSION=1.18.3)
-- Stage 3: Final image — just the binaries + ffmpeg + rsync
+- Stage 1: Go binary (golang:1.25-alpine)
+- Stage 2: Final image (ubuntu:24.04) — simplerip binary + makemkvcon from the
+  heyarje/makemkv-beta PPA + ffmpeg + rsync
 
-Optical drives passed through as devices (/dev/sr0, /dev/sr1).
-Requires cap_add: SYS_RAWIO for drive access.
-MAKEMKV_KEY set as environment variable.
+MakeMKV is pinned with `ARG MAKEMKV_PPA_VERSION` (currently 2.0.0-1~noble).
+The PPA only keeps its newest build, so the image build fails once upstream
+moves on; bump the version deliberately after checking the scan parser
+fixtures still match.
+
+Optical drives passed through as devices (/dev/sr0, /dev/sr1, plus /dev/sg*),
+with `privileged: true` for drive access.
+Secrets come from `.env` (gitignored): MAKEMKV_KEY, TMDB_ACCESS_TOKEN,
+DISCORD_WEBHOOK_URL, and POSTGRES_PASSWORD (required; compose builds
+DATABASE_URL from it).
 
 ## Automated daemon workflow
 The daemon mode (`simplerip serve`) implements the full automated pipeline:
