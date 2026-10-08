@@ -1,21 +1,33 @@
 services:
   simplerip:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     image: simplerip:local
     ports:
       - "8080:8080"
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - ./makemkv-config:/root/.MakeMKV
-      - /tmp/staging:/staging
+      - ./staging:/staging
       - /mnt/nas-simplerip/Dev Movies:/output
     devices:
       - /dev/sr0:/dev/sr0
       - /dev/sr1:/dev/sr1
+      - /dev/sg0:/dev/sg0
+      - /dev/sg1:/dev/sg1
     privileged: true
     user: root
     environment:
       - MAKEMKV_KEY=${MAKEMKV_KEY:-}
+      - TMDB_ACCESS_TOKEN=${TMDB_ACCESS_TOKEN:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - SIMPLERIP_UI_URL=${SIMPLERIP_UI_URL:-}
+      - SIMPLERIP_HOST=${SIMPLERIP_HOST:-}
+      - DATABASE_URL=postgres://simplerip:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/simplerip?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
@@ -26,7 +38,7 @@ services:
     environment:
       POSTGRES_DB: simplerip
       POSTGRES_USER: simplerip
-      POSTGRES_PASSWORD: simplerip
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -34,6 +46,16 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  alloy:
+    image: grafana/alloy:latest
+    restart: unless-stopped
+    command: run /etc/alloy/config.alloy
+    environment:
+      LOKI_URL: ${LOKI_URL:?set LOKI_URL, e.g. http://host:3100/loki/api/v1/push}
+    volumes:
+      - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
 volumes:
   pgdata:

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -24,28 +26,73 @@ import (
 	"github.com/8bitreid/simplerip/internal/store"
 )
 
-const version = "0.1.0-dev"
+var (
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildDate = "unknown"
+)
 
 // cfgPath holds the value of the --config persistent flag.
 var cfgPath string
 
 func main() {
+	configureLogger()
+	setBuildCommitFallback()
+	slog.Info("starting SimpleRip", "version", Version, "commit", Commit, "build_date", BuildDate)
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "simplerip:", err)
+		slog.Error("command failed", "error", err)
 		os.Exit(1)
 	}
 }
 
+func setBuildCommitFallback() {
+	if Commit != "unknown" {
+		return
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" && setting.Value != "" {
+			Commit = setting.Value
+			if len(Commit) > 7 {
+				Commit = Commit[:7]
+			}
+			return
+		}
+	}
+}
+
+func configureLogger() {
+	level := slog.LevelInfo
+	if raw := strings.TrimSpace(os.Getenv("LOG_LEVEL")); raw != "" {
+		switch strings.ToUpper(raw) {
+		case "DEBUG":
+			level = slog.LevelDebug
+		case "INFO":
+			level = slog.LevelInfo
+		case "WARN":
+			level = slog.LevelWarn
+		case "ERROR":
+			level = slog.LevelError
+		}
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+}
+
+const deviceFlagUsage = "optical device path (e.g. /dev/sr0)"
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgPath, "config", "",
 		"config file path (overrides CONFIG_PATH env var, default /config/config.yaml)")
-	rootCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
+	rootCmd.Flags().String("device", "", deviceFlagUsage)
 
-	scanCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
+	scanCmd.Flags().String("device", "", deviceFlagUsage)
 	scanCmd.Flags().String("fixture", "",
 		"parse a captured makemkvcon output file instead of running makemkvcon")
 
-	ripCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
+	ripCmd.Flags().String("device", "", deviceFlagUsage)
 	ripCmd.Flags().Int("title", 0, "title index to rip (from scan output)")
 	ripCmd.Flags().String("output", "", "directory to write .mkv files into")
 
@@ -84,11 +131,11 @@ Environment variables:
 			return err
 		}
 		svc := service.New(cfg, nil)
-		fmt.Fprintf(os.Stderr, "Starting automated rip pipeline for %s...\n", device)
+		slog.Info("starting automated rip pipeline", "device", device)
 		if err := svc.RipDisc(context.Background(), device); err != nil {
 			return fmt.Errorf("rip pipeline: %w", err)
 		}
-		fmt.Fprintln(os.Stderr, "Rip pipeline completed successfully.")
+		slog.Info("rip pipeline completed successfully", "device", device)
 		return nil
 	},
 }
@@ -208,12 +255,14 @@ Exits with code 3 on timeout (distinct from other errors).`,
 			device,
 			title,
 			outputDir,
-			cfg.MakeMKV.Key,
-			cfg.MakeMKV.TimeoutMinutes,
-			cfg.MakeMKV.CacheMB,
-			cfg.MakeMKV.ReadErrorLimit,
-			cfg.MakeMKV.NoProgressMin,
-			nil, // No progress callback in CLI mode
+			ripper.RipOptions{
+				Key:               cfg.MakeMKV.Key,
+				TimeoutMinutes:    cfg.MakeMKV.TimeoutMinutes,
+				CacheMB:           cfg.MakeMKV.CacheMB,
+				ReadErrorLimit:    cfg.MakeMKV.ReadErrorLimit,
+				NoProgressMinutes: cfg.MakeMKV.NoProgressMin,
+				// No progress callback in CLI mode
+			},
 		)
 		if err != nil {
 			if errors.Is(err, ripper.ErrRipTimeout) {
@@ -240,6 +289,7 @@ The server provides:
   - Web UI at /
   - WebSocket progress stream at /ws/progress
   - JSON status endpoint at /api/status
+  - Build and system info at /api/info
 
 The server will stream real-time progress updates for any active rip jobs.
 
@@ -257,12 +307,16 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 			var stErr error
 			st, stErr = store.New(cmd.Context(), cfg.Database.URL)
 			if stErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: database unavailable, running without persistence: %v\n", stErr)
+				slog.Warn("database unavailable; running without persistence", "error", stErr)
 			}
 		}
 
 		svc := service.New(cfg, st)
-		srv := server.New(svc, st, cfg.MakeMKV.Devices)
+		srv := server.New(svc, st, cfg.MakeMKV.Devices, cfg, server.BuildMetadata{
+			Version:   Version,
+			Commit:    Commit,
+			BuildDate: BuildDate,
+		})
 
 		port := cfg.Server.Port
 		if port == 0 {
@@ -274,7 +328,20 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 			// Use command context so polling stops on cancellation
 			ctx := cmd.Context()
 			busyDevices := &disc.BusyDeviceTracker{}
-			discCh := disc.PollEventsWithBusy(ctx, cfg.MakeMKV.Devices, 5*time.Second, busyDevices.IsBusy)
+			driveStatusMsg := map[string]string{
+				disc.StatusDetecting:    "detecting disc…",
+				disc.StatusNoDisc:       "no disc — waiting",
+				disc.StatusDiscPresent:  "disc detected",
+				disc.StatusUnresponsive: "drive not responding — retrying",
+				disc.StatusLoading:      "loading disc…",
+				disc.StatusTrayOpen:     "tray open",
+			}
+			discCh := disc.PollEventsWithStatus(ctx, cfg.MakeMKV.Devices, 2*time.Second, busyDevices.IsBusy,
+				func(dev, status string) {
+					if msg, ok := driveStatusMsg[status]; ok {
+						svc.SetDriveStatus(dev, msg)
+					}
+				})
 
 			// Handle disc insertion/removal events in background.
 			go func() {
@@ -283,47 +350,39 @@ automatically poll for disc insertion and start ripping when a disc is detected.
 						// Ignore removals for a device that's mid-rip — the disc
 						// hasn't really left; the busy drive just failed a probe.
 						if busyDevices.IsBusy(ev.Device) {
-							fmt.Fprintf(os.Stderr, "Ignoring disc-removed on %s: rip in progress\n", ev.Device)
+							slog.Debug("ignoring disc removal while rip in progress", "device", ev.Device)
 							continue
 						}
 						// Disc removed — reset the drive card to idle.
-						fmt.Fprintf(os.Stderr, "Disc removed from %s\n", ev.Device)
+						slog.Info("disc removed", "device", ev.Device)
 						svc.MarkDeviceIdle(ev.Device)
 						continue
 					}
 
 					// Don't start a second rip on a device that's already ripping.
 					if busyDevices.IsBusy(ev.Device) {
-						fmt.Fprintf(os.Stderr, "Ignoring disc-detected on %s: rip already in progress\n", ev.Device)
+						slog.Debug("ignoring disc detection because rip already in progress", "device", ev.Device)
 						continue
 					}
 					busyDevices.MarkBusy(ev.Device)
 
-					fmt.Fprintf(os.Stderr, "Disc detected on %s, starting rip...\n", ev.Device)
+					slog.Info("disc detected; starting rip", "device", ev.Device)
 					go func(dev string) {
 						defer busyDevices.MarkIdle(dev)
 
-						// Apply timeout from config to rip job
-						timeout := time.Duration(cfg.MakeMKV.TimeoutMinutes) * time.Minute
-						if timeout == 0 {
-							timeout = 120 * time.Minute // Default 2 hours
-						}
-						ripCtx, cancel := context.WithTimeout(ctx, timeout)
-						defer cancel()
-
-						if err := svc.RipDisc(ripCtx, dev); err != nil {
-							fmt.Fprintf(os.Stderr, "Rip failed for %s: %v\n", dev, err)
+						if err := svc.RipDisc(ctx, dev); err != nil {
+							slog.Error("rip failed", "device", dev, "error", err)
 						}
 					}(ev.Device)
 				}
 			}()
 
-			fmt.Fprintf(os.Stderr, "Polling devices: %v (interval: 5s)\n", cfg.MakeMKV.Devices)
+			slog.Info("starting disc polling", "devices", cfg.MakeMKV.Devices, "interval", 2*time.Second)
 		}
 
-		fmt.Fprintf(os.Stderr, "Starting HTTP server on port %d...\n", port)
-		fmt.Fprintf(os.Stderr, "Web UI: http://localhost:%d/\n", port)
-		fmt.Fprintf(os.Stderr, "WebSocket: ws://localhost:%d/ws/progress\n", port)
+		slog.Info("starting http server", "port", port)
+		slog.Info("web ui ready", "url", fmt.Sprintf("http://localhost:%d/", port))
+		slog.Info("websocket ready", "url", fmt.Sprintf("ws://localhost:%d/ws/progress", port))
 
 		if err := srv.Start(port); err != nil {
 			return fmt.Errorf("serve: %w", err)
@@ -339,7 +398,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the simplerip version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println(version)
+		fmt.Println(Version)
 	},
 }
 

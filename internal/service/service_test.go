@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,8 +20,10 @@ import (
 	"github.com/8bitreid/simplerip/internal/config"
 	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/metadata"
+	"github.com/8bitreid/simplerip/internal/output"
 	"github.com/8bitreid/simplerip/internal/ripper"
 	"github.com/8bitreid/simplerip/internal/store"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 type hostRewriteTransport struct {
@@ -125,7 +129,7 @@ exit 1
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake makemkvcon: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 }
 
 func installFakeMakeMKVConFailOnce(t *testing.T) {
@@ -177,7 +181,7 @@ exit 1
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake makemkvcon fail-once: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 	t.Setenv("HOME", t.TempDir())
 }
 
@@ -210,7 +214,7 @@ esac
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake ffprobe: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 }
 
 func TestRipService_ScanDisc_Movie(t *testing.T) {
@@ -271,6 +275,104 @@ func TestRipService_ScanDisc_TV(t *testing.T) {
 	// TV mode should rip all main titles automatically.
 	if len(result.MainTitles) < 3 {
 		t.Errorf("expected at least 3 main titles for TV disc, got %d", len(result.MainTitles))
+	}
+}
+
+func TestIdentifyTVUsesExplicitEpisodeMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/search/tv" || r.URL.Query().Get("query") != "the wire" {
+			t.Errorf("unexpected TMDB TV request: %s", r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, `{"results":[{"id":1438,"name":"The Wire","first_air_date":"2002-06-02"}]}`)
+	}))
+	defer server.Close()
+	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+	cfg := config.Defaults()
+	cfg.Metadata.TMDBApiKey = "tmdb-key"
+	svc := New(cfg, nil)
+
+	result := svc.identifyTV(context.Background(), "The-Wire-DISC1", []disc.MKVTitle{
+		{Index: 4, Name: "S02E03", Duration: 59 * time.Minute},
+		{Index: 1, Name: "S02E01", Duration: 58 * time.Minute},
+		{Index: 3, Name: "S02E02", Duration: 60 * time.Minute},
+	})
+	if !result.ShowCertain || result.Show == nil || result.Show.Title != "The Wire" {
+		t.Fatalf("show match = %+v", result)
+	}
+	if result.Season != 2 || result.Episodes[4] != 3 || result.Episodes[1] != 1 || result.Episodes[3] != 2 {
+		t.Fatalf("explicit season/episode mapping = %+v", result)
+	}
+	if result.LookupError != "" {
+		t.Fatalf("unexpected lookup error: %s", result.LookupError)
+	}
+}
+
+func TestIdentifyTVKeepsWeakCandidateAsSuggestion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"results":[{"id":42,"name":"The Office","first_air_date":"2001-01-01"}]}`)
+	}))
+	defer server.Close()
+	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+	cfg := config.Defaults()
+	cfg.Metadata.TMDBApiKey = "tmdb-key"
+	svc := New(cfg, nil)
+
+	result := svc.identifyTV(context.Background(), "Completely Different Disc", []disc.MKVTitle{
+		{Index: 0, Name: "Title 0", Duration: 22 * time.Minute},
+		{Index: 1, Name: "Title 1", Duration: 22 * time.Minute},
+		{Index: 2, Name: "Title 2", Duration: 22 * time.Minute},
+	})
+	if result.ShowCertain {
+		t.Fatalf("weak match must not be selected: %+v", result)
+	}
+	if result.Show != nil {
+		t.Fatalf("weak unrelated candidate should not be surfaced as a show suggestion: %+v", result.Show)
+	}
+}
+
+func TestIdentifyTVInfersDistinctiveSeasonRuntimes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/search/tv":
+			_, _ = fmt.Fprint(w, `{"results":[{"id":51,"name":"Blue Show","first_air_date":"2010-01-01"}]}`)
+		case "/3/tv/51":
+			_, _ = fmt.Fprint(w, `{"id":51,"name":"Blue Show","seasons":[{"season_number":1},{"season_number":2}]}`)
+		case "/3/tv/51/season/1":
+			_, _ = fmt.Fprint(w, `{"season_number":1,"episodes":[{"episode_number":1,"runtime":20},{"episode_number":2,"runtime":22},{"episode_number":3,"runtime":24}]}`)
+		case "/3/tv/51/season/2":
+			_, _ = fmt.Fprint(w, `{"season_number":2,"episodes":[{"episode_number":1,"runtime":42},{"episode_number":2,"runtime":43},{"episode_number":3,"runtime":42}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+	cfg := config.Defaults()
+	cfg.Metadata.TMDBApiKey = "tmdb-key"
+	svc := New(cfg, nil)
+
+	result := svc.identifyTV(context.Background(), "Blue-Show-DISC2", []disc.MKVTitle{
+		{Index: 7, Duration: 24*time.Minute + 5*time.Second},
+		{Index: 2, Duration: 20*time.Minute + 3*time.Second},
+		{Index: 4, Duration: 22*time.Minute + 2*time.Second},
+	})
+	if !result.ShowCertain || result.Show == nil || result.Season != 1 {
+		t.Fatalf("runtime season match = %+v", result)
+	}
+	if result.Episodes[7] != 3 || result.Episodes[2] != 1 || result.Episodes[4] != 2 {
+		t.Fatalf("runtime episode mapping = %v", result.Episodes)
+	}
+}
+
+func TestFindManualSelectionTakesPrecedenceOverAutomaticTVEvidence(t *testing.T) {
+	now := time.Now()
+	events := []store.JobEvent{
+		{Stage: "identify", CreatedAt: now, Data: json.RawMessage(`{"action":"tv_identification","suggested_title":"Automatic"}`)},
+		{Stage: "identify", CreatedAt: now.Add(time.Second), Data: json.RawMessage(`{"correction":true,"title":"Chosen Show","year":2004,"media_type":"tv","season":3,"episode_start":5}`)},
+	}
+	selection, ok := findManualSelection(events, now.Add(-time.Minute))
+	if !ok || selection.Title != "Chosen Show" || selection.Season != 3 || selection.EpisodeStart != 5 {
+		t.Fatalf("manual selection = %+v, ok=%v", selection, ok)
 	}
 }
 
@@ -524,6 +626,188 @@ func TestRipDiscWithFakeMakeMKV(t *testing.T) {
 	}
 }
 
+func TestRipTVTitlesBatchAndRecoversOnlyMissingTitle(t *testing.T) {
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "makemkvcon")
+	content := `#!/bin/sh
+found_info=0
+for arg in "$@"; do
+	if [ "$arg" = "info" ]; then found_info=1; break; fi
+done
+if [ "$found_info" = "1" ]; then
+	cat <<'EOF'
+CINFO:1,0,"DVD"
+CINFO:30,0,"TEST_TV_DISC"
+TCOUNT:3
+TINFO:0,2,0,"Episode One"
+TINFO:0,8,0,"2"
+TINFO:0,9,0,"0:11:00"
+TINFO:1,2,0,"Episode Two"
+TINFO:1,8,0,"2"
+TINFO:1,9,0,"0:11:00"
+TINFO:2,2,0,"Episode Three"
+TINFO:2,8,0,"2"
+TINFO:2,9,0,"0:11:00"
+EOF
+	exit 0
+fi
+
+found_batch=0
+want_title=0
+title=""
+for arg in "$@"; do
+	if [ "$arg" = "all" ]; then found_batch=1; fi
+	if [ "$want_title" = "1" ]; then title="$arg"; want_title=0; fi
+	if [ "$arg" = "dev:/dev/sr0" ]; then want_title=1; fi
+done
+for last; do :; done
+outdir="$last"
+if [ "$found_batch" = "1" ]; then
+	echo batch >> "$CALLS_FILE"
+	printf 'PRGC:1,0,"Episode One"\n'
+	printf 'PRGV:0,0,100\n'
+	printf 'MSG:5014,131072,2,"Saving 2 titles into directory x"\n'
+	printf 'PRGC:1,0,"Episode One"\n'
+	printf 'PRGV:0,0,100\n'
+	printf 'PRGC:1,2,"Episode Three"\n'
+	printf 'PRGV:100,100,100\n'
+	touch "$outdir/Disc_t00.mkv" "$outdir/Disc_t02.mkv"
+	exit 0
+fi
+echo "title:$title" >> "$CALLS_FILE"
+if [ "$title" = "1" ]; then
+	printf 'MSG:5014,131072,1,"Saving 1 title into directory x"\n'
+	printf 'PRGV:100,100,100\n'
+	touch "$outdir/Disc_t01.mkv"
+	exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake makemkvcon: %v", err)
+	}
+	tools.UseDirForTest(t, binDir)
+	t.Setenv("HOME", t.TempDir())
+	callsFile := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("CALLS_FILE", callsFile)
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = ""
+	cfg.MakeMKV.NoProgressMin = 0
+	svc := New(cfg, nil)
+	if err := svc.RipDisc(context.Background(), "/dev/sr0"); err != nil {
+		t.Fatalf("RipDisc() error = %v", err)
+	}
+
+	var matches []string
+	err := filepath.WalkDir(cfg.Output.StagingDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(path), ".mkv") {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("staged MKVs = %v, want one file for each selected TV title", matches)
+	}
+	got := make(map[string]bool, len(matches))
+	for _, match := range matches {
+		got[filepath.Base(match)] = true
+	}
+	for _, name := range []string{"Disc_t00.mkv", "Disc_t01.mkv", "Disc_t02.mkv"} {
+		if !got[name] {
+			t.Errorf("staged files are missing %s: %v", name, matches)
+		}
+	}
+	calls, err := os.ReadFile(callsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCalls := strings.Fields(string(calls)); !reflect.DeepEqual(gotCalls, []string{"batch", "title:1"}) {
+		t.Fatalf("MakeMKV invocations = %v, want one batch and one recovery for title 1", gotCalls)
+	}
+}
+
+func TestCancelRipEmitsCancelledDriveState(t *testing.T) {
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "makemkvcon")
+	content := `#!/bin/sh
+found_info=0
+for arg in "$@"; do
+	if [ "$arg" = "info" ]; then found_info=1; break; fi
+done
+if [ "$found_info" = "1" ]; then
+	cat <<'EOF'
+CINFO:1,0,"DVD"
+CINFO:30,0,"TEST_DISC"
+TCOUNT:1
+TINFO:0,2,0,"Main Feature"
+TINFO:0,8,0,"10"
+TINFO:0,9,0,"1:45:00"
+SINFO:0,0,1,6202,"Audio"
+EOF
+	exit 0
+fi
+exec sleep 60
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake makemkvcon: %v", err)
+	}
+	tools.UseDirForTest(t, binDir)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	svc := New(cfg, nil)
+	subID, events := svc.EventBus().Subscribe()
+	defer svc.EventBus().Unsubscribe(subID)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.RipDisc(context.Background(), "/dev/sr0")
+	}()
+
+	deadline := time.After(5 * time.Second)
+	cancelRequested := false
+	for {
+		select {
+		case ev := <-events:
+			if ev.Stage == "analyzing" && !cancelRequested {
+				wantMessage := "Analyzing title 1 of 1 (MakeMKV title index 0)"
+				if ev.Message != wantMessage {
+					t.Fatalf("analyzing event message = %q, want %q", ev.Message, wantMessage)
+				}
+				cancelRequested = true
+				if !svc.CancelRip("/dev/sr0") {
+					t.Fatal("CancelRip returned false for active rip")
+				}
+			}
+			if ev.Stage == "cancelled" {
+				if ev.Message != "Rip canceled" {
+					t.Fatalf("cancelled event message = %q, want %q", ev.Message, "Rip canceled")
+				}
+				if !cancelRequested {
+					t.Fatal("rip failed before cancellation was requested")
+				}
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("RipDisc() error = %v, want context.Canceled", err)
+				}
+				return
+			}
+		case err := <-done:
+			t.Fatalf("RipDisc() returned before failure event: %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for canceled rip failure event")
+		}
+	}
+}
+
 func TestRipDiscNoMainTitles(t *testing.T) {
 	installFakeMakeMKVCon(t)
 	t.Setenv("HOME", t.TempDir())
@@ -536,6 +820,50 @@ func TestRipDiscNoMainTitles(t *testing.T) {
 	err := svc.RipDisc(context.Background(), "/dev/sr0")
 	if err == nil || !strings.Contains(err.Error(), "no main titles found") {
 		t.Fatalf("RipDisc() error = %v, want no-main-titles error", err)
+	}
+}
+
+func TestTVDiscSendsInputNeededNotification(t *testing.T) {
+	bodies := make(chan []byte, 1)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read webhook body: %v", err)
+		}
+		bodies <- body
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hook.Close()
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Notification.DiscordWebhookURL = hook.URL
+	cfg.Notification.UIURL = "http://ui.test:8080"
+	svc := New(cfg, nil)
+	defer svc.notifier.Wait(context.Background())
+	svc.notifyTVSelection("job-123", "TEST_TV_DISC", "/dev/sr0", "TEST_TV_DISC")
+
+	select {
+	case body := <-bodies:
+		var payload struct {
+			Embeds []struct {
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				URL         string `json:"url"`
+			} `json:"embeds"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode notification: %v", err)
+		}
+		if len(payload.Embeds) != 1 {
+			t.Fatalf("embeds = %d, want 1", len(payload.Embeds))
+		}
+		embed := payload.Embeds[0]
+		if embed.Title != "Input needed" || !strings.Contains(embed.Description, "choose a season if known") || embed.URL != cfg.Notification.UIURL {
+			t.Fatalf("unexpected TV selection notification: %+v", embed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no TV selection notification received")
 	}
 }
 
@@ -576,9 +904,12 @@ func TestRipDiscRetryDisabledFails(t *testing.T) {
 func TestFindManualCorrection(t *testing.T) {
 	now := time.Now().UTC()
 	manualPayload, _ := json.Marshal(map[string]any{
-		"correction": true,
-		"title":      "Anne of Green Gables",
-		"year":       1985,
+		"correction":    true,
+		"title":         "Anne of Green Gables",
+		"year":          1985,
+		"media_type":    "tv",
+		"season":        1,
+		"episode_start": 4,
 	})
 
 	events := []store.JobEvent{
@@ -595,6 +926,10 @@ func TestFindManualCorrection(t *testing.T) {
 	}
 	if year != 1985 {
 		t.Fatalf("year = %d, want %d", year, 1985)
+	}
+	selection, ok := findManualSelection(events, now.Add(-90*time.Second))
+	if !ok || selection.MediaType != "tv" || selection.Season != 1 || selection.EpisodeStart != 4 {
+		t.Fatalf("TV selection = %+v, ok=%v", selection, ok)
 	}
 }
 
@@ -740,6 +1075,40 @@ func TestSearchMovie_RetryTable(t *testing.T) {
 				t.Fatalf("result count = %d, want %d", len(got), tc.wantCount)
 			}
 		})
+	}
+}
+
+func TestSearchMedia_UsesBearerAndRetriesShorterQuery(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/search/multi" {
+			t.Fatalf("path = %q, want /3/search/multi", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer read-token" {
+			t.Fatalf("Authorization = %q, want Bearer read-token", got)
+		}
+		queries = append(queries, r.URL.Query().Get("query"))
+		if len(queries) == 1 {
+			_, _ = fmt.Fprint(w, `{"results":[]}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"results":[{"id":387,"name":"SpongeBob SquarePants","first_air_date":"1999-05-01","media_type":"tv"}]}`)
+	}))
+	defer server.Close()
+	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
+
+	cfg := config.Defaults()
+	cfg.Metadata.TMDBAccessToken = "read-token"
+	svc := New(cfg, nil)
+	got, err := svc.SearchMedia(context.Background(), "spongebob squarepants")
+	if err != nil {
+		t.Fatalf("SearchMedia() error = %v", err)
+	}
+	if !reflect.DeepEqual(queries, []string{"spongebob squarepants", "spongebob"}) {
+		t.Fatalf("queries = %v", queries)
+	}
+	if len(got) != 1 || got[0].MediaType != "tv" || got[0].Year != "1999" {
+		t.Fatalf("SearchMedia() = %+v", got)
 	}
 }
 
@@ -1073,5 +1442,571 @@ func TestNew(t *testing.T) {
 	}
 	if svc.notify == nil {
 		t.Error("service notify client is nil")
+	}
+}
+
+func TestDurationMismatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		actual  time.Duration
+		runtime int
+		want    bool
+	}{
+		{"within tolerance", 89 * time.Minute, 87, false},
+		{"exactly tolerance", 90 * time.Minute, 87, false},
+		{"longer cut", 134 * time.Minute, 117, true},
+		{"shorter", 60 * time.Minute, 90, true},
+		{"unknown runtime", 90 * time.Minute, 0, false},
+		{"unknown duration", 0, 90, false},
+	}
+	for _, tc := range cases {
+		if got := durationMismatch(tc.actual, tc.runtime); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPickByRuntime(t *testing.T) {
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 44 * time.Minute},
+		{Index: 1, Duration: 88 * time.Minute},
+		{Index: 2, Duration: 91 * time.Minute},
+	}
+	if got, ok := pickByRuntime(titles, 89); !ok || got.Index != 1 {
+		t.Fatalf("89 min: got %+v ok=%v, want title 1", got, ok)
+	}
+	if got, ok := pickByRuntime(titles, 92); !ok || got.Index != 2 {
+		t.Fatalf("92 min: got %+v ok=%v, want title 2", got, ok)
+	}
+	if _, ok := pickByRuntime(titles, 120); ok {
+		t.Fatal("120 min: nothing within tolerance, want no match")
+	}
+	if _, ok := pickByRuntime(titles, 0); ok {
+		t.Fatal("unknown runtime must not match")
+	}
+}
+
+func TestCanReselect(t *testing.T) {
+	if !canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternMovie}) {
+		t.Error("movie should allow reselect")
+	}
+	if !canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternAmbiguous}) {
+		t.Error("ambiguous should allow reselect")
+	}
+	if canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternTV}) {
+		t.Error("TV must not reselect")
+	}
+	if canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternMovie, MultiAngle: true}) {
+		t.Error("multi-angle must not reselect")
+	}
+	if canReselect(ripper.ClassificationResult{Pattern: ripper.DiscPatternMovie, MissingMetadata: true}) {
+		t.Error("missing metadata must not reselect")
+	}
+}
+
+func installFakeMakeMKVConTwoTitles(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	content := `#!/bin/sh
+for arg in "$@"; do
+	if [ "$arg" = "info" ]; then
+		cat <<'EOF2'
+CINFO:30,0,"TEST_DISC"
+TCOUNT:2
+TINFO:0,8,0,"10"
+TINFO:0,9,0,"1:45:00"
+TINFO:1,8,0,"4"
+TINFO:1,9,0,"0:20:00"
+EOF2
+		exit 0
+	fi
+done
+# rip: mkv dev:/dev/sr0 <title> <outdir>
+for last; do :; done
+outdir="$last"
+set -- "$@"
+shift $(($# - 2))
+title="$1"
+if [ "$title" = "0" ]; then
+	exec sleep 60
+fi
+printf 'PRGV:10000,10000,10000\n'
+touch "$outdir/title_t0$title.mkv"
+`
+	if err := os.WriteFile(filepath.Join(binDir, "makemkvcon"), []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools.UseDirForTest(t, binDir)
+}
+
+func TestEditTitleMidRipRestartsWithDifferentTitle(t *testing.T) {
+	installFakeMakeMKVConTwoTitles(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = ""
+	svc := New(cfg, nil)
+
+	const dev = "/dev/sr0"
+	done := make(chan error, 1)
+	go func() { done <- svc.RipDisc(context.Background(), dev) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		svc.ripMu.Lock()
+		_, ok := svc.restarts[dev]
+		svc.ripMu.Unlock()
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("rip never reached the ripping stage")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if !svc.ReidentifyRip(dev, "Short Film (2000)") {
+		t.Fatal("re-identify rejected")
+	}
+	svc.SetRipRuntime(dev, 20)
+	if !svc.RestartIfNeeded(dev) {
+		t.Fatal("expected a restart: 20 min matches title 1, not the title being ripped")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RipDisc() error = %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("RipDisc did not finish after restart")
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(cfg.Output.StagingDir, "*", "*.mkv"))
+	if len(matches) != 1 || filepath.Base(matches[0]) != "title_t01.mkv" {
+		t.Fatalf("staged files = %v, want only title_t01.mkv", matches)
+	}
+	dirs, _ := filepath.Glob(filepath.Join(cfg.Output.StagingDir, "rip-*"))
+	if len(dirs) != 1 {
+		t.Fatalf("staging dirs = %v, want the first attempt's dir removed", dirs)
+	}
+}
+
+func TestRestartIfNeededRules(t *testing.T) {
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 105 * time.Minute},
+		{Index: 1, Duration: 20 * time.Minute},
+	}
+	setup := func(reselect bool) (*RipService, *int) {
+		s := New(&config.Config{}, nil)
+		s.beginRipTitle("/dev/sr0", "Disc")
+		cancels := 0
+		s.restarts["/dev/sr0"] = &restartState{
+			cancel:   func(error) { cancels++ },
+			all:      titles,
+			selected: titles[:1],
+			reselect: reselect,
+		}
+		return s, &cancels
+	}
+
+	s, cancels := setup(true)
+	s.SetRipRuntime("/dev/sr0", 105)
+	if s.RestartIfNeeded("/dev/sr0") || *cancels != 0 {
+		t.Fatal("same title chosen: must not restart")
+	}
+	s.SetRipRuntime("/dev/sr0", 20)
+	if !s.RestartIfNeeded("/dev/sr0") || *cancels != 1 {
+		t.Fatal("different title: must restart")
+	}
+	if s.RestartIfNeeded("/dev/sr0") || *cancels != 1 {
+		t.Fatal("second edit must not cancel twice")
+	}
+	if s.claimDelivery("/dev/sr0") {
+		t.Fatal("delivery must not proceed once a restart is requested")
+	}
+
+	s, _ = setup(false)
+	s.SetRipRuntime("/dev/sr0", 20)
+	if s.RestartIfNeeded("/dev/sr0") {
+		t.Fatal("non-reselectable disc (TV/multi-angle) must not restart")
+	}
+
+	s, _ = setup(true)
+	s.SetRipRuntime("/dev/sr0", 20)
+	s.freezeTitle("/dev/sr0", "x")
+	if s.RestartIfNeeded("/dev/sr0") {
+		t.Fatal("must not restart after delivery has started")
+	}
+
+	s, _ = setup(true)
+	if !s.claimDelivery("/dev/sr0") {
+		t.Fatal("claimDelivery should succeed with no restart pending")
+	}
+	s.SetRipRuntime("/dev/sr0", 20)
+	if s.RestartIfNeeded("/dev/sr0") {
+		t.Fatal("must not restart once delivery is claimed")
+	}
+}
+
+func TestRestartIfNeededTVBatchOnlyWhenSelectionChanges(t *testing.T) {
+	episodes := []disc.MKVTitle{
+		{Index: 0, Duration: 22 * time.Minute},
+		{Index: 1, Duration: 22 * time.Minute},
+		{Index: 2, Duration: 22 * time.Minute},
+	}
+	feature := disc.MKVTitle{Index: 3, Duration: 95 * time.Minute}
+	s := New(&config.Config{}, nil)
+	s.beginRipTitle("/dev/sr0", "Disc")
+	cancels := 0
+	s.restarts["/dev/sr0"] = &restartState{
+		cancel:   func(error) { cancels++ },
+		all:      append(append([]disc.MKVTitle(nil), episodes...), feature),
+		selected: episodes,
+		reselect: true, // e.g. an ambiguous disc the user identified as TV
+	}
+
+	if s.RestartIfNeeded("/dev/sr0") || cancels != 0 {
+		t.Fatal("rename-only edit with no runtime must not cancel the batch")
+	}
+	s.SetRipRuntime("/dev/sr0", 95)
+	s.SetRipRuntime("/dev/sr0", 0) // a later TV edit clears the movie runtime
+	if s.RestartIfNeeded("/dev/sr0") || cancels != 0 {
+		t.Fatal("stale movie runtime must not cancel the batch after a TV edit")
+	}
+	if msg := s.EditMessage("/dev/sr0", false); !strings.Contains(msg, "3 selected titles") {
+		t.Fatalf("EditMessage() = %q, want the batch described as 3 selected titles", msg)
+	}
+	s.SetRipRuntime("/dev/sr0", 95)
+	if !s.RestartIfNeeded("/dev/sr0") || cancels != 1 {
+		t.Fatal("movie edit that selects a different title must cancel the whole batch")
+	}
+}
+
+func TestRipTVTitlesPairsFilesWithZeroBasedTitleIndexes(t *testing.T) {
+	binDir := t.TempDir()
+	// The batch finishes D3_t00, dies while writing D3_t01, and never reaches
+	// D3_t02; single-title recovery then writes the missing two.
+	content := `#!/bin/sh
+want_title=0
+title=""
+for arg in "$@"; do
+	if [ "$want_title" = "1" ]; then title="$arg"; want_title=0; fi
+	if [ "$arg" = "dev:/dev/sr0" ]; then want_title=1; fi
+done
+for last; do :; done
+if [ "$title" = "all" ]; then
+	printf 'MSG:5014,131072,2,"Saving 3 titles into directory x"\n'
+	touch "$last/D3_t00.mkv"
+	sleep 0.3
+	touch "$last/D3_t01.mkv"
+	printf 'PRGV:0,0,65536\n'
+	exit 1
+fi
+printf 'MSG:5014,131072,2,"Saving 1 titles into directory x"\n'
+touch "$last/D3_t0$title.mkv"
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "makemkvcon"), []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools.UseDirForTest(t, binDir)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := config.Defaults()
+	cfg.MakeMKV.NoProgressMin = 0
+	svc := New(cfg, nil)
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 11 * time.Minute},
+		{Index: 1, Duration: 11 * time.Minute},
+		{Index: 2, Duration: 11 * time.Minute},
+	}
+	files, indices, err := svc.ripTVTitles(context.Background(), "/dev/sr0", "D3", "Show",
+		store.Job{}, titles, t.TempDir(), disc.DiscTypeUnknown)
+	if err != nil {
+		t.Fatalf("ripTVTitles() error = %v", err)
+	}
+	if !reflect.DeepEqual(indices, []int{0, 1, 2}) {
+		t.Fatalf("title indices = %v, want [0 1 2]", indices)
+	}
+	for i, file := range files {
+		if want := fmt.Sprintf("D3_t%02d.mkv", indices[i]); filepath.Base(file) != want {
+			t.Fatalf("file for title index %d = %s, want %s", indices[i], filepath.Base(file), want)
+		}
+	}
+
+	// episodeNumbers is keyed by zero-based title index: D3_t02 is episode 3.
+	episodeNumbers := map[int]int{0: 1, 1: 2, 2: 3}
+	episodes := make([]int, len(indices))
+	for i, index := range indices {
+		episodes[i] = episodeNumbers[index]
+	}
+	renamed, err := output.RenameForDeliveryEpisodeNumbers(files, indices, episodes)
+	if err != nil {
+		t.Fatalf("RenameForDeliveryEpisodeNumbers() error = %v", err)
+	}
+	if got := filepath.Base(renamed[2]); got != "episode-03.mkv" {
+		t.Fatalf("D3_t02.mkv renamed to %s, want episode-03.mkv", got)
+	}
+	for _, file := range renamed {
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("renamed episode missing: %v", err)
+		}
+	}
+}
+
+// TestMain strips notification env vars so no test can reach a real webhook,
+// and points HOME at a throwaway directory so no test can write the
+// developer's real ~/.MakeMKV/settings.conf.
+func TestMain(m *testing.M) {
+	os.Unsetenv("DISCORD_WEBHOOK_URL")
+	os.Unsetenv("SIMPLERIP_UI_URL")
+	home, err := os.MkdirTemp("", "simplerip-test-home-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("HOME", home)
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
+}
+
+func TestRipCompleteNotificationBody(t *testing.T) {
+	installFakeMakeMKVCon(t)
+	t.Setenv("HOME", t.TempDir())
+
+	bodies := make(chan []byte, 4)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies <- b
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hook.Close()
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = t.TempDir()
+	cfg.Notification.DiscordWebhookURL = hook.URL
+	cfg.Notification.UIURL = "http://ui.test:8080"
+
+	svc := New(cfg, nil)
+	if err := svc.RipDisc(context.Background(), "/dev/sr0"); err != nil {
+		t.Fatalf("RipDisc() error = %v", err)
+	}
+
+	select {
+	case b := <-bodies:
+		var p struct {
+			Embeds []struct {
+				Title, URL string
+				Fields     []struct{ Name, Value string }
+			}
+		}
+		if err := json.Unmarshal(b, &p); err != nil || len(p.Embeds) != 1 {
+			t.Fatalf("bad payload %s: %v", b, err)
+		}
+		e := p.Embeds[0]
+		if e.Title != "Rip complete" || e.URL != "http://ui.test:8080" {
+			t.Errorf("embed = %+v", e)
+		}
+		got := map[string]string{}
+		for _, f := range e.Fields {
+			got[f.Name] = f.Value
+		}
+		if !strings.Contains(got["Disc"], "TEST_DISC") || !strings.Contains(got["Device"], "/dev/sr0") {
+			t.Errorf("fields = %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notification received")
+	}
+}
+
+func TestEditMessage(t *testing.T) {
+	titles := []disc.MKVTitle{{Index: 11, Duration: 107 * time.Minute}, {Index: 3, Duration: 20 * time.Minute}}
+	s := New(&config.Config{}, nil)
+	s.beginRipTitle("/dev/sr0", "Disc")
+	if got := s.EditMessage("/dev/sr0", false); !strings.Contains(got, "Saved") {
+		t.Errorf("not ripping: %q", got)
+	}
+	s.restarts["/dev/sr0"] = &restartState{cancel: func(error) {}, all: titles, selected: titles[:1], reselect: true}
+	s.SetRipRuntime("/dev/sr0", 96)
+	if got := s.EditMessage("/dev/sr0", false); !strings.Contains(got, "no title is within 3 min") || !strings.Contains(got, "title 11") {
+		t.Errorf("no match: %q", got)
+	}
+	s.SetRipRuntime("/dev/sr0", 107)
+	if got := s.EditMessage("/dev/sr0", false); !strings.Contains(got, "already matches") {
+		t.Errorf("same: %q", got)
+	}
+	s.SetRipRuntime("/dev/sr0", 20)
+	if !s.RestartIfNeeded("/dev/sr0") {
+		t.Fatal("want restart")
+	}
+	if got := s.EditMessage("/dev/sr0", true); !strings.Contains(got, "Restarting: ripping title 3") {
+		t.Errorf("restart: %q", got)
+	}
+}
+
+func tracks(audio ...disc.Track) []disc.Track {
+	return append([]disc.Track{{Type: "Video", Resolution: "1920x1080"}}, audio...)
+}
+
+func TestPickBestNearScoresFormat(t *testing.T) {
+	ac3 := disc.Track{Type: "Audio", CodecID: "A_AC3", Channels: 6, Language: "eng"}
+	dtsma := disc.Track{Type: "Audio", CodecID: "A_DTS", CodecDesc: "DTS-HD Master Audio", Channels: 8, Language: "eng"}
+	french := disc.Track{Type: "Audio", CodecID: "A_TRUEHD", Channels: 8, Language: "fra"}
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 107 * time.Minute, Tracks: tracks(ac3, ac3, ac3, ac3), AudioTrackCount: 4, SizeGB: 5},
+		{Index: 1, Duration: 106 * time.Minute, Tracks: tracks(dtsma), AudioTrackCount: 1, SizeGB: 5},
+		{Index: 2, Duration: 107 * time.Minute, Tracks: tracks(french), AudioTrackCount: 1, SizeGB: 9},
+		{Index: 3, Duration: 140 * time.Minute, Tracks: tracks(dtsma), AudioTrackCount: 1, SizeGB: 9},
+	}
+	got, ok := pickBestNear(titles, 107*time.Minute)
+	if !ok || got.Index != 1 {
+		t.Fatalf("got %+v ok=%v, want title 1 (one DTS-HD MA track beats four AC3; French-only disqualified; 140m out of range)", got, ok)
+	}
+}
+
+func TestPickBestNearSubtitlesBreakTie(t *testing.T) {
+	a := disc.Track{Type: "Audio", CodecID: "A_AC3", Channels: 6, Language: "eng"}
+	sub := disc.Track{Type: "Subtitles", Language: "eng"}
+	titles := []disc.MKVTitle{
+		{Index: 0, Duration: 100 * time.Minute, Tracks: tracks(a)},
+		{Index: 1, Duration: 101 * time.Minute, Tracks: tracks(a, sub)},
+	}
+	if got, _ := pickBestNear(titles, 100*time.Minute); got.Index != 1 {
+		t.Fatalf("got title %d, want 1 (English subtitles)", got.Index)
+	}
+}
+
+func TestFindAlternates(t *testing.T) {
+	m := func(i, min int) disc.MKVTitle {
+		return disc.MKVTitle{Index: i, Duration: time.Duration(min) * time.Minute}
+	}
+	main := m(11, 107)
+	all := []disc.MKVTitle{main, m(1, 108), m(2, 120), m(3, 95), m(4, 45), m(5, 200), m(6, 10)}
+	got := findAlternates(all, main, 40*time.Minute)
+	var idx []int
+	for _, g := range got {
+		idx = append(idx, g.Index)
+	}
+	// 108m is the same cut, 45m and 200m are outside the plausible range, 10m is an extra.
+	if !reflect.DeepEqual(idx, []int{3, 2}) {
+		t.Fatalf("alternates = %v, want [3 2]", idx)
+	}
+}
+
+func TestStartAlternateRipGuards(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Output.NASPath = t.TempDir()
+	s := New(cfg, nil)
+	if err := s.StartAlternateRip("nope", 1); !errors.Is(err, ErrNoAlternate) {
+		t.Fatalf("unknown job: %v", err)
+	}
+	s.alternates["j"] = &altState{device: "/dev/sr0", title: "X (2000)", cands: []disc.MKVTitle{{Index: 2}}}
+	if err := s.StartAlternateRip("j", 9); !errors.Is(err, ErrNoAlternate) {
+		t.Fatalf("unknown index: %v", err)
+	}
+	s.beginRipTitle("/dev/sr0", "X")
+	if err := s.StartAlternateRip("j", 2); !errors.Is(err, ErrDeviceBusy) {
+		t.Fatalf("busy drive: %v", err)
+	}
+}
+
+func TestAlternateRipEndToEnd(t *testing.T) {
+	installFakeMakeMKVConTwoTitles(t)
+	t.Setenv("HOME", t.TempDir())
+	bodies := make(chan string, 8)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies <- string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hook.Close()
+
+	cfg := config.Defaults()
+	cfg.Output.StagingDir = t.TempDir()
+	cfg.Output.NASPath = t.TempDir()
+	cfg.Notification.DiscordWebhookURL = hook.URL
+	s := New(cfg, nil)
+	s.alternates["j"] = &altState{
+		device: "/dev/sr0", title: "Film (2000)",
+		disc:  &disc.ClassifiedDisc{DiscName: "DISC"},
+		cands: []disc.MKVTitle{{Index: 1, Duration: 20 * time.Minute}},
+	}
+	if err := s.StartAlternateRip("j", 1); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	want := filepath.Join(cfg.Output.NASPath, "Film (2000)", "Film (2000) - Alternate (20min).mkv")
+	for {
+		if _, err := os.Stat(want); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("alternate not delivered to %s", want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	select {
+	case b := <-bodies:
+		if !strings.Contains(b, "Alternate (20min)") {
+			t.Errorf("notification body = %s", b)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notification")
+	}
+}
+
+func TestNeedsConfirmation(t *testing.T) {
+	main := []disc.MKVTitle{{Duration: 107 * time.Minute}}
+	cases := []struct {
+		name      string
+		main      []disc.MKVTitle
+		files     int
+		locked    bool
+		confirmed bool
+		enabled   bool
+		runtime   int
+		want      bool
+	}{
+		{"auto match far off", main, 1, false, true, true, 140, true},
+		{"auto match close", main, 1, false, true, true, 105, false},
+		{"user chose it", main, 1, true, false, true, 140, false},
+		{"unconfirmed match with tmdb enabled", main, 1, false, false, true, 0, true},
+		{"unconfirmed match with tmdb disabled", main, 1, false, false, false, 0, false},
+		{"multi-title disc", append(main, main...), 2, false, false, true, 140, false},
+	}
+	for _, c := range cases {
+		if got := needsConfirmation(c.main, c.files, c.locked, c.confirmed, c.enabled, c.runtime); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestIsConfidentMovieMatch(t *testing.T) {
+	d := func(min int) time.Duration { return time.Duration(min) * time.Minute }
+	cases := []struct {
+		name    string
+		runtime int
+		longest time.Duration
+		want    bool
+	}{
+		{"exact match", 107, d(107), true},
+		{"close theatrical match (within 20m)", 90, d(105), true},
+		{"extended cut within 1.6x", 178, d(228), true},
+		{"director cut within 1.6x", 144, d(194), true},
+		{"shorter cut within 0.70x", 120, d(90), true},
+		{"unrelated movie on cryptic disc label (70m vs 180m)", 70, d(180), false},
+		{"short film on cryptic label (35m vs 120m)", 35, d(120), false},
+		{"tv episode length (< 60m must not confirm as movie)", 50, d(50), false},
+		{"tv episode vs full movie", 120, d(45), false},
+		{"zero runtime", 0, d(100), false},
+		{"zero longest title", 100, 0, false},
+	}
+	for _, c := range cases {
+		if got := isConfidentMovieMatch(c.runtime, c.longest); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
 	}
 }

@@ -1,0 +1,41 @@
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "simplerip" {
+  targets = discovery.docker.containers.targets
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "simplerip"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "simplerip" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.simplerip.output
+  forward_to = [loki.process.parse.receiver]
+}
+
+// Lines from slog are JSON; promote level/device to labels. Other lines
+// (raw makemkvcon output) pass through unlabelled.
+loki.process "parse" {
+  stage.json {
+    expressions = { level = "level", device = "device" }
+  }
+  stage.labels {
+    values = { level = "", device = "" }
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  external_labels = { host = "simplerip" }
+  endpoint {
+    url = env("LOKI_URL")
+  }
+}

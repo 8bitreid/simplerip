@@ -60,9 +60,13 @@ makemkv:
   #   export MAKEMKV_KEY="your-key-here"
   # Get a free beta key at https://www.makemkv.com/forum/viewtopic.php?t=1053
 
-  # Kill makemkvcon and raise an error after this many minutes.
-  # Blu-ray rips typically take 20–60 min; 120 gives a comfortable margin.
+  # Maximum duration for each scan, movie rip, or single-title retry.
   timeout_minutes: 120
+
+  # TV discs are ripped in one MakeMKV invocation. Its timeout is the analyze
+  # budget plus this per-title save budget multiplied by the selected title count.
+  batch_analyze_budget_minutes: 45
+  batch_save_budget_minutes: 10
 
   # Read buffer size in MB. Larger values improve performance with slow or
   # uneven disc reads. Default is 256. Increase for faster drives.
@@ -91,6 +95,10 @@ metadata:
   # Register for a free key at https://www.themoviedb.org/settings/api
   tmdb_api_key: ""
 
+  # TMDB v4 API Read Access Token. When set, TMDB requests use Authorization: Bearer.
+  # Can also be supplied via TMDB_ACCESS_TOKEN.
+  tmdb_access_token: ""
+
   # OMDb API key for runtime cross-reference via IMDb ID.
   # Register for a free key at https://www.omdbapi.com/apikey.aspx
   omdb_api_key: ""
@@ -100,5 +108,7 @@ metadata:
   preferred_language: eng
 
 # ── Database ─────────────────────────────────────────────────────────────────
+# Docker Compose sets DATABASE_URL from POSTGRES_PASSWORD in .env, which
+# overrides this value.
 database:
-  url: "postgres://simplerip:simplerip@db:5432/simplerip?sslmode=disable"
+  url: ""

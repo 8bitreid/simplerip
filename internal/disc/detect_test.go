@@ -25,6 +25,7 @@ func TestPollDetectsNewDisc(t *testing.T) {
 	defer cancel()
 
 	ch := disc.Poll(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+	stopOnCleanup(t, cancel, ch)
 
 	// Should receive exactly one event for the inserted disc
 	select {
@@ -58,6 +59,7 @@ func TestPollDeduplication(t *testing.T) {
 	defer cancel()
 
 	ch := disc.Poll(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+	stopOnCleanup(t, cancel, ch)
 
 	// Should receive exactly one event (initial detection)
 	events := 0
@@ -90,6 +92,7 @@ func TestPollDiscRemovalAndReinsertion(t *testing.T) {
 	defer cancel()
 
 	ch := disc.Poll(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+	stopOnCleanup(t, cancel, ch)
 
 	// First detection
 	select {
@@ -123,6 +126,7 @@ func TestPollContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := disc.Poll(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+	stopOnCleanup(t, cancel, ch)
 
 	// Wait a bit to ensure polling has started
 	time.Sleep(150 * time.Millisecond)
@@ -155,6 +159,7 @@ func TestPollMultipleDevices(t *testing.T) {
 	defer cancel()
 
 	ch := disc.Poll(ctx, []string{"/dev/sr0", "/dev/sr1"}, 100*time.Millisecond)
+	stopOnCleanup(t, cancel, ch)
 
 	events := make(map[string]int)
 	timeout := time.After(1 * time.Second)
@@ -201,6 +206,7 @@ exit 0
 	defer cancel()
 
 	ch := disc.Poll(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+	stopOnCleanup(t, cancel, ch)
 
 	select {
 	case device := <-ch:
@@ -226,6 +232,7 @@ func TestPollEventsReportsRemoval(t *testing.T) {
 	defer cancel()
 
 	ch := disc.PollEvents(ctx, []string{"/dev/sr0"}, 100*time.Millisecond)
+	stopOnCleanup(t, cancel, ch)
 
 	// First: insertion.
 	select {
@@ -277,11 +284,7 @@ exit 0
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ch := disc.PollEventsWithBusy(ctx, []string{"/dev/sr0"}, 100*time.Millisecond, isBusy)
-	defer func() {
-		cancel()
-		for range ch {
-		}
-	}()
+	stopOnCleanup(t, cancel, ch)
 
 	// Initial probe should happen and emit insertion.
 	select {
@@ -308,6 +311,18 @@ exit 0
 	if got := readCallCount(t, stateFile); got <= callsDuringBusy {
 		t.Fatalf("expected probes to resume after idle; busyCount=%d resumedCount=%d", callsDuringBusy, got)
 	}
+}
+
+// stopOnCleanup cancels the poller and waits for its channel to close, so no
+// poller outlives its test and races with the next test's setup.
+func stopOnCleanup[T any](t *testing.T, cancel context.CancelFunc, ch <-chan T) {
+	t.Helper()
+	t.Cleanup(func() {
+		cancel()
+		for range ch {
+			// Discard remaining events so the poller goroutine can exit.
+		}
+	})
 }
 
 func readCallCount(t *testing.T, path string) int {

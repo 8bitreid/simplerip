@@ -50,9 +50,21 @@ body {
 }
 
 .app {
-  max-width: 1100px;
+  max-width: 1600px;
   margin: 0 auto;
-  padding: 20px 16px 48px;
+  padding: 20px 24px 48px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.sidebar,
+.main-content {
+  min-width: 0;
 }
 
 header {
@@ -66,20 +78,183 @@ header h1 {
   letter-spacing: -0.02em;
 }
 
+.info-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.info-card h2 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.info-card-body {
+  display: grid;
+  gap: 8px;
+}
+
+.info-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.info-row strong,
+.info-row span {
+  color: var(--text);
+}
+
+.info-row .muted {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.info-value {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+  min-width: 0;
+  max-width: 65%;
+  overflow: hidden;
+}
+
+.info-value > strong,
+.info-value .muted,
+.info-status strong {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.info-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.info-status .status-dot {
+  flex: 0 0 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  display: inline-block;
+}
+
+.status-dot.ok { background: var(--green); }
+.status-dot.warn { background: var(--yellow); }
+.status-dot.bad { background: var(--red); }
+
+.info-warning {
+  color: var(--yellow);
+}
+
+.info-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.tabbar {
+  display: none;
+}
+
 /* ── Drive grid ── */
 
 .drives-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+  align-items: start;
   margin-bottom: 28px;
 }
+
+@media (max-width: 900px) {
+  .app { padding: 16px 12px 32px; }
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  body { padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
+  .panel { display: none; }
+  .layout[data-tab="drives"] .panel[data-panel="drives"] { display: grid; }
+  .layout[data-tab="rips"] .panel[data-panel="rips"],
+  .layout[data-tab="info"] .panel[data-panel="info"] { display: block; }
+  .tabbar {
+    position: fixed;
+    z-index: 100;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    justify-content: space-around;
+    gap: 8px;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+  }
+  .tabbar button {
+    flex: 1;
+    min-height: 40px;
+    padding: 8px 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font: inherit;
+    cursor: pointer;
+  }
+  .tabbar button[aria-current="page"] {
+    color: var(--text);
+    border-color: var(--accent);
+    background: rgba(99,102,241,0.15);
+  }
+    .tab-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      margin-left: 5px;
+      padding: 0 5px;
+      border-radius: 999px;
+      background: var(--red);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
+      vertical-align: middle;
+    }
+    .tab-badge.tab-badge-dot {
+      width: 8px;
+      min-width: 8px;
+      height: 8px;
+      padding: 0;
+    }
+    .tab-badge[hidden] { display: none; }
+  }
 
 .drive-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
+  display: flex;
+  flex-direction: column;
 }
 
 .drive-card-header {
@@ -99,18 +274,16 @@ header h1 {
   font-size: 15px;
   font-weight: 600;
   margin-bottom: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .drive-subtitle {
   font-size: 12px;
   color: var(--text-muted);
   margin-bottom: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .drive-idle {
@@ -119,28 +292,74 @@ header h1 {
   padding: 8px 0 4px;
 }
 
-/* ── Stage list ── */
-
-.stages { display: flex; flex-direction: column; gap: 5px; }
-
-.stage-row {
-  display: grid;
-  grid-template-columns: 14px 68px 1fr 64px;
+.drive-idle-warn { color: #e5a13a; }
+.drive-idle-ok { color: #4caf7d; }
+.drive-media-status {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  margin: 0 0 6px;
+  color: var(--text-muted);
   font-size: 12px;
 }
+.drive-media-status.ok { color: var(--green); }
+.drive-media-status.warn { color: var(--yellow); }
+.drive-media-status.error { color: var(--red); }
 
-.stage-icon { text-align: center; font-size: 10px; color: var(--text-muted); }
-.stage-icon.done  { color: var(--green); font-size: 11px; }
-.stage-icon.active { color: var(--accent); font-size: 12px; }
+/* ── Stage list ── */
 
-.stage-name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
-.stage-name.active { color: var(--text); font-weight: 600; }
-.stage-name.done   { color: var(--green); }
+.stages {
+  display: flex;
+  align-items: flex-start;
+  margin: 14px 0 4px;
+}
+.stage-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  position: relative;
+}
+.stage-connector {
+  flex: 1;
+  height: 2px;
+  background: var(--border);
+  margin-top: 11px;
+}
+.stage-connector.done { background: rgba(34,197,94,0.35); }
+.stage-connector.active { background: rgba(99,102,241,0.35); }
 
-.stage-msg { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.stage-msg.active { color: var(--text); }
+.stage-circle {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  z-index: 1;
+}
+.stage-circle.done   { background: rgba(34,197,94,0.15); border-color: transparent; color: var(--green); }
+.stage-circle.active { background: var(--accent); border-color: transparent; color: #fff; }
+.stage-circle.waiting { background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.4); color: var(--red); }
+
+.stage-label {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.stage-label.active { color: var(--text); font-weight: 600; }
+.stage-label.done { color: var(--green); }
+
+.stage-progress {
+  margin: 4px 0 2px;
+}
+.stage-progress .prog-wrap { height: 5px; border-radius: 999px; }
 
 .prog-wrap { position: relative; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
 .prog-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; background: var(--accent); }
@@ -161,22 +380,46 @@ header h1 {
 }
 @media (prefers-reduced-motion: reduce) {
   .prog-fill.indeterminate { animation: none; width: 100%; opacity: 0.4; }
+  .job-chevron, .job-detail { transition: none; }
 }
 
 .eject-btn {
   display: block;
   width: 100%;
-  margin-top: 14px;
-  padding: 5px 12px;
-  background: transparent;
+  min-height: 36px;
+  flex: 0 0 auto;
+  margin-top: auto; /* pin to the bottom of the card */
+  padding: 7px 12px;
+  background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  font-size: 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, border-color 0.15s;
 }
-.eject-btn:hover { background: var(--surface2); color: var(--text); }
+.eject-spacer { flex: 1 0 14px; }
+.drive-actions { display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; }
+.auto-eject-label { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.auto-eject-label input { accent-color: var(--accent); }
+.cancel-rip-btn { border-color: var(--red); color: var(--red); }
+.cancel-rip-btn:hover { background: rgba(239,68,68,0.12); }
+.drive-actions { display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; }
+.auto-eject-label { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.auto-eject-label input { accent-color: var(--accent); }
+.cancel-rip-btn { border-color: var(--red); color: var(--red); }
+.cancel-rip-btn:hover { background: rgba(239,68,68,0.12); }
+.drive-card > .card-edit-btn { align-self: flex-start; margin-top: 10px; }
+.eject-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.card-resolve { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.card-resolve .search-row { margin-bottom: 8px; }
+.card-resolve .search-results { display: flex; flex-direction: column; gap: 4px; }
+
+.card-resolve { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.card-resolve .search-row { margin-bottom: 8px; }
+.card-resolve .search-results { display: flex; flex-direction: column; gap: 4px; }
 
 /* ── Badges ── */
 
@@ -198,25 +441,31 @@ header h1 {
 .badge-identifying { background: rgba(245,158,11,0.15); color: var(--yellow); }
 .badge-waiting { background: rgba(239,68,68,0.14); color: var(--red); }
 .badge-rip,
+.badge-analyzing  { background: rgba(59,130,246,0.15); color: var(--blue); }
 .badge-ripping    { background: rgba(99,102,241,0.15); color: var(--accent); }
 .badge-deliver,
 .badge-delivering { background: rgba(245,158,11,0.15); color: var(--yellow); }
 .badge-done       { background: rgba(34,197,94,0.15); color: var(--green); }
 .badge-error      { background: rgba(239,68,68,0.15); color: var(--red); }
+.badge-cancelled  { background: var(--surface2); color: var(--text-muted); }
 .badge-pending    { background: var(--surface2); color: var(--text-muted); }
 .badge-disc-type  { background: rgba(59,130,246,0.12); color: var(--blue); }
 
-.spin-inline {
+.spinner {
   display: inline-block;
-  animation: spin-forever 1s linear infinite;
-  margin-right: 4px;
-}
-@keyframes spin-forever {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255,255,255,0.15);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spinner-rotate 0.7s linear infinite;
+  vertical-align: middle;
 }
 @media (prefers-reduced-motion: reduce) {
-  .spin-inline { animation: none; }
+  .spinner { animation: none; }
+}
+@keyframes spinner-rotate {
+  to { transform: rotate(360deg); }
 }
 
 /* ── Jobs list ── */
@@ -234,7 +483,7 @@ header h1 {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow: visible;
 }
 
 .jobs-empty {
@@ -244,20 +493,48 @@ header h1 {
   font-size: 13px;
 }
 
+.has-tip { position: relative; cursor: help; }
+.has-tip::after {
+  content: attr(data-tip);
+  white-space: pre-wrap;
+  position: absolute; right: 0; top: calc(100% + 6px);
+  width: 340px; max-width: 80vw;
+  padding: 10px 12px; border-radius: 6px;
+  background: var(--surface2); color: var(--text); border: 1px solid var(--border, #444);
+  font-size: 12px; font-weight: 400; line-height: 1.4; text-align: left;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 50;
+}
+.has-tip:hover::after, .has-tip:focus::after { opacity: 1; }
 .job-row {
   display: grid;
-  grid-template-columns: 1fr auto auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto auto;
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  width: 100%;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 0.12s;
   min-width: 0;
 }
-.job-row:last-child { border-bottom: none; }
 .job-row:hover    { background: var(--surface2); }
 .job-row.selected { background: var(--surface2); }
+
+.job-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+.job-entry:last-child { border-bottom: none; }
+.job-chevron { transition: transform 0.18s ease; }
+.job-row[aria-expanded="true"] .job-chevron { transform: rotate(90deg); }
+.job-delete { margin-right: 10px; }
 
 .job-title-col { min-width: 0; }
 .job-title-text {
@@ -271,11 +548,21 @@ header h1 {
 
 /* ── Detail panel ── */
 
+.job-detail {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 0.2s ease, opacity 0.2s ease;
+}
+.job-detail.open { grid-template-rows: 1fr; opacity: 1; }
+.job-detail-inner { min-height: 0; overflow: hidden; }
+
 .detail-panel {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  margin-top: 10px;
+  margin: 0 10px 10px;
   padding: 20px;
 }
 
@@ -337,6 +624,12 @@ header h1 {
   display: none;
 }
 .tl-data.open { display: block; }
+.tl-tv-summary {
+  grid-column: 1 / -1;
+  margin: 4px 0 2px 198px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
 
 /* ── Re-identify ── */
 
@@ -411,64 +704,144 @@ header h1 {
 </head>
 <body>
 <div class="app">
-  <header><h1>SimpleRip</h1></header>
-  <div id="drives-grid" class="drives-grid"></div>
-  <div>
-    <div class="section-title">Recent Rips</div>
-    <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
-    <div id="detail-panel" style="display:none"></div>
+  <div class="layout" data-tab="drives">
+    <aside class="sidebar">
+      <header><h1>SimpleRip</h1></header>
+      <div id="info-card" class="info-card panel" data-panel="info">
+        <h2>SimpleRip</h2>
+        <div class="info-card-body">
+          <div class="info-empty">Loading system info…</div>
+        </div>
+      </div>
+    </aside>
+    <main class="main-content">
+      <div id="drives-grid" class="drives-grid panel" data-panel="drives"></div>
+      <div class="panel" data-panel="rips">
+        <div class="section-title">Recent Rips <button id="clear-jobs" class="btn" style="margin-left:12px;display:none">Clear all</button></div>
+        <div id="jobs-table" class="jobs-table"><div class="jobs-empty">Loading…</div></div>
+        <button id="load-more-jobs" class="btn" style="display:none;margin:12px auto">Load more rips</button>
+      </div>
+    </main>
   </div>
+  <nav class="tabbar" aria-label="Dashboard sections">
+    <button type="button" data-go="drives">Drives<span id="drives-tab-badge" class="tab-badge tab-badge-dot" hidden></span></button>
+    <button type="button" data-go="rips">Recent Rips<span id="rips-tab-badge" class="tab-badge" hidden></span></button>
+    <button type="button" data-go="info">Info</button>
+  </nav>
 </div>
 
 <script>
 // Checklist order, matching the real backend pipeline.
-const STAGES = ['scan', 'identify', 'score', 'rip', 'deliver'];
+const STAGES = ['scan', 'identify', 'score', 'analyze', 'rip', 'deliver'];
 
 // The backend emits progressive ("-ing") stage names; map them to checklist keys.
 const STAGE_ALIASES = {
   scanning:    'scan',
   identifying: 'identify',
   scoring:     'score',
+  analyzing:   'analyze',
   ripping:     'rip',
   delivering:  'deliver',
 };
+function fmtETA(sec) {
+  if (!sec || sec <= 0) return '';
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
 function canonStage(stage) { return STAGE_ALIASES[stage] || stage; }
 
 // Stages with no measurable progress — show an indeterminate sweep, not a bar.
-const INDETERMINATE_STAGES = new Set(['scan', 'identify']);
+const INDETERMINATE_STAGES = new Set(['scan', 'identify', 'score']);
 
 // device → ProgressEvent (stage, percent, message, title, device)
 const driveStates = {};
 const knownDevices = new Set();
 
+// device → { query, results, message } for the inline re-identify search on a card
+const cardResolveState = {};
+
 let jobs = [];
+let jobsHasMore = false;
+let jobsLoadingMore = false;
 let selectedJobId = null;
+let detailPanel = null;
 let jobsRefreshTimer = null;
+let infoRefreshTimer = null;
+const layout = document.querySelector('.layout');
+const validTabs = new Set(['drives', 'rips', 'info']);
+
+function setActiveTab(tab, save = true) {
+  if (!validTabs.has(tab) || !layout) return;
+  layout.dataset.tab = tab;
+  document.querySelectorAll('.tabbar [data-go]').forEach(button => {
+    if (button.dataset.go === tab) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  });
+  updateTabBadges();
+  if (save) {
+    try { localStorage.setItem('tab', tab); } catch (_) { /* storage unavailable (private mode); tab just isn't remembered */ }
+  }
+}
+
+function initTabs() {
+  let storedTab = '';
+  try { storedTab = localStorage.getItem('tab') || ''; } catch (_) { /* storage unavailable; fall back to default tab */ }
+  const tab = validTabs.has(storedTab) ? storedTab : 'drives';
+  setActiveTab(tab);
+  document.querySelectorAll('.tabbar [data-go]').forEach(button => {
+    button.addEventListener('click', () => setActiveTab(button.dataset.go));
+  });
+}
+
+function updateTabBadges() {
+  const activeTab = layout && layout.dataset.tab;
+  const drivesBadge = document.getElementById('drives-tab-badge');
+  const hasActiveDrive = Object.values(driveStates).some(isDriveActive);
+  if (drivesBadge) drivesBadge.hidden = !hasActiveDrive || activeTab === 'drives';
+
+  const ripsBadge = document.getElementById('rips-tab-badge');
+  if (ripsBadge) {
+    const recentErrors = jobs
+      .filter(job => isTerminal(job.Status))
+      .slice(0, 20)
+      .filter(job => String(job.Status).toLowerCase() === 'error').length;
+    ripsBadge.textContent = recentErrors > 9 ? '9+' : String(recentErrors);
+    ripsBadge.hidden = recentErrors === 0 || activeTab === 'rips';
+  }
+}
 
 // ── Rendering helpers ────────────────────────────────────────────────────
 
 function esc(s) {
   return String(s ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
 
 function escAttr(s) {
-  return String(s ?? '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  return String(s ?? '').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
+
+let savedAutoEject = [];
+try { savedAutoEject = JSON.parse(localStorage.getItem('simplerip-auto-eject') || '[]'); } catch (_) { /* storage unavailable or corrupt; start with none */ }
+const autoEjectDevices = new Set(Array.isArray(savedAutoEject) ? savedAutoEject : []);
 
 function isManualSearchWait(stage, message) {
   const canon = canonStage(stage || '');
   const msg = String(message || '').toLowerCase();
   return canon === 'identify' && (
     msg.includes('waiting for manual movie search') ||
-    msg.includes('no main title detected')
+    msg.includes('waiting for manual media search') ||
+    msg.includes('no main title detected') ||
+    msg.includes('tv disc detected')
   );
 }
 
 function badgeHTML(status, message = '') {
   if (isManualSearchWait(status, message)) {
-    return '<span class="badge badge-waiting"><span class="spin-inline">⟳</span>⚠ awaiting title</span>';
+    return '<span class="badge badge-waiting">⚠ awaiting title</span>';
   }
   const s = (status || 'idle').toLowerCase();
   return `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
@@ -501,6 +874,59 @@ function fmtDiscType(t) {
   }
 }
 
+// Recent Rips only shows finished jobs; in-progress state lives on the drive card.
+const TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
+function isTerminal(status) {
+  return TERMINAL_STATUSES.has(String(status || '').toLowerCase());
+}
+
+// Finds the job currently in progress on a device, e.g. to apply a re-identify to it.
+function findActiveJobForDevice(device) {
+  return jobs.find(j => j.Device === device && !isTerminal(j.Status));
+}
+
+function renderResolveResults(device, results) {
+  if (!results.length) return '<div class="msg-info">No results found.</div>';
+  return results.map(r => `
+    <div class="sr-row">
+      <div>
+        <div class="sr-title">${esc(r.title)}</div>
+        <div class="sr-meta">${r.year || '—'}${r.runtime ? ' · ' + r.runtime + ' min' : ''} · ${esc(r.media_type || 'movie')}</div>
+      </div>
+      <button class="sr-apply card-resolve-apply" data-device="${escAttr(device)}"
+        data-id="${r.id}" data-title="${escAttr(r.title)}" data-year="${r.year || 0}"
+        data-type="${escAttr(r.media_type || 'movie')}">Select</button>
+    </div>`).join('');
+}
+
+function selectionPayload(button) {
+  const payload = {
+    tmdb_id: Number.parseInt(button.dataset.id, 10),
+    title: button.dataset.title,
+    year: Number.parseInt(button.dataset.year, 10),
+    media_type: button.dataset.type || 'movie',
+  };
+  if (payload.media_type !== 'tv') return payload;
+
+  const seasonText = prompt(`What season is this disc of "${payload.title}"?`);
+  if (seasonText === null) return null;
+  const season = Number(seasonText.trim());
+  if (!Number.isInteger(season) || season < 1) {
+    alert('Enter a season number greater than zero.');
+    return null;
+  }
+  const episodeText = prompt('Starting episode number on this disc (optional). Leave blank to continue after the highest episode already saved for this season.');
+  if (episodeText === null) return null;
+  const episodeStart = episodeText.trim() === '' ? 0 : Number(episodeText.trim());
+  if (!Number.isInteger(episodeStart) || episodeStart < 1) {
+    alert('Enter a starting episode number greater than zero, or leave it blank.');
+    return null;
+  }
+  payload.season = season;
+  payload.episode_start = episodeStart;
+  return payload;
+}
+
 // ── Drive cards ──────────────────────────────────────────────────────────
 
 function ensureDevice(device) {
@@ -514,12 +940,30 @@ function ensureDevice(device) {
 
 function applyProgressEvent(ev) {
   const dev = ev.device;
+  const prev = dev ? driveStates[dev] : undefined;
   if (dev) {
     ensureDevice(dev);
-    driveStates[dev] = { ...driveStates[dev], ...ev, device: dev };
+    driveStates[dev] = { ...driveStates[dev], ...ev, device: dev, progressAt: Date.now() };
   }
   renderDrives();
-  scheduleJobsRefresh();
+  const stageChanged = !prev || prev.stage !== ev.stage;
+  const finished = ev.stage === 'done' || ev.stage === 'error' || ev.stage === 'cancelled';
+  if (finished && stageChanged) {
+    scheduleJobsRefresh();
+  }
+  // System info (rip counts, staging space, drives with discs) only changes
+  // when a rip finishes or a drive's status changes, so refresh on those events.
+  if ((finished && stageChanged) || (prev && ev.drive_status && prev.drive_status !== ev.drive_status)) {
+    scheduleInfoRefresh();
+  }
+}
+
+function scheduleInfoRefresh() {
+  if (infoRefreshTimer) return;
+  infoRefreshTimer = setTimeout(() => {
+    infoRefreshTimer = null;
+    loadSystemInfo();
+  }, 700);
 }
 
 function scheduleJobsRefresh() {
@@ -531,7 +975,12 @@ function scheduleJobsRefresh() {
 }
 
 function renderDrives() {
+  updateTabBadges();
   const grid = document.getElementById('drives-grid');
+  // Re-rendering replaces the DOM, which would drop focus and typed text on
+  // every progress tick. Skip while the user is typing in a card's search box.
+  const focused = document.activeElement;
+  if (focused && focused.classList && focused.classList.contains('card-resolve-input')) return;
   const devices = knownDevices.size > 0 ? [...knownDevices] : [];
   if (!devices.length) {
     grid.innerHTML = '<div class="jobs-empty">Loading drives…</div>';
@@ -542,14 +991,86 @@ function renderDrives() {
     return driveCardHTML(st);
   }).join('');
   grid.querySelectorAll('.eject-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      fetch('/api/eject', {
+    btn.addEventListener('click', async () => {
+      const d = btn.dataset.device;
+      const response = await fetch('/api/eject', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device: btn.dataset.device }),
-      }).catch(() => {});
+        body: JSON.stringify({ device: d }),
+      }).catch(() => null);
+      if (response && !response.ok) {
+        const data = await response.json().catch(() => ({}));
+        alert(data.error || 'Tray toggle failed.');
+      }
     });
   });
+  grid.querySelectorAll('.cancel-rip-btn').forEach(btn => btn.addEventListener('click', async () => {
+    const d = btn.dataset.device;
+    if (!confirm(`Cancel the active rip on ${d}? Any work in progress may be lost.`)) return;
+    const response = await fetch('/api/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: d }) }).catch(() => null);
+    if (!response || !response.ok) {
+      const data = response ? await response.json().catch(() => ({})) : {};
+      alert(data.error || 'Could not cancel the rip.');
+    }
+  }));
+  grid.querySelectorAll('.auto-eject-toggle').forEach(input => input.addEventListener('change', async () => {
+    const d = input.dataset.device;
+    if (input.checked) autoEjectDevices.add(d); else autoEjectDevices.delete(d);
+    localStorage.setItem('simplerip-auto-eject', JSON.stringify([...autoEjectDevices]));
+    const response = await fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: d, enabled: input.checked }) }).catch(() => null);
+    if (!response || !response.ok) alert('Could not save the auto-eject setting on the server.');
+  }));
+  grid.querySelectorAll('.card-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const d = btn.dataset.device;
+      const cur = driveStates[d] || {};
+      cardResolveState[d] = { query: cur.title || '', results: null, message: '', ...(cardResolveState[d] || {}), open: true };
+      renderDrives();
+    });
+  });
+  grid.querySelectorAll('.card-resolve-cancel').forEach(btn => {
+    btn.addEventListener('click', () => { delete cardResolveState[btn.dataset.device]; renderDrives(); });
+  });
+  grid.querySelectorAll('.card-resolve-search').forEach(btn => {
+    btn.addEventListener('click', () => doCardSearch(btn.dataset.device));
+  });
+  grid.querySelectorAll('.card-resolve-input').forEach(input => {
+    input.addEventListener('input', () => {
+      cardResolveState[input.dataset.device] = { ...(cardResolveState[input.dataset.device] || {}), query: input.value };
+    });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') doCardSearch(input.dataset.device); });
+  });
+  grid.querySelectorAll('.card-resolve-apply').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const payload = selectionPayload(btn);
+      if (payload) applyCardReidentify(btn.dataset.device, payload);
+    });
+  });
+}
+
+function isDriveActive(st) {
+  return !!st.stage && !['idle', 'done', 'error', 'cancelled'].includes(st.stage);
+}
+
+function driveIdleState(message) {
+  const m = message || '';
+  if (/not responding/i.test(m)) return { icon: '⚠️', cls: 'drive-idle-warn', text: m };
+  if (/disc detected/i.test(m))  return { icon: '💿', cls: 'drive-idle-ok', text: m };
+  if (/loading|detecting/i.test(m)) return { icon: '⏳', cls: '', text: m };
+  if (/tray open/i.test(m))      return { icon: '⏏️', cls: '', text: m };
+  return { icon: '', cls: '', text: m || 'no disc — waiting' };
+}
+
+function driveMediaStatusHTML(status) {
+  switch (status) {
+    case 'disc_present': return '<div class="drive-media-status ok"><span>●</span> Tray closed · Disc present</div>';
+    case 'no_disc': return '<div class="drive-media-status"><span>○</span> Tray closed · Empty</div>';
+    case 'tray_open': return '<div class="drive-media-status warn"><span>⏏</span> Tray open · No disc</div>';
+    case 'loading': return '<div class="drive-media-status warn"><span>◌</span> Drive loading</div>';
+    case 'detecting': return '<div class="drive-media-status"><span>◌</span> Checking drive…</div>';
+    case 'unresponsive': return '<div class="drive-media-status error"><span>⚠</span> Drive not responding</div>';
+    default: return '<div class="drive-media-status"><span>◌</span> Checking drive…</div>';
+  }
 }
 
 function driveCardHTML(st) {
@@ -569,7 +1090,7 @@ function driveCardHTML(st) {
     </div>`;
 
   if (isIdle) {
-    return `<div class="drive-card">${header}<div class="drive-idle">no disc — waiting</div></div>`;
+    return `<div class="drive-card">${header}${driveMediaStatusHTML(st.drive_status)}${(() => { const d = driveIdleState(message); return `<div class="drive-idle ${d.cls}">${d.icon ? `<span class="drive-idle-icon">${d.icon}</span> ` : ""}${esc(d.text)}</div>`; })()}${driveActionsHTML(device, false, st.drive_status)}</div>`;
   }
 
   const titleLine  = title   ? `<div class="drive-title">${esc(title)}</div>` : '';
@@ -582,49 +1103,293 @@ function driveCardHTML(st) {
   const stagesHTML = STAGES.map((s, idx) => {
     const isDone   = idx < curIdx;
     const isCurrent = s === canon;
-    const pct      = isDone ? 100 : (isCurrent ? (percent || 0) : 0);
-    const iconClass = isDone ? 'done' : (isCurrent ? 'active' : '');
     const waitingIdentify = isCurrent && isManualSearchWait(stage, message) && s === 'identify';
-    const icon      = isDone ? '✓' : (waitingIdentify ? '⚠' : (isCurrent ? '●' : '○'));
-    const nameClass = isDone ? 'done' : (isCurrent ? 'active' : '');
-    const msgClass  = isCurrent ? 'active' : '';
-    const stageMsg  = isCurrent ? (message || '') : '';
-    const fillClass = isDone ? 'done' : '';
-    // The active scan/identify stage has no real percentage — sweep instead of
-    // showing a stuck 0% bar that implies a known end time.
     const indeterminate = isCurrent && INDETERMINATE_STAGES.has(s);
-    const fill = indeterminate
-      ? `<div class="prog-fill indeterminate"></div>`
-      : `<div class="prog-fill ${fillClass}" style="width:${pct}%"></div>`;
+
+    const labelClass = stageStateClass(isDone, isCurrent);
+    const circleClass = waitingIdentify && !isDone ? 'waiting' : labelClass;
+    const icon = stageIcon(isDone, waitingIdentify, indeterminate);
+    const connectorClass = labelClass;
+
     return `
-      <div class="stage-row">
-        <span class="stage-icon ${iconClass}">${icon}</span>
-        <span class="stage-name ${nameClass}">${esc(s)}</span>
-        <span class="stage-msg  ${msgClass}">${esc(stageMsg)}</span>
-        <div class="prog-wrap">${fill}</div>
-      </div>`;
+      <div class="stage-node">
+        <div class="stage-circle ${circleClass}">${icon}</div>
+        <div class="stage-label ${labelClass}">${esc(s)}</div>
+      </div>
+      ${idx < STAGES.length - 1 ? `<div class="stage-connector ${connectorClass}"></div>` : ''}`;
   }).join('');
+
+  // only rip/deliver get a progress bar under the stepper — matches the
+  // existing pct/indeterminate values, just moved out of the per-row layout
+  const activeStageHasBar = curIdx >= 0 && curIdx < STAGES.length && !INDETERMINATE_STAGES.has(canon) && canon !== 'idle';
+  const pct = activeStageHasBar ? displayPercent(st) : 0;
+  const progressHTML = activeStageHasBar
+    ? `<div class="stage-progress prog-wrap"><div class="prog-fill" data-progress-device="${escAttr(device)}" style="width:${pct}%"></div></div>`
+    : '';
+  const etaText = canon === 'rip' ? fmtETA(st.eta_seconds) : '';
+  const etaHTML = etaText
+    ? `<div class="drive-subtitle">${pct}% · ~${esc(etaText)} remaining</div>`
+    : '';
+
+  const canEdit = ['scanning', 'identifying', 'analyzing', 'ripping'].includes(stage);
+  const editOpen = canEdit && !!(cardResolveState[device] && cardResolveState[device].open);
+  const showResolve = isManualSearchWait(stage, message) || editOpen;
+  let resolvePanelHTML = '';
+  if (showResolve) {
+    const rs = cardResolveState[device] || { query: title || '', results: null, message: '' };
+    cardResolveState[device] = rs;
+    resolvePanelHTML = `
+      <div class="card-resolve" data-device="${escAttr(device)}">
+        <div class="search-row">
+          <input class="search-input card-resolve-input" data-device="${escAttr(device)}"
+            type="text" aria-label="Search TMDB for the correct title" placeholder="Search TMDB…" value="${escAttr(rs.query)}" />
+          <button class="btn btn-primary card-resolve-search" data-device="${escAttr(device)}">Search</button>
+          ${editOpen ? `<button class="btn card-resolve-cancel" data-device="${escAttr(device)}">Cancel</button>` : ''}
+        </div>
+        <div class="search-results">${rs.results ? renderResolveResults(device, rs.results) : ''}</div>
+        ${rs.message ? `<div class="msg-error">${esc(rs.message)}</div>` : ''}
+      </div>`;
+  }
 
   return `
     <div class="drive-card">
       ${header}
+      ${driveMediaStatusHTML(st.drive_status)}
       ${titleLine}
       ${msgLine}
       <div class="stages">${stagesHTML}</div>
-      <button class="eject-btn" data-device="${escAttr(device)}">⏏ Eject</button>
+      ${progressHTML}
+      ${etaHTML}
+      ${canEdit && !showResolve ? `<button class="btn card-edit-btn" data-device="${escAttr(device)}">✎ Edit title</button>` : ''}
+      ${resolvePanelHTML}
+      ${driveActionsHTML(device, isDriveActive(st), st.drive_status)}
     </div>`;
+}
+
+// Estimate only a short distance beyond the latest server value. The ETA
+// controls the rate; every WebSocket event resets the estimate to the backend
+// value, so corrections are smoothly reconciled by the bar's CSS transition.
+function displayPercent(st) {
+  const base = Number(st.percent) || 0;
+  if (canonStage(st.stage) !== 'rip' || !st.progressAt || !st.eta_seconds || base >= 99) return base;
+  const elapsedSec = Math.max(0, (Date.now() - st.progressAt) / 1000);
+  const remainingPct = Math.max(1, 100 - base);
+  const secondsPerPoint = Math.max(1, st.eta_seconds / remainingPct);
+  return Math.min(99, base + Math.min(1.5, elapsedSec / secondsPerPoint));
+}
+
+// Keep the display moving between backend ticks without re-rendering cards or
+// disturbing an open input. This is display-only; backend progress remains the
+// source of truth for stage changes and completion.
+setInterval(() => {
+  document.querySelectorAll('.prog-fill[data-progress-device]').forEach(fill => {
+    const st = driveStates[fill.dataset.progressDevice];
+    if (st) fill.style.width = `${displayPercent(st)}%`;
+  });
+}, 250);
+
+function driveActionsHTML(device, active, driveStatus) {
+  const checked = autoEjectDevices.has(device) ? 'checked' : '';
+  const trayAction = {
+    disc_present: '⏏ Eject',
+    no_disc: 'Open',
+    tray_open: 'Close',
+  }[driveStatus];
+  const action = trayAction || 'Checking…';
+  return `<div class="drive-actions">${active ? `<button class="btn cancel-rip-btn" data-device="${escAttr(device)}">Cancel rip</button>` : ''}<label class="auto-eject-label"><input class="auto-eject-toggle" type="checkbox" data-device="${escAttr(device)}" ${checked}> Auto eject when complete</label><button type="button" class="eject-btn" data-device="${escAttr(device)}" ${trayAction ? '' : 'disabled'}>${action}</button></div>`;
+}
+
+async function doCardSearch(device) {
+  const rs = cardResolveState[device] || { query: '' };
+  const q = (rs.query || '').trim();
+  if (!q) return;
+  cardResolveState[device] = { ...rs, message: '' };
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const data = await r.json();
+    if (!r.ok) {
+      cardResolveState[device] = { ...rs, results: null, message: data.error || 'Search failed' };
+    } else {
+      cardResolveState[device] = { ...rs, results: data, message: '' };
+    }
+  } catch (_) {
+    cardResolveState[device] = { ...rs, results: null, message: 'Search request failed.' };
+  }
+  renderDrives();
+}
+
+async function applyCardReidentify(device, payload) {
+  let job = findActiveJobForDevice(device);
+  if (!job) { await loadJobs(); job = findActiveJobForDevice(device); }
+  if (!job) {
+    cardResolveState[device] = { ...cardResolveState[device], message: 'No active job found for this drive.' };
+    renderDrives();
+    return;
+  }
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(job.ID)}/reidentify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      cardResolveState[device] = { ...cardResolveState[device], message: data.error || 'Failed' };
+      renderDrives();
+      return;
+    }
+    delete cardResolveState[device]; // card will re-render past "identify" on the next progress event
+    if (data.message) showToast(data.message);
+    await loadJobs();
+  } catch (_) {
+    cardResolveState[device] = { ...cardResolveState[device], message: 'Request failed.' };
+    renderDrives();
+  }
+}
+
+function showToast(text) {
+  const el = document.createElement('div');
+  el.textContent = text;
+  el.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);max-width:80vw;padding:10px 16px;background:#222;color:#fff;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.4);z-index:9999;font-size:14px';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 8000);
+}
+
+function fmtUptime(totalSeconds) {
+  if (!Number.isFinite(totalSeconds)) return 'Unavailable';
+  const secs = Math.max(0, Math.floor(totalSeconds));
+  const days = Math.floor(secs / 86400);
+  const hours = Math.floor((secs % 86400) / 3600);
+  const mins = Math.floor((secs % 3600) / 60);
+  const remainder = secs % 60;
+  if (days > 0) return `${days}d ${hours}h ${mins}m`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  if (mins > 0) return `${mins}m ${remainder}s`;
+  return `${remainder}s`;
+}
+
+function stageStateClass(isDone, isCurrent) {
+  if (isDone) return 'done';
+  if (isCurrent) return 'active';
+  return '';
+}
+
+function stageIcon(isDone, waitingIdentify, indeterminate) {
+  if (isDone) return '✓';
+  if (waitingIdentify) return '⚠';
+  if (indeterminate) return '<span class="spinner"></span>';
+  return '';
+}
+
+function statusDotHTML(ok, warn) {
+  let cls = 'bad';
+  if (ok) cls = 'ok';
+  else if (warn) cls = 'warn';
+  return `<span class="status-dot ${cls}"></span>`;
+}
+
+function renderInfoCard(info) {
+  const el = document.getElementById('info-card');
+  if (!el) return;
+  if (!info) {
+    el.innerHTML = '<h2>SimpleRip</h2><div class="info-card-body"><div class="info-empty">System info unavailable.</div></div>';
+    return;
+  }
+
+  const version = info.version || 'dev';
+  const buildDate = info.build_date ? new Date(info.build_date).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'unknown';
+  const uptime = info.started_at ? fmtUptime((Date.now() - new Date(info.started_at).getTime()) / 1000) : 'Unavailable';
+  const host = info.hostname || 'unknown';
+  const makemkv = info.tools && info.tools.makemkvcon && info.tools.makemkvcon.version ? info.tools.makemkvcon.version : 'unavailable';
+  const ffprobe = info.tools && info.tools.ffprobe && info.tools.ffprobe.version ? info.tools.ffprobe.version : 'unavailable';
+  const deliveryTarget = info.delivery && info.delivery.destination ? info.delivery.destination : 'not configured';
+  const deliveryReachable = !!(info.delivery && info.delivery.reachable);
+  const staging = info.staging || {};
+  const freeBytes = Number(staging.free_bytes || 0);
+  const totalBytes = Number(staging.total_bytes || 0);
+  const stagingPct = totalBytes > 0 ? (freeBytes / totalBytes) * 100 : 0;
+  const stagingWarn = stagingPct < 10 || freeBytes < 50 * 1024 * 1024 * 1024;
+  const tmdb = !!(info.integrations && info.integrations.tmdb_configured);
+  const discord = !!(info.integrations && info.integrations.discord_configured);
+  const done = Number(info.stats && info.stats.done ? info.stats.done : 0);
+  const errors = Number(info.stats && info.stats.error ? info.stats.error : 0);
+
+  el.innerHTML = `
+    <h2>SimpleRip</h2>
+    <div class="info-card-body">
+      <div class="info-row"><span>Version</span><div class="info-value"><strong>${esc(version)}</strong><div class="muted">${esc(buildDate)}</div></div></div>
+      <div class="info-row"><span>Uptime</span><div class="info-value"><strong>${esc(uptime)}</strong></div></div>
+      <div class="info-row"><span>Host</span><div class="info-value"><strong>${esc(host)}</strong></div></div>
+      <div class="info-row"><span>makemkvcon</span><div class="info-value"><strong>${esc(String(makemkv))}</strong></div></div>
+      <div class="info-row"><span>ffprobe</span><div class="info-value"><strong>${esc(String(ffprobe))}</strong></div></div>
+      <div class="info-row"><span>Delivery</span><div class="info-value"><span class="info-status">${statusDotHTML(deliveryReachable, !deliveryReachable)}<strong>${esc(deliveryTarget)}</strong></span></div></div>
+      <div class="info-row"><span>Staging</span><div class="info-value"><span class="info-status ${stagingWarn ? 'info-warning' : ''}">${staging.free_bytes ? `${esc((freeBytes / (1024 * 1024 * 1024)).toFixed(1))} GB free` : 'Unavailable'}</span></div></div>
+      <div class="info-row"><span>TMDB</span><div class="info-value"><span class="info-status">${statusDotHTML(tmdb, !tmdb)}<strong>${tmdb ? 'configured' : 'missing'}</strong></span></div></div>
+      <div class="info-row"><span>Discord</span><div class="info-value"><span class="info-status">${statusDotHTML(discord, !discord)}<strong>${discord ? 'configured' : 'missing'}</strong></span></div></div>
+      <div class="info-row"><span>Rips</span><div class="info-value"><strong>${done} done · ${errors} error</strong></div></div>
+    </div>
+  `;
+}
+
+function updateInfoUptime() {
+  if (!document.getElementById('info-card')) return;
+  const card = document.getElementById('info-card');
+  const start = card.dataset.startedAt;
+  if (!start) return;
+  const started = new Date(start);
+  if (Number.isNaN(started.getTime())) return;
+  const uptime = fmtUptime((Date.now() - started.getTime()) / 1000);
+  const uptimeNode = card.querySelector('.info-row:nth-child(2) .info-value strong');
+  if (uptimeNode) uptimeNode.textContent = uptime;
+}
+
+async function loadSystemInfo() {
+  try {
+    const response = await fetch('/api/info');
+    if (!response.ok) throw new Error('system info request failed');
+    const info = await response.json();
+    const card = document.getElementById('info-card');
+    if (card) {
+      card.dataset.startedAt = info.started_at || '';
+    }
+    renderInfoCard(info);
+    updateInfoUptime();
+  } catch (_) {
+    renderInfoCard(null);
+  }
 }
 
 // ── Jobs list ────────────────────────────────────────────────────────────
 
 async function loadJobs() {
+  await fetchJobsPage(true);
+}
+
+async function fetchJobsPage(reset) {
+  if (jobsLoadingMore) return;
+  jobsLoadingMore = true;
   try {
-    const r = await fetch('/api/jobs');
+    const offset = reset ? 0 : jobs.length;
+    const r = await fetch(`/api/jobs?limit=100&offset=${offset}`);
     if (!r.ok) return;
-    jobs = await r.json() || [];
+    const page = await r.json() || [];
+    jobs = reset ? page : jobs.concat(page);
+    jobsHasMore = page.length === 100;
     renderJobs();
     jobs.forEach(j => { if (j.Device) ensureDevice(j.Device); });
-  } catch (_) {}
+  } catch (_) {
+    // Network error: keep the current list; the next refresh retries.
+  }
+  finally {
+    jobsLoadingMore = false;
+    updateLoadMoreButton();
+  }
+}
+
+function updateLoadMoreButton() {
+  const button = document.getElementById('load-more-jobs');
+  button.style.display = jobsHasMore ? 'block' : 'none';
+  button.disabled = jobsLoadingMore;
 }
 
 async function loadDevices() {
@@ -632,63 +1397,193 @@ async function loadDevices() {
     const r = await fetch('/api/devices');
     if (!r.ok) return;
     const devices = await r.json() || [];
-    devices.forEach(ensureDevice);
-  } catch (_) {}
+    devices.forEach(device => {
+      ensureDevice(device);
+      fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device, enabled: autoEjectDevices.has(device) }) }).catch(() => { /* best effort; server keeps its previous setting */ });
+    });
+  } catch (_) {
+    // Network error: drive cards appear once status arrives over the WebSocket.
+  }
 }
 
 function renderJobs() {
+  updateTabBadges();
   const el = document.getElementById('jobs-table');
-  if (!jobs.length) {
-    el.innerHTML = '<div class="jobs-empty">No rips yet.</div>';
+  const historical = jobs.filter(j => isTerminal(j.Status));
+  document.getElementById('clear-jobs').style.display = historical.length ? '' : 'none';
+  updateLoadMoreButton();
+  const focused = detailPanel && detailPanel.contains(document.activeElement)
+    ? document.activeElement
+    : null;
+  const selectionStart = focused && typeof focused.selectionStart === 'number' ? focused.selectionStart : null;
+  const selectionEnd = focused && typeof focused.selectionEnd === 'number' ? focused.selectionEnd : null;
+  if (detailPanel) detailPanel.remove();
+  if (!historical.length) {
+    el.innerHTML = '<div class="jobs-empty">No completed rips yet.</div>';
     return;
   }
-  el.innerHTML = jobs.map(j => {
+  el.innerHTML = historical.map(j => {
     const title = j.Title || j.DiscLabel || '—';
-    const year  = j.Year ? ` (${j.Year})` : '';
-    const sel   = j.ID === selectedJobId ? ' selected' : '';
+    const year  = j.Year && !title.includes(`(${j.Year})`) ? ` (${j.Year})` : '';
+    const isOpen = j.ID === selectedJobId;
 
     return `
-      <div class="job-row${sel}" data-id="${escAttr(j.ID)}">
+      <div class="job-entry" data-entry-id="${escAttr(j.ID)}">
+      <button type="button" class="job-row${isOpen ? ' selected' : ''}" id="job-row-${escAttr(j.ID)}"
+        data-id="${escAttr(j.ID)}" aria-expanded="${isOpen}" aria-controls="detail-panel">
         <div class="job-title-col">
           <div class="job-title-text">${esc(title)}${esc(year)}</div>
         </div>
         <span class="job-meta">${esc(j.Device || '')}</span>
         <span class="job-meta">${j.DiscType && j.DiscType !== 'unknown' ? esc(fmtDiscType(j.DiscType)) : ''}</span>
-        <span class="job-meta">${fmtDate(j.CreatedAt)}</span>
-        ${badgeHTML(j.Status)}
+        <span class="job-meta">${fmtDate(j.FinishedAt || j.CreatedAt)}</span>
+        ${j.Status === 'error' && (j.ErrorSummary || j.ErrorHint)
+          ? `<span class="badge badge-error has-tip" data-tip="${escAttr([j.ErrorSummary, j.ErrorHint && 'Try this: ' + j.ErrorHint].filter(Boolean).join('\n\n'))}">error ⓘ</span>`
+          : badgeHTML(j.Status)}
+        <span class="job-chevron" aria-hidden="true">›</span>
+      </button>
+      <button type="button" class="btn job-delete" data-id="${escAttr(j.ID)}"
+        title="Delete from history" aria-label="Delete rip from history">🗑</button>
       </div>`;
   }).join('');
   el.querySelectorAll('.job-row').forEach(row => {
     row.addEventListener('click', () => openJob(row.dataset.id));
   });
+  el.querySelectorAll('.job-delete').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); deleteJob(btn.dataset.id); });
+  });
+  if (detailPanel && selectedJobId) {
+    const entry = Array.from(el.querySelectorAll('.job-entry'))
+      .find(item => item.dataset.entryId === selectedJobId);
+    if (entry) entry.appendChild(detailPanel);
+  }
+  if (focused && focused.isConnected) {
+    focused.focus({ preventScroll: true });
+    if (selectionStart !== null && selectionEnd !== null) focused.setSelectionRange(selectionStart, selectionEnd);
+  }
 }
+
+document.getElementById('load-more-jobs').addEventListener('click', () => fetchJobsPage(false));
+
+async function deleteJob(id) {
+  if (!confirm('Delete this rip from history? Delivered files are not touched.')) return;
+  const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!r.ok && r.status !== 404) { alert('Delete failed'); return; }
+  if (selectedJobId === id) { selectedJobId = null; if (detailPanel) detailPanel.remove(); }
+  await loadJobs();
+}
+
+document.getElementById('clear-jobs').addEventListener('click', async () => {
+  if (!confirm('Clear all finished rips from history? Delivered files are not touched.')) return;
+  const r = await fetch('/api/jobs', { method: 'DELETE' });
+  if (!r.ok) { alert('Clear failed'); return; }
+  selectedJobId = null;
+  if (detailPanel) detailPanel.remove();
+  await loadJobs();
+});
 
 // ── Detail panel ─────────────────────────────────────────────────────────
 
 async function openJob(id) {
-  const panel = document.getElementById('detail-panel');
   if (selectedJobId === id) {
+    const row = document.getElementById(`job-row-${CSS.escape(id)}`);
     selectedJobId = null;
-    panel.style.display = 'none';
-    renderJobs();
+    if (row) {
+      row.setAttribute('aria-expanded', 'false');
+      row.classList.remove('selected');
+    }
+    if (detailPanel) {
+      const panel = detailPanel;
+      panel.inert = true;
+      panel.classList.remove('open');
+      const finishCollapse = () => {
+        if (!selectedJobId && !panel.classList.contains('open')) panel.remove();
+      };
+      const onTransitionEnd = event => {
+        if (event.target === panel && event.propertyName === 'opacity') {
+          panel.removeEventListener('transitionend', onTransitionEnd);
+          finishCollapse();
+        }
+      };
+      panel.addEventListener('transitionend', onTransitionEnd);
+      setTimeout(() => {
+        panel.removeEventListener('transitionend', onTransitionEnd);
+        finishCollapse();
+      }, 250);
+    }
     return;
   }
   selectedJobId = id;
+  if (!detailPanel) {
+    detailPanel = document.createElement('div');
+    detailPanel.id = 'detail-panel';
+    detailPanel.className = 'job-detail';
+    detailPanel.setAttribute('role', 'region');
+    detailPanel.setAttribute('aria-label', 'Rip details');
+  }
+  detailPanel.inert = false;
+  detailPanel.classList.remove('open');
+  detailPanel.innerHTML = '<div class="job-detail-inner"><div class="detail-panel" style="color:var(--text-muted)">Loading…</div></div>';
   renderJobs();
-  panel.style.display = 'block';
-  panel.innerHTML = '<div style="padding:20px;color:var(--text-muted)">Loading…</div>';
+  const row = document.getElementById(`job-row-${CSS.escape(id)}`);
+  if (row) row.scrollIntoView({ block: 'nearest' });
+  requestAnimationFrame(() => {
+    if (selectedJobId === id && detailPanel) detailPanel.classList.add('open');
+  });
   try {
     const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
     if (!r.ok) throw new Error('not found');
     const { job, events } = await r.json();
+    if (selectedJobId !== id) return;
     renderDetail(job, events || []);
   } catch (_) {
-    panel.innerHTML = `<div class="detail-panel"><div style="color:var(--red);padding:4px">Failed to load job.</div></div>`;
+    if (selectedJobId === id) {
+      detailPanel.innerHTML = `<div class="job-detail-inner"><div class="detail-panel"><div style="color:var(--red);padding:4px">Failed to load job.</div></div></div>`;
+    }
   }
 }
 
+function alternatesHTML(job, events) {
+  const ev = [...events].reverse().find(e => e.Stage === 'alternates');
+  if (!ev) return '';
+  let data = ev.Data;
+  try { if (typeof data === 'string') data = JSON.parse(data); } catch (_) { return ''; }
+  const cands = (data && data.candidates) || [];
+  if (!cands.length) return '';
+  const rows = cands.map(c => `
+    <div class="tl-event">
+      <span class="tl-msg">Title ${esc(String(c.index))} — ${esc(String(c.minutes))} min — ${esc(c.label || '')}</span>
+      <button class="btn alt-rip" data-job="${esc(job.ID)}" data-idx="${esc(String(c.index))}">Rip this cut</button>
+    </div>`).join('');
+  return `<div class="reid-section"><div class="reid-heading">Alternate cuts</div>${rows}<div id="alt-msg"></div></div>`;
+}
+
+function tvIdentificationSummary(rawData) {
+  let data = rawData;
+  try { if (typeof data === 'string') data = JSON.parse(data); } catch (_) { return ''; }
+  if (!data || data.action !== 'tv_identification') return '';
+  const best = Array.isArray(data.candidates) ? data.candidates[0] : null;
+  const candidate = best
+    ? `${esc(best.title)}${best.year ? ` (${esc(String(best.year))})` : ''} · title similarity ${Number(best.title_similarity || 0).toFixed(2)} from “${esc(best.matched_query || data.query || '')}”`
+    : 'no TMDB series candidate';
+  return `<div class="tl-tv-summary">TV evidence: show ${esc(data.show_confidence || 'unresolved')} — ${candidate}; season ${esc(data.season_confidence || 'unresolved')}; episodes ${esc(data.episode_confidence || 'unresolved')}${data.lookup_error ? `; lookup issue: ${esc(data.lookup_error)}` : ''}. Similarity is not a probability.</div>`;
+}
+
+async function ripAlternate(jobId, idx) {
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/alternates/${encodeURIComponent(idx)}/rip`, { method: 'POST' });
+    const d = await r.json();
+    showToast(r.ok ? 'Ripping the alternate cut. Progress shows on the drive card.' : (d.error || 'Failed'));
+  } catch (_) { showToast('Request failed.'); }
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('.alt-rip');
+  if (b) ripAlternate(b.dataset.job, b.dataset.idx);
+});
+
 function renderDetail(job, events) {
-  const panel = document.getElementById('detail-panel');
+  const panel = detailPanel;
   const title = job.Title || job.DiscLabel || '—';
   const year  = job.Year ? ` (${job.Year})` : '';
 
@@ -702,12 +1597,13 @@ function renderDetail(job, events) {
             <span class="tl-time">${esc(fmtTime(e.CreatedAt))}</span>
             ${badgeHTML(e.Stage)}
             <span class="tl-msg">${esc(e.Message)}</span>
+            ${tvIdentificationSummary(rawData)}
             ${hasData ? `<div class="tl-data" id="tdata-${i}">${esc(fmtJSON(rawData))}</div>` : ''}
           </div>`;
       }).join('');
 
   panel.innerHTML = `
-    <div class="detail-panel">
+    <div class="job-detail-inner"><div class="detail-panel">
       <div class="detail-header">
         <div>
           <div class="detail-title">${esc(title)}${esc(year)}</div>
@@ -718,27 +1614,22 @@ function renderDetail(job, events) {
             <span>${fmtDate(job.CreatedAt)}</span>
           </div>
         </div>
-        <button class="close-btn" id="det-close">✕</button>
       </div>
       <div class="timeline">${timelineHTML}</div>
-      <div class="reid-section">
+      ${alternatesHTML(job, events)}
+      ${['done', 'error', 'cancelled'].includes(String(job.Status || '').toLowerCase()) ? `<div class="reid-section">
         <div class="reid-heading">Re-identify</div>
         <div class="search-row">
           <input class="search-input" id="reid-q" type="text"
+            aria-label="Search TMDB for the correct title"
             placeholder="Search TMDB…"
             value="${escAttr(job.Title || job.DiscLabel || '')}" />
           <button class="btn btn-primary" id="reid-btn">Search</button>
         </div>
         <div id="reid-results" class="search-results"></div>
         <div id="reid-msg"></div>
-      </div>
-    </div>`;
-
-  document.getElementById('det-close').addEventListener('click', () => {
-    selectedJobId = null;
-    panel.style.display = 'none';
-    renderJobs();
-  });
+      </div>` : ''}
+    </div></div></div>`;
 
   panel.querySelectorAll('.tl-event').forEach(row => {
     row.addEventListener('click', () => {
@@ -748,6 +1639,7 @@ function renderDetail(job, events) {
   });
 
   const qInput  = document.getElementById('reid-q');
+  if (!qInput) return;
   const btn     = document.getElementById('reid-btn');
   const results = document.getElementById('reid-results');
   const msg     = document.getElementById('reid-msg');
@@ -779,14 +1671,14 @@ function renderDetail(job, events) {
           <button class="sr-apply"
             data-id="${r.id}"
             data-title="${escAttr(r.title)}"
-            data-year="${r.year || 0}">Select</button>
+            data-year="${r.year || 0}"
+            data-type="${escAttr(r.media_type || 'movie')}">Select</button>
         </div>`).join('');
       results.querySelectorAll('.sr-apply').forEach(applyBtn => {
-        applyBtn.addEventListener('click', () => applyReidentify(job.ID, {
-          tmdb_id: parseInt(applyBtn.dataset.id, 10),
-          title:   applyBtn.dataset.title,
-          year:    parseInt(applyBtn.dataset.year, 10),
-        }));
+        applyBtn.addEventListener('click', () => {
+          const payload = selectionPayload(applyBtn);
+          if (payload) applyReidentify(job.ID, payload);
+        });
       });
     } catch (_) {
       results.innerHTML = '';
@@ -815,12 +1707,10 @@ async function applyReidentify(jobId, payload) {
       msg.innerHTML = `<div class="msg-error">${esc(data.error || 'Failed')}</div>`;
       return;
     }
-    msg.innerHTML = `<div class="msg-success">Updated to "${esc(data.Title || payload.title)}".</div>`;
+    msg.innerHTML = `<div class="msg-success">Updated to "${esc(data.Title || payload.title)}". ${esc(data.message || '')}</div>`;
+    const title = detailPanel && detailPanel.querySelector('.detail-title');
+    if (title) title.textContent = `${data.Title || payload.title}${data.Year ? ` (${data.Year})` : ''}`;
     await loadJobs();
-    // Re-render the detail panel with fresh data
-    const selectedId = selectedJobId;
-    selectedJobId = null;
-    await openJob(selectedId);
   } catch (_) {
     msg.innerHTML = '<div class="msg-error">Request failed.</div>';
   }
@@ -831,18 +1721,28 @@ async function applyReidentify(jobId, payload) {
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/progress`);
+  // On (re)connect the server replays every drive's state; refresh info too in
+  // case the server restarted or events were missed while disconnected.
+  ws.onopen = () => loadSystemInfo();
   ws.onmessage = e => {
-    try { applyProgressEvent(JSON.parse(e.data)); } catch (_) {}
+    try { applyProgressEvent(JSON.parse(e.data)); } catch (_) { /* ignore malformed frames */ }
   };
   ws.onclose = () => setTimeout(connectWS, 3000);
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────
 
+initTabs();
 loadDevices();
 loadJobs();
+// Uptime ticks locally from started_at; no server round-trip needed.
+setInterval(updateInfoUptime, 1000);
+// Delivery reachability can change without any rip event; recheck when the
+// user comes back to the tab rather than polling.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') scheduleInfoRefresh();
+});
 connectWS();
-setInterval(loadJobs, 30_000);
 </script>
 </body>
 </html>

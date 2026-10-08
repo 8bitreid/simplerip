@@ -16,6 +16,8 @@ func writeConfig(t *testing.T, content string) string {
 }
 
 func TestLoadFull(t *testing.T) {
+	t.Setenv("MAKEMKV_KEY", "")
+
 	path := writeConfig(t, `
 detection:
   tv_threshold: 5
@@ -36,6 +38,8 @@ notification:
 makemkv:
   key: BETA_KEY_ABCDEF
   timeout_minutes: 180
+  batch_analyze_budget_minutes: 60
+  batch_save_budget_minutes: 12
   cache_mb: 768
   read_error_limit: 140
   no_progress_minutes: 20
@@ -46,6 +50,7 @@ makemkv:
 
 metadata:
   tmdb_api_key: tmdb-secret
+  tmdb_access_token: tmdb-access-secret
   preferred_language: fra
 `)
 
@@ -87,6 +92,12 @@ metadata:
 	if cfg.MakeMKV.TimeoutMinutes != 180 {
 		t.Errorf("TimeoutMinutes = %d, want 180", cfg.MakeMKV.TimeoutMinutes)
 	}
+	if cfg.MakeMKV.BatchAnalyzeBudgetMinutes != 60 {
+		t.Errorf("BatchAnalyzeBudgetMinutes = %d, want 60", cfg.MakeMKV.BatchAnalyzeBudgetMinutes)
+	}
+	if cfg.MakeMKV.BatchSaveBudgetMinutes != 12 {
+		t.Errorf("BatchSaveBudgetMinutes = %d, want 12", cfg.MakeMKV.BatchSaveBudgetMinutes)
+	}
 	if cfg.MakeMKV.CacheMB != 768 {
 		t.Errorf("CacheMB = %d, want 768", cfg.MakeMKV.CacheMB)
 	}
@@ -104,6 +115,9 @@ metadata:
 	}
 	if cfg.Metadata.TMDBApiKey != "tmdb-secret" {
 		t.Errorf("TMDBApiKey = %q", cfg.Metadata.TMDBApiKey)
+	}
+	if cfg.Metadata.TMDBAccessToken != "tmdb-access-secret" {
+		t.Errorf("TMDBAccessToken = %q", cfg.Metadata.TMDBAccessToken)
 	}
 	if cfg.Metadata.PreferredLanguage != "fra" {
 		t.Errorf("PreferredLanguage = %q", cfg.Metadata.PreferredLanguage)
@@ -144,6 +158,12 @@ output:
 	if cfg.MakeMKV.TimeoutMinutes != 120 {
 		t.Errorf("default TimeoutMinutes = %d, want 120", cfg.MakeMKV.TimeoutMinutes)
 	}
+	if cfg.MakeMKV.BatchAnalyzeBudgetMinutes != 45 {
+		t.Errorf("default BatchAnalyzeBudgetMinutes = %d, want 45", cfg.MakeMKV.BatchAnalyzeBudgetMinutes)
+	}
+	if cfg.MakeMKV.BatchSaveBudgetMinutes != 10 {
+		t.Errorf("default BatchSaveBudgetMinutes = %d, want 10", cfg.MakeMKV.BatchSaveBudgetMinutes)
+	}
 	if cfg.MakeMKV.CacheMB != 0 {
 		t.Errorf("default CacheMB = %d, want 0 (auto)", cfg.MakeMKV.CacheMB)
 	}
@@ -174,6 +194,22 @@ makemkv:
 	}
 	if cfg.MakeMKV.Key != "from-env" {
 		t.Errorf("MakeMKV.Key = %q, want \"from-env\" (env var should win)", cfg.MakeMKV.Key)
+	}
+}
+
+func TestLoadDatabaseURLEnvOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+database:
+  url: postgres://file
+`)
+	t.Setenv("DATABASE_URL", "postgres://env")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.URL != "postgres://env" {
+		t.Errorf("Database.URL = %q, want \"postgres://env\" (env var should win)", cfg.Database.URL)
 	}
 }
 
@@ -240,6 +276,10 @@ func TestDefaults(t *testing.T) {
 	if cfg.MakeMKV.TimeoutMinutes != 120 {
 		t.Fatalf("TimeoutMinutes = %d, want 120", cfg.MakeMKV.TimeoutMinutes)
 	}
+	if cfg.MakeMKV.BatchAnalyzeBudgetMinutes != 45 || cfg.MakeMKV.BatchSaveBudgetMinutes != 10 {
+		t.Fatalf("batch budgets = %d/%d, want 45/10",
+			cfg.MakeMKV.BatchAnalyzeBudgetMinutes, cfg.MakeMKV.BatchSaveBudgetMinutes)
+	}
 	if cfg.MakeMKV.CacheMB != 0 || cfg.MakeMKV.ReadErrorLimit != 100 || cfg.MakeMKV.NoProgressMin != 15 || cfg.MakeMKV.MaxRipRetries != 1 {
 		t.Fatalf("unexpected makemkv defaults: %+v", cfg.MakeMKV)
 	}
@@ -253,5 +293,47 @@ func TestDefaultsMakeMKVKeyEnvOverride(t *testing.T) {
 	cfg := Defaults()
 	if cfg.MakeMKV.Key != "env-defaults-key" {
 		t.Fatalf("MakeMKV.Key = %q, want %q", cfg.MakeMKV.Key, "env-defaults-key")
+	}
+}
+
+func TestNotificationDefaultsAndEnvOverride(t *testing.T) {
+	t.Setenv("DISCORD_WEBHOOK_URL", "https://discord.test/api/webhooks/1/tok")
+	t.Setenv("SIMPLERIP_UI_URL", "http://ui:8080")
+
+	path := writeConfig(t, `
+notification:
+  discord_webhook_url: https://from-file.example/hook
+  events:
+    complete: false
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n := cfg.Notification
+	if n.DiscordWebhookURL != "https://discord.test/api/webhooks/1/tok" || n.UIURL != "http://ui:8080" {
+		t.Fatalf("env should override file: %+v", n)
+	}
+	if n.Events.Complete {
+		t.Fatal("complete should be disabled by file")
+	}
+	if !n.Events.Failed || !n.Events.NeedsInput || !n.Events.MultiTitle || !n.Events.DurationMismatch {
+		t.Fatalf("unset events should default on: %+v", n.Events)
+	}
+}
+
+func TestTMDBAccessTokenEnvOverride(t *testing.T) {
+	t.Setenv("TMDB_ACCESS_TOKEN", "env-access-token")
+	path := writeConfig(t, `
+metadata:
+  tmdb_access_token: file-access-token
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metadata.TMDBAccessToken != "env-access-token" {
+		t.Fatalf("TMDBAccessToken = %q, want environment override", cfg.Metadata.TMDBAccessToken)
 	}
 }

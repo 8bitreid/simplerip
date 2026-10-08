@@ -38,6 +38,24 @@ type NotificationConfig struct {
 	WebhookURL         string `yaml:"webhook_url"`
 	ResponseTimeoutMin int    `yaml:"response_timeout_minutes"`
 	CallbackPort       int    `yaml:"callback_port"`
+
+	// DiscordWebhookURL receives pipeline notifications. Prefer the
+	// DISCORD_WEBHOOK_URL env var, which always overrides this value, so the
+	// secret stays out of config files.
+	DiscordWebhookURL string `yaml:"discord_webhook_url"`
+	// UIURL is the address of the SimpleRip web UI, linked from notifications.
+	// Overridden by SIMPLERIP_UI_URL.
+	UIURL  string             `yaml:"ui_url"`
+	Events NotificationEvents `yaml:"events"`
+}
+
+// NotificationEvents toggles each notification type. All default to on.
+type NotificationEvents struct {
+	NeedsInput       bool `yaml:"needs_input"`
+	MultiTitle       bool `yaml:"multi_title"`
+	Complete         bool `yaml:"complete"`
+	Failed           bool `yaml:"failed"`
+	DurationMismatch bool `yaml:"duration_mismatch"`
 }
 
 type ServerConfig struct {
@@ -45,17 +63,20 @@ type ServerConfig struct {
 }
 
 type MakeMKVConfig struct {
-	Key            string   `yaml:"key"`
-	TimeoutMinutes int      `yaml:"timeout_minutes"`
-	CacheMB        int      `yaml:"cache_mb"`
-	ReadErrorLimit int      `yaml:"read_error_limit"`
-	NoProgressMin  int      `yaml:"no_progress_minutes"`
-	MaxRipRetries  int      `yaml:"max_rip_retries"`
-	Devices        []string `yaml:"devices"`
+	Key                       string   `yaml:"key"`
+	TimeoutMinutes            int      `yaml:"timeout_minutes"`
+	BatchAnalyzeBudgetMinutes int      `yaml:"batch_analyze_budget_minutes"`
+	BatchSaveBudgetMinutes    int      `yaml:"batch_save_budget_minutes"`
+	CacheMB                   int      `yaml:"cache_mb"`
+	ReadErrorLimit            int      `yaml:"read_error_limit"`
+	NoProgressMin             int      `yaml:"no_progress_minutes"`
+	MaxRipRetries             int      `yaml:"max_rip_retries"`
+	Devices                   []string `yaml:"devices"`
 }
 
 type MetadataConfig struct {
 	TMDBApiKey        string `yaml:"tmdb_api_key"`
+	TMDBAccessToken   string `yaml:"tmdb_access_token"`
 	OMDbApiKey        string `yaml:"omdb_api_key"`
 	PreferredLanguage string `yaml:"preferred_language"`
 }
@@ -74,11 +95,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config %q: %w", path, err)
 	}
 
-	// MAKEMKV_KEY env var always wins over the config file value.
-	if key := os.Getenv("MAKEMKV_KEY"); key != "" {
-		cfg.MakeMKV.Key = key
-	}
-
+	applyEnv(&cfg)
 	return &cfg, nil
 }
 
@@ -87,10 +104,28 @@ func Load(path string) (*Config, error) {
 // MAKEMKV_KEY is still applied from the environment if set.
 func Defaults() *Config {
 	cfg := defaults()
+	applyEnv(&cfg)
+	return &cfg
+}
+
+// applyEnv lets environment variables override secrets and deployment-specific
+// values in the config file.
+func applyEnv(cfg *Config) {
 	if key := os.Getenv("MAKEMKV_KEY"); key != "" {
 		cfg.MakeMKV.Key = key
 	}
-	return &cfg
+	if v := os.Getenv("DISCORD_WEBHOOK_URL"); v != "" {
+		cfg.Notification.DiscordWebhookURL = v
+	}
+	if v := os.Getenv("SIMPLERIP_UI_URL"); v != "" {
+		cfg.Notification.UIURL = v
+	}
+	if v := os.Getenv("TMDB_ACCESS_TOKEN"); v != "" {
+		cfg.Metadata.TMDBAccessToken = v
+	}
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		cfg.Database.URL = v
+	}
 }
 
 func defaults() Config {
@@ -104,16 +139,25 @@ func defaults() Config {
 		Notification: NotificationConfig{
 			ResponseTimeoutMin: 30,
 			CallbackPort:       8090,
+			Events: NotificationEvents{
+				NeedsInput:       true,
+				MultiTitle:       true,
+				Complete:         true,
+				Failed:           true,
+				DurationMismatch: true,
+			},
 		},
 		Server: ServerConfig{
 			Port: 8080,
 		},
 		MakeMKV: MakeMKVConfig{
-			TimeoutMinutes: 120,
-			CacheMB:        0, // 0 = auto-select by disc type (DVD→512, Blu-ray→1024)
-			ReadErrorLimit: 100,
-			NoProgressMin:  15,
-			MaxRipRetries:  1,
+			TimeoutMinutes:            120,
+			BatchAnalyzeBudgetMinutes: 45,
+			BatchSaveBudgetMinutes:    10,
+			CacheMB:                   0, // 0 = auto-select by disc type (DVD→512, Blu-ray→1024)
+			ReadErrorLimit:            100,
+			NoProgressMin:             15,
+			MaxRipRetries:             1,
 		},
 		Metadata: MetadataConfig{
 			PreferredLanguage: "eng",

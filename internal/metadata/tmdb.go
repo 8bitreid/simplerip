@@ -22,6 +22,14 @@ type MovieResult struct {
 	Popularity  float64 `json:"popularity"`
 }
 
+// MediaSearchResult is a movie or TV series returned by TMDB's multi search.
+type MediaSearchResult struct {
+	ID        int
+	Title     string
+	Year      string
+	MediaType string
+}
+
 // Year returns the four-digit release year, or "" if unavailable.
 func (m MovieResult) Year() string {
 	if len(m.ReleaseDate) >= 4 {
@@ -39,10 +47,11 @@ func (m MovieResult) FolderName() string {
 	return fmt.Sprintf("%s (%s)", sanitize(m.Title), year)
 }
 
-// Client performs TMDB API v3 requests.
+// Client performs TMDB API requests using a v3 API key or v4 read access token.
 type Client struct {
-	apiKey     string
-	httpClient *http.Client
+	apiKey      string
+	accessToken string
+	httpClient  *http.Client
 }
 
 // NewClient returns a Client using apiKey.
@@ -61,12 +70,30 @@ func NewClientWithHTTPClient(apiKey string, httpClient *http.Client) *Client {
 	}
 }
 
+// WithAccessToken configures the v4 read access token used for TMDB requests.
+func (c *Client) WithAccessToken(accessToken string) *Client {
+	c.accessToken = strings.TrimSpace(accessToken)
+	return c
+}
+
+func (c *Client) setAPIKey(query url.Values) {
+	if c.accessToken == "" && c.apiKey != "" {
+		query.Set("api_key", c.apiKey)
+	}
+}
+
+func (c *Client) authorize(req *http.Request) {
+	if c.accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	}
+}
+
 // SearchMovie searches TMDB for movies matching query.
 // Returns up to 5 results ordered by TMDB relevance.
 func (c *Client) SearchMovie(ctx context.Context, query string) ([]MovieResult, error) {
 	u, _ := url.Parse(tmdbBase + "/search/movie")
 	q := u.Query()
-	q.Set("api_key", c.apiKey)
+	c.setAPIKey(q)
 	q.Set("query", query)
 	q.Set("language", "en-US")
 	u.RawQuery = q.Encode()
@@ -75,6 +102,7 @@ func (c *Client) SearchMovie(ctx context.Context, query string) ([]MovieResult, 
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	c.authorize(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -99,6 +127,71 @@ func (c *Client) SearchMovie(ctx context.Context, query string) ([]MovieResult, 
 	return body.Results, nil
 }
 
+// SearchMulti searches movies and TV shows with one query and drops people and
+// other unsupported media types from the result list.
+func (c *Client) SearchMulti(ctx context.Context, query string) ([]MediaSearchResult, error) {
+	u, _ := url.Parse(tmdbBase + "/search/multi")
+	q := u.Query()
+	c.setAPIKey(q)
+	q.Set("query", query)
+	q.Set("include_adult", "false")
+	q.Set("language", "en-US")
+	q.Set("page", "1")
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build TMDB multi-search request: %w", err)
+	}
+	c.authorize(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("tmdb multi search: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("tmdb multi search returned %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Results []struct {
+			ID           int    `json:"id"`
+			MediaType    string `json:"media_type"`
+			Title        string `json:"title"`
+			Name         string `json:"name"`
+			ReleaseDate  string `json:"release_date"`
+			FirstAirDate string `json:"first_air_date"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("decode TMDB multi-search response: %w", err)
+	}
+
+	out := make([]MediaSearchResult, 0, len(body.Results))
+	typeCounts := map[string]int{"movie": 0, "tv": 0}
+	for _, r := range body.Results {
+		if r.MediaType != "movie" && r.MediaType != "tv" || typeCounts[r.MediaType] == 5 {
+			continue
+		}
+		title, date := r.Title, r.ReleaseDate
+		if r.MediaType == "tv" {
+			title, date = r.Name, r.FirstAirDate
+		}
+		if title == "" {
+			continue
+		}
+		year := ""
+		if len(date) >= 4 {
+			year = date[:4]
+		}
+		out = append(out, MediaSearchResult{
+			ID: r.ID, Title: title, Year: year, MediaType: r.MediaType,
+		})
+		typeCounts[r.MediaType]++
+	}
+	return out, nil
+}
+
 // TMDbMovieDetail is the full movie record from /movie/{id}.
 type TMDbMovieDetail struct {
 	ID          int    `json:"id"`
@@ -111,11 +204,15 @@ type TMDbMovieDetail struct {
 
 // GetMovie fetches full details for a TMDB movie ID.
 func (c *Client) GetMovie(ctx context.Context, id int) (*TMDbMovieDetail, error) {
-	u := fmt.Sprintf("%s/movie/%d?api_key=%s", tmdbBase, id, c.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	u, _ := url.Parse(fmt.Sprintf("%s/movie/%d", tmdbBase, id))
+	q := u.Query()
+	c.setAPIKey(q)
+	u.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	c.authorize(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("tmdb get movie: %w", err)

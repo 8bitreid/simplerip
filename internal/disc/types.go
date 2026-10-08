@@ -46,8 +46,11 @@ type Track struct {
 	Type        string // From SINFO attribute 1
 	CodecID     string // From SINFO attribute 5
 	CodecLong   string // From SINFO attribute 6
-	AudioLayout string // From SINFO attribute 19
-	Language    string // From SINFO attribute 28
+	AudioLayout string // From SINFO attribute 2 (e.g. "Surround 5.1")
+	Language    string // From SINFO attribute 3 (ISO code)
+	CodecDesc   string // From SINFO attribute 7 (e.g. "DTS-HD Master Audio")
+	Channels    int    // From SINFO attribute 14 (audio only)
+	Resolution  string // From SINFO attribute 19 (video only, e.g. "1920x1080")
 }
 
 // ClassifiedDisc is the result of scanning + classifying titles on a disc.

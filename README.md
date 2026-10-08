@@ -48,7 +48,7 @@ export MAKEMKV_KEY="your-license-key-here"
 docker compose up -d
 ```
 
-Optical drives are passed through as devices (`/dev/sr0`, `/dev/sr1`). Set `MAKEMKV_KEY` for Blu-ray ripping (recommended) — see Configuration below.
+Optical drives are passed through as devices (`/dev/sr0`, `/dev/sr1`). Set `MAKEMKV_KEY` for Blu-ray ripping (recommended) — see Configuration below. Set `SIMPLERIP_HOST` to override the hostname shown in the dashboard info card.
 
 ---
 
@@ -80,14 +80,19 @@ output:
 
 metadata:
   tmdb_api_key: ""           # https://www.themoviedb.org/settings/api
+  tmdb_access_token: ""      # TMDB v4 API Read Access Token (Bearer), or set TMDB_ACCESS_TOKEN
   omdb_api_key: ""           # https://www.omdbapi.com/apikey.aspx
 
 notification:
   webhook_url: ""            # n8n webhook for Discord alerts
+  discord_webhook_url: ""    # prefer the DISCORD_WEBHOOK_URL env var
+  ui_url: ""                 # linked from notifications (or SIMPLERIP_UI_URL)
+  events: {needs_input: true, multi_title: true, complete: true, failed: true, duration_mismatch: true}
   callback_port: 8090        # port for n8n to POST responses back
 ```
 
 See [config.yaml.example](config.yaml.example) for all options. The file `config/config.yaml` is gitignored.
+When `tmdb_access_token` (or `TMDB_ACCESS_TOKEN`) is set, it is used as a Bearer token and takes precedence over `tmdb_api_key`. The UI searches TMDB `/search/multi` and offers both movies and TV shows.
 
 ---
 
@@ -165,6 +170,18 @@ The full breakdown is shown in the duplicate analysis report for every `[KEEP]` 
 
 ## Discord / n8n integration
 
+### Discord notifications
+
+Set `DISCORD_WEBHOOK_URL` (put it in the gitignored `.env`; compose passes it through) and optionally `SIMPLERIP_UI_URL`. Each message includes the disc name, device, and media title, plus a link to the UI. Events, each toggled under `notification.events`:
+
+- `needs_input` — no main title detected, or no confident TMDB match
+- `multi_title` — more than one title ripped from a disc
+- `complete` — rsync finished and files verified
+- `failed` — scan, rip, or delivery failed
+- `duration_mismatch` — ripped file length differs from the TMDB/OMDb runtime by more than 3 minutes
+
+Sending is asynchronous and best-effort: a dead webhook is logged (without the URL) and never blocks or fails a rip. Senders implement `notify.Sender`, so other channels can be added without touching the pipeline.
+
 SimpleRip POSTs JSON payloads to an n8n webhook when user input is needed (extras, double features, ambiguous discs). n8n formats it as a Discord message with action buttons. The user responds in Discord, n8n POSTs the response back to SimpleRip's callback server (`:8090`), and the rip continues.
 
 If no response is received within `response_timeout_minutes`, extras are skipped and the main feature is delivered.
@@ -175,11 +192,25 @@ If no response is received within `response_timeout_minutes`, extras are skipped
 
 | Condition | Action |
 |-----------|--------|
-| 3+ titles within 60 s of each other | TV mode — rip all automatically |
+| 3+ titles in a similar-duration cluster | TV mode — rip the episode-like cluster; keep duration outliers as extras |
 | 2 titles, same duration | Double feature — ask via Discord |
 | 1 long title (>40 min) + shorter others | Rip main immediately, ask about extras |
 | Ambiguous | Ask via Discord |
 | Under 2 minutes | Silently ignored (junk) |
+
+TV discs rip their selected titles in one `makemkvcon` invocation. The batch
+timeout is `batch_analyze_budget_minutes` plus
+`batch_save_budget_minutes` multiplied by the number of selected titles
+(defaults: 45 minutes for analysis and 10 minutes per title save). If a batch
+fails partway through, completed title files are kept and only missing titles
+are retried individually. Movie ripping continues to use one invocation per
+title.
+
+When TMDB credentials are configured, TV discs are searched using a normalized disc label and, when available, meaningful MakeMKV title names. Similarity and the lead over competing results must support a clear show match before the show name is used automatically. Identification evidence, candidate titles, separate show/season/episode confidence, and lookup errors are recorded in job history; a suggestion is not a probability. An uncertain show keeps the safe disc-label naming and remains searchable/correctable in the UI. Movie lookup behavior is unchanged.
+
+Season inference is separate from show identification. SimpleRip compares the runtimes of the episode-like title cluster with every regular season's episode runtimes when TMDB provides complete data for no more than 20 seasons; it chooses a season only when at least three titles support a close and distinctive match. Explicit season/episode markers in all relevant MakeMKV title names can also identify both directly. Episode numbers are otherwise inferred only when individual runtimes uniquely identify episodes; MakeMKV title indexes are never assumed to be viewing order. `DISC1`/volume labels are removed from the search query but are never treated as season numbers.
+
+If season or episode order remains unknown, ripping continues without waiting indefinitely for a metadata lookup or a manual response. Output is kept under a disc-specific unsorted directory (or an unsorted subdirectory of a confidently matched show/season), retaining MakeMKV's filenames rather than inventing episode numbers. The UI's manual search/correction flow remains available. A manually selected show and season remains authoritative; with a manually chosen season and no starting episode, the existing behavior continues after the highest saved episode number. TMDB lookup failures are recorded and use the same safe fallback. These inferences use only disc metadata and the configured TMDB integration; SimpleRip does not inspect video frames or require another service.
 
 ---
 

@@ -4,10 +4,13 @@ package server
 
 import (
 	"context"
-	_ "embed"
+	_ "embed" // enables //go:embed for the web UI assets
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -18,24 +21,38 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 
+	"github.com/8bitreid/simplerip/internal/config"
+	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/service"
 	"github.com/8bitreid/simplerip/internal/store"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
+
+const jobsPageSize = 100
 
 //go:embed ui/index.html
 var indexHTML []byte
 
 var ejectDevice = func(device string) error {
-	return exec.Command("eject", device).Run()
+	return exec.Command(tools.Path("eject"), "-T", device).Run()
 }
 
 // jobStore is the persistence interface the server depends on.
 // *store.Store satisfies it; a nil value disables persistence.
 type jobStore interface {
-	ListJobs(ctx context.Context) ([]store.Job, error)
+	ListJobs(ctx context.Context, limit, offset int) ([]store.Job, error)
 	GetJob(ctx context.Context, id string) (store.Job, []store.JobEvent, error)
 	AddEvent(ctx context.Context, jobID, stage, message string, data any) error
 	UpdateJob(ctx context.Context, id, title string, year int, status, pattern string) error
+	DeleteJob(ctx context.Context, id string) error
+	DeleteFinishedJobs(ctx context.Context) (int64, error)
+	JobStatusCounts(ctx context.Context) (map[string]int64, error)
+}
+
+type BuildMetadata struct {
+	Version   string
+	Commit    string
+	BuildDate string
 }
 
 // Server wraps the Echo HTTP server and provides WebSocket progress streaming.
@@ -44,8 +61,14 @@ type Server struct {
 	svc        *service.RipService
 	store      jobStore
 	devices    []string
+	cfg        *config.Config
+	build      BuildMetadata
+	hostname   string
+	startedAt  time.Time
+	infoCache  infoCache
 	mu         sync.RWMutex
 	curStates  map[string]service.ProgressEvent // device -> latest event
+	autoEject  map[string]bool
 	ctx        context.Context
 	cancel     context.CancelFunc
 	shutdownWg sync.WaitGroup
@@ -54,15 +77,32 @@ type Server struct {
 // New creates a new Server with the given RipService and optional store.
 // st may be nil — job history endpoints return appropriate error responses
 // when no database is configured.
-func New(svc *service.RipService, st *store.Store, devices []string) *Server {
+func New(svc *service.RipService, st *store.Store, devices []string, cfg *config.Config, build BuildMetadata) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
+	if cfg == nil {
+		cfg = config.Defaults()
+	}
+	hostname := strings.TrimSpace(os.Getenv("SIMPLERIP_HOST"))
+	if hostname == "" {
+		var err error
+		hostname, err = os.Hostname()
+		if err != nil {
+			slog.Error("getting hostname for server info", "error", err)
+			hostname = "unknown"
+		}
+	}
 	s := &Server{
 		e:         echo.New(),
 		svc:       svc,
 		devices:   append([]string(nil), devices...),
+		cfg:       cfg,
+		build:     build,
+		hostname:  hostname,
+		startedAt: time.Now().UTC(),
 		ctx:       ctx,
 		cancel:    cancel,
 		curStates: make(map[string]service.ProgressEvent),
+		autoEject: make(map[string]bool),
 	}
 	// Seed each configured device with an idle state so a fresh client renders
 	// the drive cards immediately, before any progress event arrives.
@@ -78,6 +118,9 @@ func New(svc *service.RipService, st *store.Store, devices []string) *Server {
 		s.store = st
 	}
 
+	s.infoCache.tools = probeToolVersions()
+	s.refreshDeliveryReachability(time.Now())
+
 	s.e.HideBanner = true
 	s.e.HidePort = true
 	s.e.Use(middleware.Logger())
@@ -87,6 +130,8 @@ func New(svc *service.RipService, st *store.Store, devices []string) *Server {
 
 	s.shutdownWg.Add(1)
 	go s.trackProgress()
+	s.shutdownWg.Add(1)
+	go s.trackDriveStatus()
 
 	return s
 }
@@ -95,13 +140,19 @@ func (s *Server) registerRoutes() {
 	s.e.GET("/", s.handleIndex)
 	s.e.GET("/ws/progress", s.handleProgressWS)
 	s.e.GET("/api/status", s.handleStatus)
+	s.e.GET("/api/info", s.handleInfo)
 	s.e.GET("/api/devices", s.handleDevices)
 	s.e.POST("/api/eject", s.handleEject)
 	s.e.POST("/api/eject/:device", s.handleEject)
+	s.e.POST("/api/cancel", s.handleCancelRip)
+	s.e.POST("/api/auto-eject", s.handleAutoEject)
 	s.e.GET("/api/jobs", s.handleListJobs)
 	s.e.GET("/api/jobs/:id", s.handleGetJob)
+	s.e.DELETE("/api/jobs/:id", s.handleDeleteJob)
+	s.e.DELETE("/api/jobs", s.handleDeleteFinishedJobs)
 	s.e.GET("/api/search", s.handleSearch)
 	s.e.POST("/api/jobs/:id/reidentify", s.handleReidentify)
+	s.e.POST("/api/jobs/:id/alternates/:index/rip", s.handleRipAlternate)
 }
 
 // Start starts the HTTP server on the given port.
@@ -167,9 +218,15 @@ func (s *Server) handleEject(c echo.Context) error {
 	if !allowed {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
 	}
+	// The service tracks active pipelines by device. Progress events can lag or
+	// remain stale (for example, after a worker exits), so they must not block
+	// toggling the tray on an otherwise idle drive.
+	if s.svc.HasActiveRip(device) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "a rip is in process; toggling the tray now could interrupt it. Cancel the rip first or wait for it to finish."})
+	}
 
 	if err := ejectDevice(device); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("eject failed: %v", err)})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("tray toggle failed: %v", err)})
 	}
 
 	// Immediately show the drive as idle in UI while poller confirms state.
@@ -177,13 +234,68 @@ func (s *Server) handleEject(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": device})
 }
 
-// handleListJobs returns the 100 most recent jobs.
+func (s *Server) handleCancelRip(c echo.Context) error {
+	var body struct {
+		Device string `json:"device"`
+	}
+	if err := c.Bind(&body); err != nil || strings.TrimSpace(body.Device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+	if !s.isConfiguredDevice(body.Device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	if !s.svc.CancelRip(body.Device) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "no active rip found for this drive"})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device})
+}
+
+func (s *Server) handleAutoEject(c echo.Context) error {
+	var body struct {
+		Device  string `json:"device"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := c.Bind(&body); err != nil || strings.TrimSpace(body.Device) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "device is required"})
+	}
+	if !s.isConfiguredDevice(body.Device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	s.mu.Lock()
+	s.autoEject[body.Device] = body.Enabled
+	s.mu.Unlock()
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device, "enabled": body.Enabled})
+}
+
+func (s *Server) isConfiguredDevice(device string) bool {
+	for _, dev := range s.devices {
+		if dev == device {
+			return true
+		}
+	}
+	return false
+}
+
+// handleListJobs returns a page of the most recent jobs.
 // Returns an empty array when no database is configured.
 func (s *Server) handleListJobs(c echo.Context) error {
+	limit, err := strconv.Atoi(c.QueryParam("limit"))
+	if c.QueryParam("limit") == "" {
+		limit = jobsPageSize
+	} else if err != nil || limit < 1 || limit > jobsPageSize {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("limit must be between 1 and %d", jobsPageSize)})
+	}
+	offset := 0
+	if rawOffset := c.QueryParam("offset"); rawOffset != "" {
+		offset, err = strconv.Atoi(rawOffset)
+		if err != nil || offset < 0 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "offset must be a non-negative integer"})
+		}
+	}
 	if s.store == nil {
 		return c.JSON(http.StatusOK, []store.Job{})
 	}
-	jobs, err := s.store.ListJobs(c.Request().Context())
+	jobs, err := s.store.ListJobs(c.Request().Context(), limit, offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -191,6 +303,22 @@ func (s *Server) handleListJobs(c echo.Context) error {
 		jobs = []store.Job{}
 	}
 	return c.JSON(http.StatusOK, jobs)
+}
+
+func (s *Server) trackDriveStatus() {
+	defer s.shutdownWg.Done()
+	events := disc.PollEventsWithStatus(s.ctx, s.devices, 5*time.Second, s.svc.HasActiveRip, func(device, status string) {
+		s.mu.Lock()
+		state := s.curStates[device]
+		state.Device = device
+		state.DriveStatus = status
+		s.curStates[device] = state
+		s.mu.Unlock()
+		// Push the change to connected clients; onStatus only fires on change.
+		s.svc.EventBus().Emit(state)
+	})
+	for range events {
+	}
 }
 
 // handleGetJob returns a single job and its events.
@@ -212,6 +340,37 @@ func (s *Server) handleGetJob(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"job": job, "events": events})
 }
 
+// handleDeleteJob removes one finished job from history. Files already
+// delivered to the NAS are not touched.
+func (s *Server) handleDeleteJob(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	err := s.store.DeleteJob(c.Request().Context(), c.Param("id"))
+	switch {
+	case err == nil:
+		return c.NoContent(http.StatusNoContent)
+	case errors.Is(err, store.ErrNotFound):
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "job not found"})
+	case errors.Is(err, store.ErrJobActive):
+		return c.JSON(http.StatusConflict, map[string]string{"error": "job is still in progress"})
+	default:
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+}
+
+// handleDeleteFinishedJobs clears all finished jobs from history.
+func (s *Server) handleDeleteFinishedJobs(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	n, err := s.store.DeleteFinishedJobs(c.Request().Context())
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.JSON(http.StatusOK, map[string]int64{"deleted": n})
+}
+
 // searchResultJSON is the response shape for each TMDB search hit.
 type searchResultJSON struct {
 	ID        int    `json:"id"`
@@ -221,18 +380,18 @@ type searchResultJSON struct {
 	MediaType string `json:"media_type"`
 }
 
-// handleSearch queries TMDB and returns up to 5 matching movies.
+// handleSearch queries TMDB's multi-search endpoint for movies and TV shows.
 func (s *Server) handleSearch(c echo.Context) error {
 	q := strings.TrimSpace(c.QueryParam("q"))
 	if q == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "q is required"})
 	}
 
-	results, err := s.svc.SearchMovie(c.Request().Context(), q)
+	results, err := s.svc.SearchMedia(c.Request().Context(), q)
 	if err != nil {
 		msg := err.Error()
-		if strings.Contains(msg, "tmdb_api_key not configured") {
-			return c.JSON(http.StatusNotImplemented, map[string]string{"error": "TMDB API key not configured"})
+		if strings.Contains(msg, "not configured") {
+			return c.JSON(http.StatusNotImplemented, map[string]string{"error": "TMDB API key or access token not configured"})
 		}
 		if strings.Contains(msg, "no TMDB results") {
 			return c.JSON(http.StatusOK, []searchResultJSON{})
@@ -242,13 +401,12 @@ func (s *Server) handleSearch(c echo.Context) error {
 
 	out := make([]searchResultJSON, 0, len(results))
 	for _, r := range results {
-		yr, _ := strconv.Atoi(r.Year())
+		yr, _ := strconv.Atoi(r.Year)
 		out = append(out, searchResultJSON{
 			ID:        r.ID,
 			Title:     r.Title,
 			Year:      yr,
-			Runtime:   0, // not available from TMDB search endpoint
-			MediaType: "movie",
+			MediaType: r.MediaType,
 		})
 	}
 	return c.JSON(http.StatusOK, out)
@@ -256,9 +414,12 @@ func (s *Server) handleSearch(c echo.Context) error {
 
 // reidentifyRequest is the body for POST /api/jobs/:id/reidentify.
 type reidentifyRequest struct {
-	TMDBID int    `json:"tmdb_id"`
-	Title  string `json:"title"`
-	Year   int    `json:"year"`
+	TMDBID       int    `json:"tmdb_id"`
+	Title        string `json:"title"`
+	Year         int    `json:"year"`
+	MediaType    string `json:"media_type"`
+	Season       int    `json:"season"`
+	EpisodeStart int    `json:"episode_start"`
 }
 
 // handleReidentify applies a manual metadata correction to an existing job.
@@ -274,6 +435,25 @@ func (s *Server) handleReidentify(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
+	body.MediaType = strings.ToLower(strings.TrimSpace(body.MediaType))
+	if body.MediaType == "" {
+		body.MediaType = "movie"
+	}
+	if body.MediaType != "movie" && body.MediaType != "tv" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "media_type must be movie or tv"})
+	}
+	if strings.TrimSpace(body.Title) == "" || body.TMDBID <= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "a title and valid TMDB ID are required"})
+	}
+	if body.MediaType == "tv" && body.Season < 1 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "season must be at least 1 for a TV show"})
+	}
+	if body.EpisodeStart < 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "episode_start cannot be negative"})
+	}
+	if body.MediaType == "movie" && (body.Season != 0 || body.EpisodeStart != 0) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "season and episode_start are only valid for TV shows"})
+	}
 
 	// Verify the job exists and capture its current status/pattern so a manual
 	// correction only updates title/year — it must not reset a completed job
@@ -286,13 +466,30 @@ func (s *Server) handleReidentify(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
+	if s.svc.TitleFrozen(existing.Device) && !isFinished(existing.Status) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "delivery has started; the title can no longer be changed"})
+	}
+
+	// Pin the chosen movie's runtime before the correction event is written:
+	// a rip waiting on manual input wakes on that event and reads it.
+	if !isFinished(existing.Status) && body.MediaType == "movie" {
+		s.svc.SetRipRuntime(existing.Device, s.svc.RuntimeFor(ctx, body.TMDBID))
+	} else if !isFinished(existing.Status) && body.MediaType == "tv" {
+		// A TV edit only renames; clear any earlier movie runtime so it can't
+		// restart a TV batch whose selected titles haven't changed.
+		s.svc.SetRipRuntime(existing.Device, 0)
+	}
+
 	_ = s.store.AddEvent(ctx, id, "identify",
 		fmt.Sprintf("manual correction: %s (%d)", body.Title, body.Year),
 		map[string]any{
-			"tmdb_id":    body.TMDBID,
-			"title":      body.Title,
-			"year":       body.Year,
-			"correction": true,
+			"tmdb_id":       body.TMDBID,
+			"title":         body.Title,
+			"year":          body.Year,
+			"media_type":    body.MediaType,
+			"season":        body.Season,
+			"episode_start": body.EpisodeStart,
+			"correction":    true,
 		})
 
 	if err := s.store.UpdateJob(ctx, id, body.Title, body.Year, existing.Status, existing.Pattern); err != nil {
@@ -307,12 +504,41 @@ func (s *Server) handleReidentify(c echo.Context) error {
 		liveTitle = fmt.Sprintf("%s (%d)", body.Title, body.Year)
 	}
 	_ = s.svc.ReidentifyRip(existing.Device, liveTitle)
+	// If the chosen movie needs a different title than the one being ripped,
+	// stop and start over with the corrected identity.
+	message := ""
+	if !isFinished(existing.Status) {
+		restarted := s.svc.RestartIfNeeded(existing.Device)
+		message = s.svc.EditMessage(existing.Device, restarted)
+		_ = s.store.AddEvent(ctx, id, "identify", message, map[string]any{"restart": restarted})
+	}
 
 	job, _, err := s.store.GetJob(ctx, id)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
-	return c.JSON(http.StatusOK, job)
+	return c.JSON(http.StatusOK, struct {
+		store.Job
+		Message string `json:"message,omitempty"`
+	}{job, message})
+}
+
+// handleRipAlternate starts ripping one alternate cut found on a job's disc.
+func (s *Server) handleRipAlternate(c echo.Context) error {
+	idx, err := strconv.Atoi(c.Param("index"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid title index"})
+	}
+	switch err := s.svc.StartAlternateRip(c.Param("id"), idx); {
+	case err == nil:
+		return c.JSON(http.StatusAccepted, map[string]string{"status": "started"})
+	case errors.Is(err, service.ErrNoAlternate):
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "that alternate is no longer available (the daemon restarted or the disc changed)"})
+	case errors.Is(err, service.ErrDeviceBusy):
+		return c.JSON(http.StatusConflict, map[string]string{"error": "the drive is busy; try again when it is idle"})
+	default:
+		return c.JSON(http.StatusConflict, map[string]string{"error": "the main rip has not been delivered yet, or no output path is configured"})
+	}
 }
 
 // WebSocket keepalive tuning. The server pings the client periodically and
@@ -414,8 +640,15 @@ func (s *Server) trackProgress() {
 				continue
 			}
 			s.mu.Lock()
+			event.DriveStatus = s.curStates[event.Device].DriveStatus
 			s.curStates[event.Device] = event
+			auto := event.Stage == "done" && s.autoEject[event.Device]
 			s.mu.Unlock()
+			if auto {
+				if err := ejectDevice(event.Device); err == nil {
+					s.svc.MarkDeviceIdle(event.Device)
+				}
+			}
 		}
 	}
 }
@@ -427,12 +660,18 @@ var upgrader = websocket.Upgrader{
 		if origin == "" {
 			return true
 		}
-		host := "http://" + r.Host
-		if r.TLS != nil {
-			host = "https://" + r.Host
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
 		}
-		return origin == host
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		return u.Scheme == scheme && u.Host == r.Host && u.Path == ""
 	},
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 }
+
+func isFinished(status string) bool { return status == "done" || status == "error" }

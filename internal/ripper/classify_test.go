@@ -77,6 +77,21 @@ func TestClassifyTitles(t *testing.T) {
 			wantJunk:    0,
 		},
 		{
+			name: "TV episode cluster keeps long outlier as extra",
+			titles: []disc.MKVTitle{
+				title("Episode 1", 0, 11, 0),
+				title("Episode 2", 0, 11, 5),
+				title("Episode 3", 0, 10, 58),
+				title("Episode 4", 0, 11, 2),
+				title("Episode 5", 0, 11, 1),
+				title("Featurette", 1, 20, 0),
+			},
+			wantPattern: DiscPatternTV,
+			wantMain:    5,
+			wantExtras:  1,
+			wantJunk:    0,
+		},
+		{
 			name: "double feature two same-duration feature-length titles",
 			titles: []disc.MKVTitle{
 				title("Movie A", 1, 45, 0),

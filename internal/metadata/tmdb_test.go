@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -146,6 +147,76 @@ func TestClientSearchMovieTable(t *testing.T) {
 				t.Fatalf("SearchMovie() len = %d, want %d", len(results), tc.wantLen)
 			}
 		})
+	}
+}
+
+func TestClientSearchMultiWithBearerToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/search/multi" {
+			t.Fatalf("path = %q, want /3/search/multi", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer read-token" {
+			t.Fatalf("Authorization = %q, want Bearer read-token", got)
+		}
+		if got := r.URL.Query().Get("api_key"); got != "" {
+			t.Fatalf("api_key query = %q, want none when using bearer token", got)
+		}
+		if got := r.URL.Query().Get("query"); got != "spongebob" {
+			t.Fatalf("query = %q, want spongebob", got)
+		}
+		if r.URL.Query().Get("include_adult") != "false" || r.URL.Query().Get("language") != "en-US" || r.URL.Query().Get("page") != "1" {
+			t.Fatalf("unexpected query parameters: %v", r.URL.Query())
+		}
+		_, _ = fmt.Fprint(w, `{"results":[
+			{"adult":false,"id":387,"name":"SpongeBob SquarePants","media_type":"tv","first_air_date":"1999-05-01"},
+			{"adult":false,"id":121021,"name":"SpongeBob DocuPants","media_type":"tv","first_air_date":"2020-05-14"},
+			{"adult":false,"id":11836,"title":"The SpongeBob SquarePants Movie","media_type":"movie","release_date":"2004-11-19"},
+			{"adult":false,"id":205996,"name":"SpongeBob As Told By","media_type":"tv","first_air_date":"2020-05-14"},
+			{"adult":false,"id":358711,"title":"SpongeBob SquarePants: Halloween","media_type":"movie","release_date":"2002-08-27"},
+			{"adult":false,"id":1075004,"title":"SpongeBob SquarePants: Ghouls Fools","media_type":"movie","release_date":"2011-10-21"},
+			{"adult":false,"id":238145,"name":"SpongeBob: Reimagined","media_type":"tv","first_air_date":"2021-06-04"},
+			{"adult":false,"id":123,"name":"A person result","media_type":"person"}
+		]}`)
+	}))
+	defer server.Close()
+
+	client := newTMDBTestClient(t, server).WithAccessToken("read-token")
+	results, err := client.SearchMulti(context.Background(), "spongebob")
+	if err != nil {
+		t.Fatalf("SearchMulti() error = %v", err)
+	}
+	if len(results) != 7 {
+		t.Fatalf("SearchMulti() returned %d results, want 7 supported movie/TV results: %+v", len(results), results)
+	}
+	want := []MediaSearchResult{
+		{ID: 387, Title: "SpongeBob SquarePants", Year: "1999", MediaType: "tv"},
+		{ID: 121021, Title: "SpongeBob DocuPants", Year: "2020", MediaType: "tv"},
+		{ID: 11836, Title: "The SpongeBob SquarePants Movie", Year: "2004", MediaType: "movie"},
+		{ID: 205996, Title: "SpongeBob As Told By", Year: "2020", MediaType: "tv"},
+		{ID: 358711, Title: "SpongeBob SquarePants: Halloween", Year: "2002", MediaType: "movie"},
+		{ID: 1075004, Title: "SpongeBob SquarePants: Ghouls Fools", Year: "2011", MediaType: "movie"},
+		{ID: 238145, Title: "SpongeBob: Reimagined", Year: "2021", MediaType: "tv"},
+	}
+	if !reflect.DeepEqual(results, want) {
+		t.Fatalf("SearchMulti() = %+v, want %+v", results, want)
+	}
+}
+
+func TestClientSearchMultiWithLegacyAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("api_key"); got != "tmdb-key" {
+			t.Fatalf("api_key = %q, want tmdb-key", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("Authorization = %q, want empty for legacy API-key mode", got)
+		}
+		_, _ = fmt.Fprint(w, `{"results":[]}`)
+	}))
+	defer server.Close()
+
+	client := newTMDBTestClient(t, server)
+	if _, err := client.SearchMulti(context.Background(), "spongebob"); err != nil {
+		t.Fatalf("SearchMulti() error = %v", err)
 	}
 }
 

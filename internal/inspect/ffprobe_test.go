@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 func installFakeFFProbe(t *testing.T, jsonOut string, fail bool) {
@@ -18,7 +20,7 @@ func installFakeFFProbe(t *testing.T, jsonOut string, fail bool) {
 		"printf '%s' \"$FFPROBE_JSON\"\n"), 0o755); err != nil {
 		t.Fatalf("write fake ffprobe: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 	t.Setenv("FFPROBE_JSON", jsonOut)
 	if fail {
 		t.Setenv("FFPROBE_FAIL", "1")
