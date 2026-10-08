@@ -25,7 +25,7 @@ func ListenUdevEvents(ctx context.Context, targetDevices []string) <-chan DiscEv
 	go func() {
 		defer close(out)
 
-		cmd := exec.CommandContext(ctx, tools.Path("udevadm"), "monitor", "--environment", "--subsystem=block")
+		cmd := exec.CommandContext(ctx, tools.Path("udevadm"), "monitor", "--udev", "--environment", "--subsystem-match=block")
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			slog.Error("failed to create stdout pipe for udevadm", "err", err)

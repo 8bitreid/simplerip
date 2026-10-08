@@ -29,6 +29,11 @@ FROM ubuntu:24.04 AS final
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Pinned so a PPA update cannot silently change the robot-mode output the scan
+# parser depends on. The PPA only keeps the newest build, so when it moves on
+# this install fails; bump the version after checking the parser fixtures.
+ARG MAKEMKV_PPA_VERSION=2.0.0-1~noble
+
 # Runtime dependencies only — no build tools.
 # ffmpeg:  used by simplerip for MKV metadata inspection (ffprobe)
 # rsync:   used by simplerip for NAS delivery
@@ -46,8 +51,8 @@ RUN apt-get update \
     && add-apt-repository -y ppa:heyarje/makemkv-beta \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        makemkv-bin \
-        makemkv-oss \
+        makemkv-bin=${MAKEMKV_PPA_VERSION} \
+        makemkv-oss=${MAKEMKV_PPA_VERSION} \
     && rm -rf /var/lib/apt/lists/*
 
 # simplerip binary is statically linked — no extra runtime deps.

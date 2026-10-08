@@ -1121,7 +1121,7 @@ function driveCardHTML(st) {
 
   // only rip/deliver get a progress bar under the stepper — matches the
   // existing pct/indeterminate values, just moved out of the per-row layout
-  const activeStageHasBar = curIdx < STAGES.length && !INDETERMINATE_STAGES.has(canon) && canon !== 'idle';
+  const activeStageHasBar = curIdx >= 0 && curIdx < STAGES.length && !INDETERMINATE_STAGES.has(canon) && canon !== 'idle';
   const pct = activeStageHasBar ? displayPercent(st) : 0;
   const progressHTML = activeStageHasBar
     ? `<div class="stage-progress prog-wrap"><div class="prog-fill" data-progress-device="${escAttr(device)}" style="width:${pct}%"></div></div>`
@@ -1142,12 +1142,12 @@ function driveCardHTML(st) {
       <div class="card-resolve" data-device="${escAttr(device)}">
         <div class="search-row">
           <input class="search-input card-resolve-input" data-device="${escAttr(device)}"
-            type="text" placeholder="Search TMDB…" value="${escAttr(rs.query)}" />
+            type="text" aria-label="Search TMDB for the correct title" placeholder="Search TMDB…" value="${escAttr(rs.query)}" />
           <button class="btn btn-primary card-resolve-search" data-device="${escAttr(device)}">Search</button>
           ${editOpen ? `<button class="btn card-resolve-cancel" data-device="${escAttr(device)}">Cancel</button>` : ''}
         </div>
         <div class="search-results">${rs.results ? renderResolveResults(device, rs.results) : ''}</div>
-        ${rs.message ? `<div class="${rs.message.startsWith('Error') ? 'msg-error' : 'msg-info'}">${esc(rs.message)}</div>` : ''}
+        ${rs.message ? `<div class="msg-error">${esc(rs.message)}</div>` : ''}
       </div>`;
   }
 
@@ -1208,12 +1208,12 @@ async function doCardSearch(device) {
     const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
     const data = await r.json();
     if (!r.ok) {
-      cardResolveState[device] = { ...rs, message: data.error || 'Search failed' };
+      cardResolveState[device] = { ...rs, results: null, message: data.error || 'Search failed' };
     } else {
       cardResolveState[device] = { ...rs, results: data, message: '' };
     }
   } catch (_) {
-    cardResolveState[device] = { ...rs, message: 'Search request failed.' };
+    cardResolveState[device] = { ...rs, results: null, message: 'Search request failed.' };
   }
   renderDrives();
 }
@@ -1621,6 +1621,7 @@ function renderDetail(job, events) {
         <div class="reid-heading">Re-identify</div>
         <div class="search-row">
           <input class="search-input" id="reid-q" type="text"
+            aria-label="Search TMDB for the correct title"
             placeholder="Search TMDB…"
             value="${escAttr(job.Title || job.DiscLabel || '')}" />
           <button class="btn btn-primary" id="reid-btn">Search</button>
