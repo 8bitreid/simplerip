@@ -83,3 +83,23 @@ func TestPinnedRuntimeLifecycle(t *testing.T) {
 		t.Fatalf("runtime leaked into next job: %d", got)
 	}
 }
+
+func TestReidentifyRipClearsSearchPrompt(t *testing.T) {
+	s := New(&config.Config{}, nil)
+	_, ch := s.EventBus().Subscribe()
+	s.beginRipTitle("/dev/sr0", "SPONGEBOB_DISC1")
+	s.emit(ProgressEvent{Device: "/dev/sr0", Stage: "identifying",
+		Message: "TV disc detected. Search for the show and select its season."})
+	<-ch
+
+	if !s.ReidentifyRip("/dev/sr0", "SpongeBob SquarePants (1999)") {
+		t.Fatal("re-identify should apply to an active job")
+	}
+	ev := <-ch
+	if ev.Title != "SpongeBob SquarePants (1999)" {
+		t.Errorf("Title = %q, want the chosen show", ev.Title)
+	}
+	if ev.Message != "Identified as SpongeBob SquarePants (1999)" {
+		t.Errorf("Message = %q, want the search prompt replaced", ev.Message)
+	}
+}

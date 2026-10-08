@@ -1240,7 +1240,8 @@ async function applyCardReidentify(device, payload) {
       renderDrives();
       return;
     }
-    delete cardResolveState[device]; // card will re-render past "identify" on the next progress event
+    delete cardResolveState[device];
+    renderDrives();
     if (data.message) showToast(data.message);
     await loadJobs();
   } catch (_) {

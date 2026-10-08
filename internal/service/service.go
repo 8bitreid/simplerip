@@ -419,8 +419,13 @@ func (s *RipService) ReidentifyRip(device, folder string) bool {
 
 	if hasLast {
 		last.Title = folder
-		if last.Stage == "ripping" {
+		switch last.Stage {
+		case "ripping":
 			last.Message = fmt.Sprintf("Ripping %s (%d%%)", folder, last.Percent)
+		case "identifying":
+			// Replace any "search for the title" prompt so the UI closes its
+			// search panel once the user has chosen.
+			last.Message = "Identified as " + folder
 		}
 		s.emit(last)
 	}
