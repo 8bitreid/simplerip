@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 // FileInfo is the metadata ffprobe extracts from a single MKV file.
@@ -84,7 +86,7 @@ type ffprobeFormat struct {
 
 // Probe runs ffprobe on path and returns structured metadata.
 func Probe(ctx context.Context, path string) (*FileInfo, error) {
-	cmd := exec.CommandContext(ctx, "ffprobe",
+	cmd := exec.CommandContext(ctx, tools.Path("ffprobe"),
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_format",

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 // RipLog is the data written to rip.json in the destination directory.
@@ -317,7 +319,7 @@ func rsync(ctx context.Context, srcFiles []string, destDir string) error {
 	args = append(args, srcFiles...)
 	args = append(args, destDir+"/")
 
-	cmd := exec.CommandContext(ctx, "rsync", args...)
+	cmd := exec.CommandContext(ctx, tools.Path("rsync"), args...)
 	cmd.Stdout = os.Stderr // rsync progress/stats → stderr so stdout stays clean
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

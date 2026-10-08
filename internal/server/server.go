@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/service"
 	"github.com/8bitreid/simplerip/internal/store"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 const jobsPageSize = 100
@@ -32,7 +34,7 @@ const jobsPageSize = 100
 var indexHTML []byte
 
 var ejectDevice = func(device string) error {
-	return exec.Command("eject", "-T", device).Run()
+	return exec.Command(tools.Path("eject"), "-T", device).Run()
 }
 
 // jobStore is the persistence interface the server depends on.
@@ -658,11 +660,15 @@ var upgrader = websocket.Upgrader{
 		if origin == "" {
 			return true
 		}
-		host := "http://" + r.Host
-		if r.TLS != nil {
-			host = "https://" + r.Host
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
 		}
-		return origin == host
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		return u.Scheme == scheme && u.Host == r.Host && u.Path == ""
 	},
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,

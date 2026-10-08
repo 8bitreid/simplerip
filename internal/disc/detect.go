@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 const discProbeTimeout = 90 * time.Second
@@ -244,7 +246,7 @@ func pollDevice(
 // probeConfig is how checkDevice probes a drive. It is swapped as one value
 // so a test can change it while pollers from another test are still reading.
 type probeConfig struct {
-	// makemkvPath is the makemkvcon binary; production uses the system PATH.
+	// makemkvPath overrides the makemkvcon binary; empty resolves it with tools.Path.
 	makemkvPath string
 	// useDriveIoctl asks the kernel for drive status before falling back to a
 	// makemkvcon probe. Tests that supply a fake makemkvcon turn it off so they
@@ -294,7 +296,11 @@ func checkDeviceStatus(ctx context.Context, device string, timeout time.Duration
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, cfg.makemkvPath, "-r", "--cache=1", "info", "dev:"+device)
+	makemkvPath := cfg.makemkvPath
+	if makemkvPath == "" {
+		makemkvPath = tools.Path("makemkvcon")
+	}
+	cmd := exec.CommandContext(ctx, makemkvPath, "-r", "--cache=1", "info", "dev:"+device)
 	cmd.Stderr = nil // Suppress error output
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -347,7 +353,7 @@ func checkDeviceStatus(ctx context.Context, device string, timeout time.Duration
 
 // init sets the default probe and lets tests override the makemkvcon binary path.
 func init() {
-	cfg := probeConfig{makemkvPath: "makemkvcon", useDriveIoctl: true}
+	cfg := probeConfig{useDriveIoctl: true}
 	if path := os.Getenv("TEST_MAKEMKV_PATH"); path != "" {
 		cfg.makemkvPath = path
 	}

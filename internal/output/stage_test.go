@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/8bitreid/simplerip/internal/output"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 func installFakeRsync(t *testing.T) {
@@ -38,7 +39,7 @@ done
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake rsync: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 }
 
 func TestDeliver(t *testing.T) {

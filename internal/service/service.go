@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/8bitreid/simplerip/internal/diagnose"
 	"io"
 	"log/slog"
 	"os"
@@ -18,6 +17,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/8bitreid/simplerip/internal/diagnose"
+	"github.com/8bitreid/simplerip/internal/tools"
 
 	"github.com/8bitreid/simplerip/internal/config"
 	"github.com/8bitreid/simplerip/internal/disc"
@@ -516,7 +518,7 @@ func (s *RipService) scanInfo(ctx context.Context, device string) (*disc.Classif
 	}
 	scanCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMinutes)*time.Minute)
 	defer cancel()
-	return ripper.ScanInfo(scanCtx, "makemkvcon", device, s.cfg.MakeMKV.Key)
+	return ripper.ScanInfo(scanCtx, tools.Path("makemkvcon"), device, s.cfg.MakeMKV.Key)
 }
 
 func (s *RipService) ripTVTitles(

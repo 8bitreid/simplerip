@@ -23,6 +23,7 @@ import (
 	"github.com/8bitreid/simplerip/internal/output"
 	"github.com/8bitreid/simplerip/internal/ripper"
 	"github.com/8bitreid/simplerip/internal/store"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 type hostRewriteTransport struct {
@@ -128,7 +129,7 @@ exit 1
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake makemkvcon: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 }
 
 func installFakeMakeMKVConFailOnce(t *testing.T) {
@@ -180,7 +181,7 @@ exit 1
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake makemkvcon fail-once: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 	t.Setenv("HOME", t.TempDir())
 }
 
@@ -213,7 +214,7 @@ esac
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake ffprobe: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 }
 
 func TestRipService_ScanDisc_Movie(t *testing.T) {
@@ -685,7 +686,7 @@ exit 1
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake makemkvcon: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 	t.Setenv("HOME", t.TempDir())
 	callsFile := filepath.Join(t.TempDir(), "calls")
 	t.Setenv("CALLS_FILE", callsFile)
@@ -758,7 +759,7 @@ exec sleep 60
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake makemkvcon: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 	t.Setenv("HOME", t.TempDir())
 
 	cfg := config.Defaults()
@@ -1535,7 +1536,7 @@ touch "$outdir/title_t0$title.mkv"
 	if err := os.WriteFile(filepath.Join(binDir, "makemkvcon"), []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 }
 
 func TestEditTitleMidRipRestartsWithDifferentTitle(t *testing.T) {
@@ -1710,7 +1711,7 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "makemkvcon"), []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 	t.Setenv("HOME", t.TempDir())
 
 	cfg := config.Defaults()

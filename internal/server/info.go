@@ -17,6 +17,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/8bitreid/simplerip/internal/disc"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 const (
@@ -97,7 +98,7 @@ func probeToolVersions() toolVersions {
 }
 
 func probeMakeMKVVersion(ctx context.Context) toolVersion {
-	output, err := exec.CommandContext(ctx, "makemkvcon").CombinedOutput()
+	output, err := exec.CommandContext(ctx, tools.Path("makemkvcon")).CombinedOutput()
 	if version := parseMakeMKVVersion(output); version != "" {
 		return toolVersion{Version: &version}
 	}
@@ -114,7 +115,7 @@ func probeMakeMKVVersion(ctx context.Context) toolVersion {
 }
 
 func probeMakeMKVPackageVersion(ctx context.Context) (string, error) {
-	output, err := exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${Version}", "makemkv-bin").Output()
+	output, err := exec.CommandContext(ctx, tools.Path("dpkg-query"), "-W", "-f=${Version}", "makemkv-bin").Output()
 	if err != nil {
 		return "", fmt.Errorf("querying makemkv-bin package version: %w", err)
 	}
@@ -130,7 +131,7 @@ func parseMakeMKVVersion(output []byte) string {
 }
 
 func probeFFprobeVersion(ctx context.Context) toolVersion {
-	output, err := exec.CommandContext(ctx, "ffprobe", "-version").CombinedOutput()
+	output, err := exec.CommandContext(ctx, tools.Path("ffprobe"), "-version").CombinedOutput()
 	if err != nil {
 		return toolVersion{Error: fmt.Sprintf("ffprobe: %v", err)}
 	}
@@ -183,7 +184,7 @@ func probeDelivery(destination string, ctx context.Context) bool {
 		return false
 	}
 	target := strings.TrimRight(destination, "/") + "/"
-	return exec.CommandContext(ctx, "rsync", "--list-only", "--timeout=1", "--", target, "/dev/null").Run() == nil
+	return exec.CommandContext(ctx, tools.Path("rsync"), "--list-only", "--timeout=1", "--", target, "/dev/null").Run() == nil
 }
 
 func redactDestination(destination string) string {

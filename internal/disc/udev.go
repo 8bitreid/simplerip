@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 // ListenUdevEvents monitors the kernel's udev event stream for block devices.
@@ -23,7 +25,7 @@ func ListenUdevEvents(ctx context.Context, targetDevices []string) <-chan DiscEv
 	go func() {
 		defer close(out)
 
-		cmd := exec.CommandContext(ctx, "udevadm", "monitor", "--environment", "--subsystem=block")
+		cmd := exec.CommandContext(ctx, tools.Path("udevadm"), "monitor", "--environment", "--subsystem=block")
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			slog.Error("failed to create stdout pipe for udevadm", "err", err)

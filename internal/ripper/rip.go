@@ -19,6 +19,7 @@ import (
 
 	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/inspect"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 // ErrRipTimeout is returned when makemkvcon exceeds timeoutMinutes.
@@ -167,7 +168,7 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 		return nil, fmt.Errorf("write makemkv config: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "makemkvcon",
+	cmd := exec.CommandContext(ctx, tools.Path("makemkvcon"),
 		makemkvArgs(opts.cacheMB(), device, strconv.Itoa(title.Index), outputDir)...)
 
 	stdout, err := cmd.StdoutPipe()
@@ -406,7 +407,7 @@ func RipTitles(ctx context.Context, device string, titles []disc.MKVTitle, outpu
 	ripCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ripCtx, "makemkvcon",
+	cmd := exec.CommandContext(ripCtx, tools.Path("makemkvcon"),
 		makemkvArgs(opts.cacheMB(), device, "all", outputDir,
 			fmt.Sprintf("--minlength=%d", minimumLengthSeconds))...)
 	stdout, err := cmd.StdoutPipe()

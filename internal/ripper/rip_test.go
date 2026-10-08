@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/8bitreid/simplerip/internal/disc"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 // TestRipTitleSuccess injects a fake makemkvcon via PATH, verifies that PRGV
@@ -701,7 +702,7 @@ func fakeMakeMKV(t *testing.T, body string) {
 	if err := os.WriteFile(filepath.Join(dir, "makemkvcon"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake makemkvcon: %v", err)
 	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, dir)
 	t.Setenv("HOME", t.TempDir())
 }
 

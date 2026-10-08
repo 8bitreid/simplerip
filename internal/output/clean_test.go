@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/8bitreid/simplerip/internal/inspect"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 func installAnalyzeFakeFFProbe(t *testing.T) {
@@ -47,7 +48,7 @@ esac
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake ffprobe: %v", err)
 	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	tools.UseDirForTest(t, binDir)
 }
 
 func TestAnalyzeDir(t *testing.T) {

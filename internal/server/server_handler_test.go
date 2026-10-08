@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/8bitreid/simplerip/internal/config"
 	"github.com/8bitreid/simplerip/internal/service"
 	"github.com/8bitreid/simplerip/internal/store"
+	"github.com/8bitreid/simplerip/internal/tools"
 )
 
 // ── mock store ────────────────────────────────────────────────────────────────
@@ -212,7 +214,7 @@ func TestProbeMakeMKVVersionAcceptsNonZeroExitWithStderrBanner(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' 'MakeMKV v2.1.0 linux(x64-release) started' >&2\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir)
+	tools.UseDirForTest(t, dir)
 
 	got := probeMakeMKVVersion(context.Background())
 	if got.Version == nil || *got.Version != "MakeMKV v2.1.0" || got.Error != "" {
@@ -583,5 +585,38 @@ func TestHandleDeleteFinishedJobs(t *testing.T) {
 	decodeJSON(t, rr, &got)
 	if rr.Code != http.StatusOK || got["deleted"] != 3 {
 		t.Fatalf("status=%d body=%v", rr.Code, got)
+	}
+}
+
+func TestUpgraderCheckOrigin(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin string
+		tls    bool
+		want   bool
+	}{
+		{"no origin header", "", false, true},
+		{"same origin http", "http://rip.local:8080", false, true},
+		{"same origin https", "https://rip.local:8080", true, true},
+		{"scheme mismatch", "https://rip.local:8080", false, false},
+		{"other host", "http://evil.example:8080", false, false},
+		{"other port", "http://rip.local:9090", false, false},
+		{"origin with path", "http://rip.local:8080/x", false, false},
+		{"unparseable", "http://%zz", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/ws/progress", nil)
+			r.Host = "rip.local:8080"
+			if tt.origin != "" {
+				r.Header.Set("Origin", tt.origin)
+			}
+			if tt.tls {
+				r.TLS = &tls.ConnectionState{}
+			}
+			if got := upgrader.CheckOrigin(r); got != tt.want {
+				t.Errorf("CheckOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
+			}
+		})
 	}
 }
