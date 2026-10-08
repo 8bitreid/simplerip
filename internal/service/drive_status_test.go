@@ -103,3 +103,27 @@ func TestReidentifyRipClearsSearchPrompt(t *testing.T) {
 		t.Errorf("Message = %q, want the search prompt replaced", ev.Message)
 	}
 }
+
+func TestNeedsUnconfirmedMatchNotice(t *testing.T) {
+	tests := []struct {
+		name                                                    string
+		hasMain, tmdbConfigured, confirmed, tvMatched, tvPrompt bool
+		want                                                    bool
+	}{
+		{"unmatched movie", true, true, false, false, false, true},
+		{"confirmed movie", true, true, true, false, false, false},
+		{"no TMDB key", true, false, false, false, false, false},
+		{"no main titles", false, true, false, false, false, false},
+		{"matched TV show", true, true, false, true, false, false},
+		{"unresolved TV already prompted", true, true, false, false, true, false},
+		{"matched TV with unresolved season", true, true, false, true, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := needsUnconfirmedMatchNotice(tt.hasMain, tt.tmdbConfigured, tt.confirmed, tt.tvMatched, tt.tvPrompt)
+			if got != tt.want {
+				t.Errorf("needsUnconfirmedMatchNotice() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -1244,7 +1244,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		_ = s.store.UpdateStatusPattern(ctx, job.ID, "scanning", pattern)
 	}
 
+	tvPromptSent := false
 	if result.Pattern == ripper.DiscPatternTV && (!autoTVMatch || season == 0 || len(episodeNumbers) != len(result.MainTitles)) {
+		tvPromptSent = true
 		identificationMessage := "TV disc detected. Search for the show and select its season."
 		switch {
 		case autoTVMatch && season > 0:
@@ -1284,9 +1286,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	mediaTitle = s.currentTitle(device, mediaTitle)
 	run.title = mediaTitle
 
-	// With a TMDB key configured, an unconfirmed match means the disc will be
-	// delivered under its raw label unless someone corrects it.
-	if len(result.MainTitles) > 0 && s.tmdbConfigured() && !tmdbConfirmedMovie && !(autoTVMatch && mediaType == "tv") {
+	if needsUnconfirmedMatchNotice(len(result.MainTitles) > 0, s.tmdbConfigured(), tmdbConfirmedMovie, autoTVMatch && mediaType == "tv", tvPromptSent) {
 		s.notifier.Notify(notify.Message{
 			Event:   notify.EventNeedsInput,
 			JobID:   job.ID,
@@ -2549,6 +2549,14 @@ func newNotifier(cfg config.NotificationConfig) *notify.Dispatcher {
 		notify.EventFailed:           cfg.Events.Failed,
 		notify.EventDurationMismatch: cfg.Events.DurationMismatch,
 	}, cfg.UIURL)
+}
+
+// needsUnconfirmedMatchNotice reports whether to warn that a disc will be
+// delivered under its raw label: with a TMDB key configured, nothing confirmed
+// the match. A TV disc that already sent its own needs-input prompt is skipped
+// so the user gets one notification, not two.
+func needsUnconfirmedMatchNotice(hasMainTitles, tmdbConfigured, movieConfirmed, tvMatched, tvPromptSent bool) bool {
+	return hasMainTitles && tmdbConfigured && !movieConfirmed && !tvMatched && !tvPromptSent
 }
 
 func (s *RipService) notifyTVSelection(jobID, discName, device, title string) {
