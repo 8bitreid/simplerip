@@ -917,8 +917,10 @@ function selectionPayload(button) {
   }
   const episodeText = prompt('Starting episode number on this disc (optional). Leave blank to continue after the highest episode already saved for this season.');
   if (episodeText === null) return null;
-  const episodeStart = episodeText.trim() === '' ? 0 : Number(episodeText.trim());
-  if (!Number.isInteger(episodeStart) || episodeStart < 1) {
+  const episodeTrimmed = episodeText.trim();
+  // Blank sends 0: the server continues after the highest saved episode.
+  const episodeStart = episodeTrimmed === '' ? 0 : Number(episodeTrimmed);
+  if (episodeTrimmed !== '' && (!Number.isInteger(episodeStart) || episodeStart < 1)) {
     alert('Enter a starting episode number greater than zero, or leave it blank.');
     return null;
   }
