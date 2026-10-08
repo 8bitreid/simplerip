@@ -197,6 +197,22 @@ makemkv:
 	}
 }
 
+func TestLoadDatabaseURLEnvOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+database:
+  url: postgres://file
+`)
+	t.Setenv("DATABASE_URL", "postgres://env")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.URL != "postgres://env" {
+		t.Errorf("Database.URL = %q, want \"postgres://env\" (env var should win)", cfg.Database.URL)
+	}
+}
+
 func TestLoadEnvKeyWinsOverEmptyFileKey(t *testing.T) {
 	path := writeConfig(t, `makemkv: {}`)
 	t.Setenv("MAKEMKV_KEY", "env-only-key")

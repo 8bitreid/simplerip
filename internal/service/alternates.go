@@ -195,11 +195,9 @@ func (s *RipService) ripAlternate(ctx context.Context, jobID string, a *altState
 	}
 	s.emit(ProgressEvent{Device: a.device, Stage: "ripping", Title: name, Message: "Ripping " + name})
 
-	files, err := ripper.RipTitle(ctx, a.device, t, outDir, s.cfg.MakeMKV.Key, s.cfg.MakeMKV.TimeoutMinutes,
-		cacheMBForDisc(s.cfg.MakeMKV.CacheMB, a.disc.Type), s.cfg.MakeMKV.ReadErrorLimit, s.cfg.MakeMKV.NoProgressMin,
-		func(_ int, pct int, _ ripper.RipPhase) {
-			s.emit(ProgressEvent{Device: a.device, Stage: "ripping", Title: name, Percent: pct, Message: fmt.Sprintf("Ripping %s (%d%%)", name, pct)})
-		})
+	files, err := ripper.RipTitle(ctx, a.device, t, outDir, s.ripOptions(s.cfg.MakeMKV.TimeoutMinutes, a.disc.Type, func(_ int, pct int, _ ripper.RipPhase) {
+		s.emit(ProgressEvent{Device: a.device, Stage: "ripping", Title: name, Percent: pct, Message: fmt.Sprintf("Ripping %s (%d%%)", name, pct)})
+	}))
 	if err != nil {
 		return fail(err)
 	}

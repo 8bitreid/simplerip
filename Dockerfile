@@ -35,14 +35,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # makemkv-bin / makemkv-oss: PPA-provided runtime for makemkvcon and its libs
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        software-properties-common \
-        gnupg \
         ca-certificates \
-        libssl3 \
-        libexpat1 \
-        ffmpeg \
-        rsync \
         eject \
+        ffmpeg \
+        gnupg \
+        libexpat1 \
+        libssl3 \
+        rsync \
+        software-properties-common \
     && add-apt-repository -y ppa:heyarje/makemkv-beta \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -53,13 +53,11 @@ RUN apt-get update \
 # simplerip binary is statically linked — no extra runtime deps.
 COPY --from=gobuilder /simplerip /usr/local/bin/simplerip
 
-RUN ldconfig
+RUN ldconfig \
+    && mkdir -p /root/.MakeMKV \
+    && mkdir -p /staging && chmod 755 /staging
 
-RUN mkdir -p /root/.MakeMKV
-RUN mkdir -p /staging && chmod 755 /staging
-
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["serve"]

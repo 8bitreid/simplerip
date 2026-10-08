@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -78,21 +79,81 @@ const msgSavingTitles = 5014
 // Percent is relative to the current phase.
 type ProgressCallback func(titleIndex int, percent int, phase RipPhase)
 
+// RipOptions configures a makemkvcon rip.
+type RipOptions struct {
+	// Key is the MakeMKV licence key, written to settings.conf so it never
+	// appears in the process list.
+	Key               string
+	TimeoutMinutes    int
+	CacheMB           int // read cache size; 256 when <= 0
+	ReadErrorLimit    int // abort after this many read errors; 0 disables
+	NoProgressMinutes int // abort when stalled this long; 0 disables
+	Progress          ProgressCallback
+}
+
+func (o RipOptions) cacheMB() int {
+	if o.CacheMB <= 0 {
+		return 256
+	}
+	return o.CacheMB
+}
+
+// makemkvArgs builds a robot-mode `mkv` command line. extra flags go before
+// the command.
+func makemkvArgs(cacheMB int, device, titleArg, outputDir string, extra ...string) []string {
+	args := []string{
+		fmt.Sprintf("--cache=%d", cacheMB),
+		"--noscan",
+		"-r",
+		"--messages=-stdout",
+		"--progress=-stdout",
+	}
+	args = append(args, extra...)
+	return append(args, "mkv", "dev:"+device, titleArg, outputDir)
+}
+
+// msgReadError is the makemkvcon message code for a failed disc read.
+const msgReadError = 2003
+
+// readErrorLog counts MakeMKV read errors and remembers where the first one
+// happened.
+type readErrorLog struct {
+	count  int
+	file   string
+	offset int64
+}
+
+func newReadErrorLog() readErrorLog {
+	return readErrorLog{offset: -1}
+}
+
+// record notes a read error from a MSG payload and reports whether limit
+// (when positive) has been reached.
+func (r *readErrorLog) record(payload string, limit int) bool {
+	r.count++
+	if r.offset < 0 {
+		r.file, r.offset = parseReadErrorLocation(payload)
+	}
+	return limit > 0 && r.count >= limit
+}
+
+func (r *readErrorLog) errorFor(cause error, title int, device, detail string) *ReadError {
+	return &ReadError{Cause: cause, Title: title, Device: device, File: r.file,
+		Offset: r.offset, Count: r.count, Detail: detail}
+}
+
 // RipTitle runs:
 //
 //	makemkvcon --cache=<cacheMB> --noscan -r --messages=-stdout --progress=-stdout
 //	             mkv dev:<device> <title.Index> <outputDir>
 //
-// key is exported to the subprocess as MAKEMKV_KEY so the licence is available
-// without being visible in the process list.
-//
 // Progress lines are logged to stdout as "title <index>: <pct>%".
-// If progressCb is non-nil, it is called with each percentage update.
+// If opts.Progress is non-nil, it is called with each percentage update.
 // On success the paths of *.mkv files written to outputDir are returned.
 // On deadline-exceeded ErrRipTimeout is returned (wrapping the error so
 // errors.Is works).
-func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir string, key string, timeoutMinutes int, cacheMB int, readErrorLimit int, noProgressMinutes int, progressCb ProgressCallback) ([]string, error) {
-	timeout := time.Duration(timeoutMinutes) * time.Minute
+func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir string, opts RipOptions) ([]string, error) {
+	timeout := time.Duration(opts.TimeoutMinutes) * time.Minute
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -102,25 +163,12 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 
-	if err := writeTunedConfig(key); err != nil {
+	if err := writeTunedConfig(opts.Key); err != nil {
 		return nil, fmt.Errorf("write makemkv config: %w", err)
 	}
 
-	if cacheMB <= 0 {
-		cacheMB = 256 // default to 256 MB if not set or invalid
-	}
-	cmd := exec.CommandContext(ctx,
-		"makemkvcon",
-		fmt.Sprintf("--cache=%d", cacheMB),
-		"--noscan",
-		"-r",
-		"--messages=-stdout",
-		"--progress=-stdout",
-		"mkv",
-		"dev:"+device,
-		strconv.Itoa(title.Index),
-		outputDir,
-	)
+	cmd := exec.CommandContext(ctx, "makemkvcon",
+		makemkvArgs(opts.cacheMB(), device, strconv.Itoa(title.Index), outputDir)...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -130,88 +178,17 @@ func RipTitle(ctx context.Context, device string, title disc.MKVTitle, outputDir
 		return nil, fmt.Errorf("start makemkvcon: %w", err)
 	}
 
-	// Drain stdout in a goroutine so ctx cancellation can break us out of the
-	// select below without waiting for the pipe to close (which requires the
-	// process — or any child that inherited the fd — to exit first).
-	lineCh := make(chan string, 64)
-	go func() {
-		defer close(lineCh)
-		s := bufio.NewScanner(stdout)
-		for s.Scan() {
-			lineCh <- s.Text()
-		}
-	}()
-
-	lastPct := -1
-	phase := PhaseAnalyze
-	lastProgressAt := time.Now()
-	readErrors := 0
-	firstReadFile, firstReadOffset := "", int64(-1)
-	saveFailed := false
-	var abortErr error
-	readErr := func(cause error, detail string) *ReadError {
-		return &ReadError{Cause: cause, Title: title.Index, Device: device, File: firstReadFile,
-			Offset: firstReadOffset, Count: readErrors, Detail: detail}
+	run := &singleRip{
+		title:          title.Index,
+		device:         device,
+		opts:           opts,
+		phase:          PhaseAnalyze,
+		lastPct:        -1,
+		lastProgressAt: time.Now(),
+		reads:          newReadErrorLog(),
 	}
-
-	watchdog := time.NewTicker(10 * time.Second)
-	defer watchdog.Stop()
-loop:
-	for {
-		select {
-		case line, ok := <-lineCh:
-			if !ok {
-				break loop
-			}
-			if strings.HasPrefix(line, "PRGV:") {
-				prog, ok := parsePRGV(line[len("PRGV:"):])
-				if !ok {
-					continue
-				}
-				if pct := prog.percent(); pct != lastPct {
-					lastPct = pct
-					lastProgressAt = time.Now()
-					fmt.Printf("title %d: %d%%\n", title.Index, pct)
-					if progressCb != nil {
-						progressCb(title.Index, pct, phase)
-					}
-				}
-			} else if strings.HasPrefix(line, "MSG:") {
-				code := parseMSGCode(line[len("MSG:"):])
-				if code == msgSavingTitles && phase == PhaseAnalyze {
-					// Progress restarts at 0% for the save pass; force that to be reported.
-					phase = PhaseSave
-					lastPct = -1
-				}
-				if code == msgSaveTitleFailed {
-					saveFailed = true
-				}
-				if code == 2003 {
-					readErrors++
-					if firstReadOffset < 0 {
-						firstReadFile, firstReadOffset = parseReadErrorLocation(line[len("MSG:"):])
-					}
-					if readErrorLimit > 0 && readErrors >= readErrorLimit {
-						abortErr = readErr(ErrRipReadErrorLimit, "")
-						cancel()
-						break loop
-					}
-				}
-				// Log error and warning messages from makemkvcon
-				fmt.Fprintln(os.Stderr, line)
-			}
-		case <-watchdog.C:
-			if noProgressMinutes > 0 && readErrors > 0 && time.Since(lastProgressAt) >= time.Duration(noProgressMinutes)*time.Minute {
-				abortErr = readErr(ErrRipNoProgress, fmt.Sprintf("%d min stalled", noProgressMinutes))
-				cancel()
-				break loop
-			}
-		case <-ctx.Done():
-			break loop
-		}
-	}
-
-	if abortErr != nil {
+	if abortErr := run.consume(ctx, streamLines(stdout)); abortErr != nil {
+		cancel()
 		_ = cmd.Wait()
 		return nil, abortErr
 	}
@@ -232,10 +209,116 @@ loop:
 	}
 	// makemkvcon can exit cleanly (and report 100%) after giving up on a
 	// title it could not read; surface that instead of an empty result.
-	if len(files) == 0 && (saveFailed || readErrors > 0) {
-		return nil, readErr(ErrRipSaveFailed, "")
+	if len(files) == 0 && (run.saveFailed || run.reads.count > 0) {
+		return nil, run.reads.errorFor(ErrRipSaveFailed, title.Index, device, "")
 	}
 	return files, nil
+}
+
+// streamLines drains r in a goroutine so ctx cancellation can stop the reader
+// loop without waiting for the pipe to close (which requires the process — or
+// any child that inherited the fd — to exit first).
+func streamLines(r io.Reader) <-chan string {
+	lines := make(chan string, 64)
+	go func() {
+		defer close(lines)
+		s := bufio.NewScanner(r)
+		for s.Scan() {
+			lines <- s.Text()
+		}
+	}()
+	return lines
+}
+
+// singleRip tracks the output of a one-title makemkvcon run.
+type singleRip struct {
+	title          int
+	device         string
+	opts           RipOptions
+	phase          RipPhase
+	lastPct        int
+	lastProgressAt time.Time
+	reads          readErrorLog
+	saveFailed     bool
+}
+
+// consume processes makemkvcon output until it ends or ctx is done. A non-nil
+// error means the rip must be aborted.
+func (r *singleRip) consume(ctx context.Context, lines <-chan string) error {
+	watchdog := time.NewTicker(10 * time.Second)
+	defer watchdog.Stop()
+	for {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				return nil
+			}
+			if err := r.handleLine(line); err != nil {
+				return err
+			}
+		case <-watchdog.C:
+			if r.stalled() {
+				return r.reads.errorFor(ErrRipNoProgress, r.title, r.device,
+					fmt.Sprintf("%d min stalled", r.opts.NoProgressMinutes))
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (r *singleRip) stalled() bool {
+	return r.opts.NoProgressMinutes > 0 && r.reads.count > 0 &&
+		time.Since(r.lastProgressAt) >= time.Duration(r.opts.NoProgressMinutes)*time.Minute
+}
+
+func (r *singleRip) handleLine(line string) error {
+	switch {
+	case strings.HasPrefix(line, "PRGV:"):
+		r.handleProgress(line[len("PRGV:"):])
+	case strings.HasPrefix(line, "MSG:"):
+		if r.handleMessage(line[len("MSG:"):]) {
+			return r.reads.errorFor(ErrRipReadErrorLimit, r.title, r.device, "")
+		}
+		// Log error and warning messages from makemkvcon
+		fmt.Fprintln(os.Stderr, line)
+	}
+	return nil
+}
+
+func (r *singleRip) handleProgress(payload string) {
+	prog, ok := parsePRGV(payload)
+	if !ok {
+		return
+	}
+	pct := prog.percent()
+	if pct == r.lastPct {
+		return
+	}
+	r.lastPct = pct
+	r.lastProgressAt = time.Now()
+	fmt.Printf("title %d: %d%%\n", r.title, pct)
+	if r.opts.Progress != nil {
+		r.opts.Progress(r.title, pct, r.phase)
+	}
+}
+
+// handleMessage updates state from a MSG payload and reports whether the read
+// error limit was reached.
+func (r *singleRip) handleMessage(payload string) bool {
+	switch parseMSGCode(payload) {
+	case msgSavingTitles:
+		if r.phase == PhaseAnalyze {
+			// Progress restarts at 0% for the save pass; force that to be reported.
+			r.phase = PhaseSave
+			r.lastPct = -1
+		}
+	case msgSaveTitleFailed:
+		r.saveFailed = true
+	case msgReadError:
+		return r.reads.record(payload, r.opts.ReadErrorLimit)
+	}
+	return false
 }
 
 // CalculateBatchTimeoutMinutes returns the total timeout for one multi-title
@@ -289,36 +372,24 @@ func titleIndexFromFilename(path string) (int, bool) {
 	return index, err == nil && index >= 0
 }
 
-// batchTimeoutUnit scales RipTitles' timeoutMinutes; tests shrink it.
+// batchTimeoutUnit scales RipTitles' opts.TimeoutMinutes; tests shrink it.
 var batchTimeoutUnit = time.Minute
 
-// RipTitles runs one MakeMKV process for the selected titles. timeoutMinutes is
-// the already-computed batch timeout. Files for finished titles are returned
-// even when the command fails, allowing the caller to retry only titles that
-// are missing; outputs that cannot be trusted are deleted.
-func RipTitles(
-	ctx context.Context,
-	device string,
-	titles []disc.MKVTitle,
-	outputDir, key string,
-	timeoutMinutes, cacheMB, readErrorLimit, noProgressMinutes int,
-	progressCb ProgressCallback,
-) ([]string, error) {
+// RipTitles runs one MakeMKV process for the selected titles.
+// opts.TimeoutMinutes is the already-computed batch timeout. Files for
+// finished titles are returned even when the command fails, allowing the
+// caller to retry only titles that are missing; outputs that cannot be trusted
+// are deleted.
+func RipTitles(ctx context.Context, device string, titles []disc.MKVTitle, outputDir string, opts RipOptions) ([]string, error) {
 	if len(titles) == 0 {
 		return nil, fmt.Errorf("no titles selected for batch rip")
 	}
-	if timeoutMinutes < 1 {
+	if opts.TimeoutMinutes < 1 {
 		return nil, fmt.Errorf("batch timeout must be positive")
 	}
-	minimumDuration := titles[0].Duration
-	for _, title := range titles[1:] {
-		if title.Duration < minimumDuration {
-			minimumDuration = title.Duration
-		}
-	}
-	minimumLengthSeconds := int(minimumDuration/time.Second) - 1
-	if minimumLengthSeconds < 1 {
-		return nil, fmt.Errorf("shortest selected title is too short for MakeMKV minimum length")
+	minimumLengthSeconds, err := batchMinimumLength(titles)
+	if err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
@@ -327,30 +398,17 @@ func RipTitles(
 	if err != nil {
 		return nil, err
 	}
-	if err := writeTunedConfig(key); err != nil {
+	if err := writeTunedConfig(opts.Key); err != nil {
 		return nil, fmt.Errorf("write makemkv config: %w", err)
 	}
 
-	if cacheMB <= 0 {
-		cacheMB = 256
-	}
-	timeout := time.Duration(timeoutMinutes) * batchTimeoutUnit
+	timeout := time.Duration(opts.TimeoutMinutes) * batchTimeoutUnit
 	ripCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ripCtx,
-		"makemkvcon",
-		fmt.Sprintf("--cache=%d", cacheMB),
-		"--noscan",
-		"-r",
-		"--messages=-stdout",
-		"--progress=-stdout",
-		fmt.Sprintf("--minlength=%d", minimumLengthSeconds),
-		"mkv",
-		"dev:"+device,
-		"all",
-		outputDir,
-	)
+	cmd := exec.CommandContext(ripCtx, "makemkvcon",
+		makemkvArgs(opts.cacheMB(), device, "all", outputDir,
+			fmt.Sprintf("--minlength=%d", minimumLengthSeconds))...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
@@ -360,189 +418,25 @@ func RipTitles(
 		return nil, fmt.Errorf("start makemkvcon: %w", err)
 	}
 
-	lineCh := make(chan string, 64)
-	scannerDone := make(chan struct{})
-	scannerErr := make(chan error, 1)
-	go func() {
-		defer close(scannerDone)
-		defer close(lineCh)
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
-		for scanner.Scan() {
-			select {
-			case lineCh <- scanner.Text():
-			case <-ripCtx.Done():
-				scannerErr <- scanner.Err()
-				return
-			}
-		}
-		scannerErr <- scanner.Err()
-	}()
-
-	analyzeStartedAt := startedAt
-	saveStartedAt := time.Time{}
-	lastProgressAt := startedAt
-	lastPct := -1
-	lastReportedIndex := -1
-	phase := PhaseAnalyze
-	readErrors := 0
-	firstReadFile, firstReadOffset := "", int64(-1)
-	var abortErr error
-	tracker := newTitleTracker(titles)
-	activeTitleIndex := titles[0].Index
-	activeTitleName := titles[0].Name
-	activeTitleStartedAt := time.Time{}
-	readErrFor := func(index int, cause error, detail string) *ReadError {
-		return &ReadError{Cause: cause, Title: index, Device: device,
-			File: firstReadFile, Offset: firstReadOffset, Count: readErrors, Detail: detail}
-	}
-	readErr := func(cause error, detail string) *ReadError {
-		return readErrFor(activeTitleIndex, cause, detail)
-	}
-	logTitleSaveComplete := func(at time.Time) {
-		if activeTitleIndex >= 0 && !activeTitleStartedAt.IsZero() {
-			slog.Info("per-title save duration", "device", device, "title_index", activeTitleIndex,
-				"title_name", activeTitleName, "duration", at.Sub(activeTitleStartedAt).String())
-			activeTitleStartedAt = time.Time{}
-		}
-	}
-	setActiveTitle := func(index int, name string) {
-		if index == activeTitleIndex {
-			return
-		}
-		if phase == PhaseSave {
-			now := time.Now()
-			logTitleSaveComplete(now)
-			activeTitleStartedAt = now
-		}
-		activeTitleIndex, activeTitleName = index, name
-	}
-	refreshActiveTitle := func() error {
-		files, err := freshMKVFiles(outputDir, preexisting)
-		if err != nil {
-			return err
-		}
-		tracker.observe(files)
-		if index, name := newestTitleFromFiles(files, titles); index >= 0 {
-			setActiveTitle(index, name)
-		}
-		return nil
-	}
-	watchdog := time.NewTicker(10 * time.Second)
-	defer watchdog.Stop()
-	titlePoll := time.NewTicker(250 * time.Millisecond)
-	defer titlePoll.Stop()
-
-loop:
-	for {
-		select {
-		case line, ok := <-lineCh:
-			if !ok {
-				break loop
-			}
-			if strings.HasPrefix(line, "PRGC:") || strings.HasPrefix(line, "PRGT:") {
-				// Logged raw so real batch runs show which task each PRGV field tracks.
-				slog.Info("makemkv progress label", "device", device, "line", line)
-				continue
-			}
-			if strings.HasPrefix(line, "PRGV:") {
-				prog, ok := parsePRGV(line[len("PRGV:"):])
-				if !ok {
-					continue
-				}
-				// Check outputs first so a PRGV printed just after the next title's
-				// file appears is credited to that title, not the previous one.
-				if err := refreshActiveTitle(); err != nil {
-					abortErr = fmt.Errorf("find active title output: %w", err)
-					cancel()
-					break loop
-				}
-				if pct := batchProgressPercent(prog, phase); pct != lastPct || activeTitleIndex != lastReportedIndex {
-					lastPct, lastReportedIndex = pct, activeTitleIndex
-					lastProgressAt = time.Now()
-					fmt.Printf("title %d: %d%% (%s)\n", activeTitleIndex, pct, line)
-					if progressCb != nil {
-						progressCb(activeTitleIndex, pct, phase)
-					}
-				}
-				continue
-			}
-			if !strings.HasPrefix(line, "MSG:") {
-				continue
-			}
-			payload := line[len("MSG:"):]
-			code := parseMSGCode(payload)
-			if code == msgSavingTitles && phase == PhaseAnalyze {
-				now := time.Now()
-				slog.Info("batch analyze duration", "device", device, "title_count", len(titles),
-					"duration", now.Sub(analyzeStartedAt).String())
-				phase = PhaseSave
-				saveStartedAt = now
-				lastProgressAt = now
-				lastPct = -1
-				activeTitleStartedAt = now
-			}
-			if code == msgSaveTitleFailed {
-				tracker.markFailed(payload)
-			}
-			if code == 2003 {
-				readErrors++
-				if firstReadOffset < 0 {
-					firstReadFile, firstReadOffset = parseReadErrorLocation(payload)
-				}
-				if readErrorLimit > 0 && readErrors >= readErrorLimit {
-					abortErr = readErr(ErrRipReadErrorLimit, "")
-					cancel()
-					break loop
-				}
-			}
-			fmt.Fprintln(os.Stderr, line)
-		case <-titlePoll.C:
-			if err := refreshActiveTitle(); err != nil {
-				abortErr = fmt.Errorf("find active title output: %w", err)
-				cancel()
-				break loop
-			}
-		case <-watchdog.C:
-			if watchdogExpired(phase, readErrors, noProgressMinutes, lastProgressAt, time.Now()) {
-				abortErr = readErr(ErrRipNoProgress, fmt.Sprintf("%d min stalled", noProgressMinutes))
-				cancel()
-				break loop
-			}
-		case <-ripCtx.Done():
-			break loop
-		}
+	lines, scannerDone, scannerErr := scanBatchOutput(ripCtx, stdout)
+	b := newBatchRun(device, titles, outputDir, preexisting, opts, startedAt)
+	abortErr := b.consume(ripCtx, lines)
+	if abortErr != nil {
+		cancel()
 	}
 
-	select {
-	case <-scannerDone:
-	case <-time.After(30 * time.Second):
-		slog.Warn("timed out waiting for makemkvcon stdout reader; closing pipe", "device", device)
-		if closeErr := stdout.Close(); closeErr != nil {
-			slog.Warn("close makemkvcon stdout pipe", "device", device, "error", closeErr)
-		}
-		<-scannerDone
-	}
+	awaitScanner(device, stdout, scannerDone)
 	stdoutErr := <-scannerErr
 	waitErr := cmd.Wait()
 	// A title can finish between the last check and exit, so look once more.
-	if err := refreshActiveTitle(); err != nil {
+	if err := b.refreshActiveTitle(); err != nil {
 		return nil, fmt.Errorf("find MakeMKV outputs: %w", err)
 	}
 	files, err := freshMKVFiles(outputDir, preexisting)
 	if err != nil {
 		return nil, err
 	}
-	if phase == PhaseAnalyze {
-		slog.Info("batch analyze duration", "device", device, "title_count", len(titles),
-			"duration", time.Since(analyzeStartedAt).String(), "incomplete", true)
-	} else {
-		logTitleSaveComplete(time.Now())
-		if !saveStartedAt.IsZero() {
-			slog.Info("batch save duration", "device", device, "title_count", len(titles),
-				"duration", time.Since(saveStartedAt).String())
-		}
-	}
+	b.logPhaseDurations()
 
 	var runErr error
 	switch {
@@ -553,19 +447,264 @@ loop:
 	case ctx.Err() != nil:
 		runErr = ctx.Err()
 	case ripCtx.Err() == context.DeadlineExceeded:
-		runErr = readErr(ErrRipTimeout, fmt.Sprintf("batch of %d titles timed out", len(titles)))
+		runErr = b.readErr(ErrRipTimeout, fmt.Sprintf("batch of %d titles timed out", len(titles)))
 	case waitErr != nil:
-		runErr = readErr(fmt.Errorf("makemkvcon: %w", waitErr), "")
+		runErr = b.readErr(fmt.Errorf("makemkvcon: %w", waitErr), "")
 	}
-	if tracker.failedUnknown {
-		tracker.resolveUnnamedFailure(ctx)
+	return b.finish(ctx, files, runErr)
+}
+
+// batchMinimumLength returns the --minlength value (seconds) that keeps every
+// selected title.
+func batchMinimumLength(titles []disc.MKVTitle) (int, error) {
+	minimumDuration := titles[0].Duration
+	for _, title := range titles[1:] {
+		minimumDuration = min(minimumDuration, title.Duration)
+	}
+	seconds := int(minimumDuration/time.Second) - 1
+	if seconds < 1 {
+		return 0, fmt.Errorf("shortest selected title is too short for MakeMKV minimum length")
+	}
+	return seconds, nil
+}
+
+// scanBatchOutput streams makemkvcon stdout lines until EOF or ctx is done.
+// done closes when the reader goroutine exits; errc then holds its error.
+func scanBatchOutput(ctx context.Context, r io.Reader) (lines <-chan string, done <-chan struct{}, errc <-chan error) {
+	lineCh := make(chan string, 64)
+	doneCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(doneCh)
+		defer close(lineCh)
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+		for scanner.Scan() {
+			select {
+			case lineCh <- scanner.Text():
+			case <-ctx.Done():
+				errCh <- scanner.Err()
+				return
+			}
+		}
+		errCh <- scanner.Err()
+	}()
+	return lineCh, doneCh, errCh
+}
+
+// awaitScanner waits for the stdout reader to exit, closing the pipe to
+// unblock it if makemkvcon (or a child holding the fd) keeps it open.
+func awaitScanner(device string, stdout io.Closer, done <-chan struct{}) {
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		slog.Warn("timed out waiting for makemkvcon stdout reader; closing pipe", "device", device)
+		if closeErr := stdout.Close(); closeErr != nil {
+			slog.Warn("close makemkvcon stdout pipe", "device", device, "error", closeErr)
+		}
+		<-done
+	}
+}
+
+// batchRun tracks the output of a multi-title makemkvcon run.
+type batchRun struct {
+	device      string
+	titles      []disc.MKVTitle
+	outputDir   string
+	preexisting map[string]fileStamp
+	opts        RipOptions
+	tracker     *titleTracker
+	reads       readErrorLog
+
+	phase             RipPhase
+	analyzeStartedAt  time.Time
+	saveStartedAt     time.Time
+	lastProgressAt    time.Time
+	lastPct           int
+	lastReportedIndex int
+
+	activeTitleIndex     int
+	activeTitleName      string
+	activeTitleStartedAt time.Time
+}
+
+func newBatchRun(device string, titles []disc.MKVTitle, outputDir string, preexisting map[string]fileStamp, opts RipOptions, startedAt time.Time) *batchRun {
+	return &batchRun{
+		device:            device,
+		titles:            titles,
+		outputDir:         outputDir,
+		preexisting:       preexisting,
+		opts:              opts,
+		tracker:           newTitleTracker(titles),
+		reads:             newReadErrorLog(),
+		phase:             PhaseAnalyze,
+		analyzeStartedAt:  startedAt,
+		lastProgressAt:    startedAt,
+		lastPct:           -1,
+		lastReportedIndex: -1,
+		activeTitleIndex:  titles[0].Index,
+		activeTitleName:   titles[0].Name,
+	}
+}
+
+func (b *batchRun) readErr(cause error, detail string) *ReadError {
+	return b.reads.errorFor(cause, b.activeTitleIndex, b.device, detail)
+}
+
+func (b *batchRun) logTitleSaveComplete(at time.Time) {
+	if b.activeTitleIndex >= 0 && !b.activeTitleStartedAt.IsZero() {
+		slog.Info("per-title save duration", "device", b.device, "title_index", b.activeTitleIndex,
+			"title_name", b.activeTitleName, "duration", at.Sub(b.activeTitleStartedAt).String())
+		b.activeTitleStartedAt = time.Time{}
+	}
+}
+
+func (b *batchRun) setActiveTitle(index int, name string) {
+	if index == b.activeTitleIndex {
+		return
+	}
+	if b.phase == PhaseSave {
+		now := time.Now()
+		b.logTitleSaveComplete(now)
+		b.activeTitleStartedAt = now
+	}
+	b.activeTitleIndex, b.activeTitleName = index, name
+}
+
+func (b *batchRun) refreshActiveTitle() error {
+	files, err := freshMKVFiles(b.outputDir, b.preexisting)
+	if err != nil {
+		return err
+	}
+	b.tracker.observe(files)
+	if index, name := newestTitleFromFiles(files, b.titles); index >= 0 {
+		b.setActiveTitle(index, name)
+	}
+	return nil
+}
+
+// consume processes makemkvcon output until it ends or ctx is done. A non-nil
+// error means the rip must be aborted.
+func (b *batchRun) consume(ctx context.Context, lines <-chan string) error {
+	watchdog := time.NewTicker(10 * time.Second)
+	defer watchdog.Stop()
+	titlePoll := time.NewTicker(250 * time.Millisecond)
+	defer titlePoll.Stop()
+
+	for {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				return nil
+			}
+			if err := b.handleLine(line); err != nil {
+				return err
+			}
+		case <-titlePoll.C:
+			if err := b.refreshActiveTitle(); err != nil {
+				return fmt.Errorf("find active title output: %w", err)
+			}
+		case <-watchdog.C:
+			if watchdogExpired(b.phase, b.reads.count, b.opts.NoProgressMinutes, b.lastProgressAt, time.Now()) {
+				return b.readErr(ErrRipNoProgress, fmt.Sprintf("%d min stalled", b.opts.NoProgressMinutes))
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (b *batchRun) handleLine(line string) error {
+	switch {
+	case strings.HasPrefix(line, "PRGC:"), strings.HasPrefix(line, "PRGT:"):
+		// Logged raw so real batch runs show which task each PRGV field tracks.
+		slog.Info("makemkv progress label", "device", b.device, "line", line)
+	case strings.HasPrefix(line, "PRGV:"):
+		return b.handleProgress(line)
+	case strings.HasPrefix(line, "MSG:"):
+		if b.handleMessage(line[len("MSG:"):]) {
+			return b.readErr(ErrRipReadErrorLimit, "")
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+	return nil
+}
+
+func (b *batchRun) handleProgress(line string) error {
+	prog, ok := parsePRGV(line[len("PRGV:"):])
+	if !ok {
+		return nil
+	}
+	// Check outputs first so a PRGV printed just after the next title's
+	// file appears is credited to that title, not the previous one.
+	if err := b.refreshActiveTitle(); err != nil {
+		return fmt.Errorf("find active title output: %w", err)
+	}
+	pct := batchProgressPercent(prog, b.phase)
+	if pct == b.lastPct && b.activeTitleIndex == b.lastReportedIndex {
+		return nil
+	}
+	b.lastPct, b.lastReportedIndex = pct, b.activeTitleIndex
+	b.lastProgressAt = time.Now()
+	fmt.Printf("title %d: %d%% (%s)\n", b.activeTitleIndex, pct, line)
+	if b.opts.Progress != nil {
+		b.opts.Progress(b.activeTitleIndex, pct, b.phase)
+	}
+	return nil
+}
+
+// handleMessage updates state from a MSG payload and reports whether the read
+// error limit was reached.
+func (b *batchRun) handleMessage(payload string) bool {
+	switch parseMSGCode(payload) {
+	case msgSavingTitles:
+		if b.phase == PhaseAnalyze {
+			b.startSavePhase()
+		}
+	case msgSaveTitleFailed:
+		b.tracker.markFailed(payload)
+	case msgReadError:
+		return b.reads.record(payload, b.opts.ReadErrorLimit)
+	}
+	return false
+}
+
+func (b *batchRun) startSavePhase() {
+	now := time.Now()
+	slog.Info("batch analyze duration", "device", b.device, "title_count", len(b.titles),
+		"duration", now.Sub(b.analyzeStartedAt).String())
+	b.phase = PhaseSave
+	b.saveStartedAt = now
+	b.lastProgressAt = now
+	b.lastPct = -1
+	b.activeTitleStartedAt = now
+}
+
+func (b *batchRun) logPhaseDurations() {
+	if b.phase == PhaseAnalyze {
+		slog.Info("batch analyze duration", "device", b.device, "title_count", len(b.titles),
+			"duration", time.Since(b.analyzeStartedAt).String(), "incomplete", true)
+		return
+	}
+	b.logTitleSaveComplete(time.Now())
+	if !b.saveStartedAt.IsZero() {
+		slog.Info("batch save duration", "device", b.device, "title_count", len(b.titles),
+			"duration", time.Since(b.saveStartedAt).String())
+	}
+}
+
+// finish settles the outputs against the run result: it keeps trustworthy
+// files and reports the first selected title that was not written.
+func (b *batchRun) finish(ctx context.Context, files []string, runErr error) ([]string, error) {
+	if b.tracker.failedUnknown {
+		b.tracker.resolveUnnamedFailure(ctx)
 	}
 	if runErr == nil {
-		if _, err := MapTitleFiles(titles, files); err != nil {
+		if _, err := MapTitleFiles(b.titles, files); err != nil {
 			return nil, err
 		}
 	}
-	kept, settleErr := tracker.settle(files, runErr == nil)
+	kept, settleErr := b.tracker.settle(files, runErr == nil)
 	if runErr != nil {
 		if settleErr != nil {
 			return kept, errors.Join(runErr, settleErr)
@@ -575,19 +714,19 @@ loop:
 	if settleErr != nil {
 		return kept, settleErr
 	}
-	for _, title := range titles {
-		if tracker.complete(title.Index, true) {
+	for _, title := range b.titles {
+		if b.tracker.complete(title.Index, true) {
 			continue
 		}
 		detail := fmt.Sprintf("title index %d was not written", title.Index)
-		if tracker.failed[title.Index] {
+		if b.tracker.failed[title.Index] {
 			detail = fmt.Sprintf("MakeMKV failed to save title index %d", title.Index)
 		}
-		return kept, readErrFor(title.Index, ErrRipSaveFailed, detail)
+		return kept, b.reads.errorFor(ErrRipSaveFailed, title.Index, b.device, detail)
 	}
-	if readErrors > 0 {
+	if b.reads.count > 0 {
 		slog.Warn("MakeMKV reported recoverable read errors; all selected title files were written",
-			"device", device, "read_errors", readErrors, "title_count", len(titles))
+			"device", b.device, "read_errors", b.reads.count, "title_count", len(b.titles))
 	}
 	return kept, nil
 }

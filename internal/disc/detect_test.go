@@ -320,6 +320,7 @@ func stopOnCleanup[T any](t *testing.T, cancel context.CancelFunc, ch <-chan T) 
 	t.Cleanup(func() {
 		cancel()
 		for range ch {
+			// Discard remaining events so the poller goroutine can exit.
 		}
 	})
 }

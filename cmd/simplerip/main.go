@@ -81,16 +81,18 @@ func configureLogger() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
 
+const deviceFlagUsage = "optical device path (e.g. /dev/sr0)"
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgPath, "config", "",
 		"config file path (overrides CONFIG_PATH env var, default /config/config.yaml)")
-	rootCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
+	rootCmd.Flags().String("device", "", deviceFlagUsage)
 
-	scanCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
+	scanCmd.Flags().String("device", "", deviceFlagUsage)
 	scanCmd.Flags().String("fixture", "",
 		"parse a captured makemkvcon output file instead of running makemkvcon")
 
-	ripCmd.Flags().String("device", "", "optical device path (e.g. /dev/sr0)")
+	ripCmd.Flags().String("device", "", deviceFlagUsage)
 	ripCmd.Flags().Int("title", 0, "title index to rip (from scan output)")
 	ripCmd.Flags().String("output", "", "directory to write .mkv files into")
 
@@ -253,12 +255,14 @@ Exits with code 3 on timeout (distinct from other errors).`,
 			device,
 			title,
 			outputDir,
-			cfg.MakeMKV.Key,
-			cfg.MakeMKV.TimeoutMinutes,
-			cfg.MakeMKV.CacheMB,
-			cfg.MakeMKV.ReadErrorLimit,
-			cfg.MakeMKV.NoProgressMin,
-			nil, // No progress callback in CLI mode
+			ripper.RipOptions{
+				Key:               cfg.MakeMKV.Key,
+				TimeoutMinutes:    cfg.MakeMKV.TimeoutMinutes,
+				CacheMB:           cfg.MakeMKV.CacheMB,
+				ReadErrorLimit:    cfg.MakeMKV.ReadErrorLimit,
+				NoProgressMinutes: cfg.MakeMKV.NoProgressMin,
+				// No progress callback in CLI mode
+			},
 		)
 		if err != nil {
 			if errors.Is(err, ripper.ErrRipTimeout) {

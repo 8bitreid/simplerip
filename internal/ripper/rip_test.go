@@ -42,7 +42,7 @@ exit 0
 	t.Logf("outDir: %s", outDir)
 
 	title := disc.MKVTitle{Index: 0, Name: "Inception"}
-	files, err := RipTitle(context.Background(), "/dev/sr0", title, outDir, "test-key", 2, 256, 100, 15, nil)
+	files, err := RipTitle(context.Background(), "/dev/sr0", title, outDir, RipOptions{Key: "test-key", TimeoutMinutes: 2, CacheMB: 256, ReadErrorLimit: 100, NoProgressMinutes: 15})
 	if err != nil {
 		t.Fatalf("RipTitle returned error: %v", err)
 	}
@@ -67,7 +67,7 @@ exit 3
 `
 	fakeMakeMKV(t, scriptBody)
 
-	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 1}, outDir, "test-key", 1, 256, 100, 15, nil)
+	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 1}, outDir, RipOptions{Key: "test-key", TimeoutMinutes: 1, CacheMB: 256, ReadErrorLimit: 100, NoProgressMinutes: 15})
 	if err == nil {
 		t.Fatal("expected RipTitle to fail")
 	}
@@ -113,7 +113,7 @@ exit 1
 `
 	fakeMakeMKV(t, scriptBody)
 
-	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 2}, outDir, "test-key", 2, 256, 3, 0, nil)
+	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 2}, outDir, RipOptions{Key: "test-key", TimeoutMinutes: 2, CacheMB: 256, ReadErrorLimit: 3, NoProgressMinutes: 0})
 	if err == nil {
 		t.Fatal("expected read error limit failure")
 	}
@@ -143,7 +143,7 @@ exit 0
 	}
 	var got []step
 	cb := func(_ int, pct int, phase RipPhase) { got = append(got, step{pct, phase}) }
-	if _, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 0}, outDir, "k", 2, 256, 100, 15, cb); err != nil {
+	if _, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 0}, outDir, RipOptions{Key: "k", TimeoutMinutes: 2, CacheMB: 256, ReadErrorLimit: 100, NoProgressMinutes: 15, Progress: cb}); err != nil {
 		t.Fatal(err)
 	}
 	want := []step{{0, PhaseAnalyze}, {50, PhaseAnalyze}, {0, PhaseSave}, {25, PhaseSave}}
@@ -167,7 +167,7 @@ exit 0
 `
 	fakeMakeMKV(t, body)
 
-	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 0}, outDir, "k", 2, 256, 0, 0, nil)
+	_, err := RipTitle(context.Background(), "/dev/sr0", disc.MKVTitle{Index: 0}, outDir, RipOptions{Key: "k", TimeoutMinutes: 2, CacheMB: 256, ReadErrorLimit: 0, NoProgressMinutes: 0})
 	var re *ReadError
 	if !errors.Is(err, ErrRipSaveFailed) || !errors.As(err, &re) {
 		t.Fatalf("expected ReadError(ErrRipSaveFailed), got %v", err)
@@ -265,8 +265,20 @@ exit 0
 		phase RipPhase
 	}
 	var got []progress
-	files, err := RipTitles(context.Background(), "/dev/sr0", titles, outDir, "test-key", 10, 256, 100, 15,
-		func(index, pct int, phase RipPhase) { got = append(got, progress{index, pct, phase}) })
+	files, err := RipTitles(
+		context.Background(),
+		"/dev/sr0",
+		titles,
+		outDir,
+		RipOptions{
+			Key:               "test-key",
+			TimeoutMinutes:    10,
+			CacheMB:           256,
+			ReadErrorLimit:    100,
+			NoProgressMinutes: 15,
+			Progress:          func(index, pct int, phase RipPhase) { got = append(got, progress{index, pct, phase}) },
+		},
+	)
 	if err != nil {
 		t.Fatalf("RipTitles() error = %v", err)
 	}
@@ -334,10 +346,20 @@ sleep 0.3
 exit 1
 `)
 
-	files, err := RipTitles(context.Background(), "/dev/sr0",
+	files, err := RipTitles(
+		context.Background(),
+		"/dev/sr0",
 		[]disc.MKVTitle{{Index: 0, Duration: 5 * time.Minute}, {Index: 2, Duration: 5 * time.Minute},
 			{Index: 4, Duration: 5 * time.Minute}},
-		outDir, "test-key", 2, 256, 100, 0, nil)
+		outDir,
+		RipOptions{
+			Key:               "test-key",
+			TimeoutMinutes:    2,
+			CacheMB:           256,
+			ReadErrorLimit:    100,
+			NoProgressMinutes: 0,
+		},
+	)
 	if err == nil {
 		t.Fatal("RipTitles() succeeded after makemkvcon exited 1")
 	}
@@ -364,9 +386,19 @@ sleep 1
 exit 1
 `)
 
-	files, err := RipTitles(context.Background(), "/dev/sr0",
+	files, err := RipTitles(
+		context.Background(),
+		"/dev/sr0",
 		[]disc.MKVTitle{{Index: 0, Duration: 5 * time.Minute}, {Index: 1, Duration: 5 * time.Minute}},
-		outDir, "test-key", 2, 256, 1, 0, nil)
+		outDir,
+		RipOptions{
+			Key:               "test-key",
+			TimeoutMinutes:    2,
+			CacheMB:           256,
+			ReadErrorLimit:    1,
+			NoProgressMinutes: 0,
+		},
+	)
 	if !errors.Is(err, ErrRipReadErrorLimit) {
 		t.Fatalf("RipTitles() error = %v, want ErrRipReadErrorLimit", err)
 	}
@@ -407,9 +439,19 @@ printf 'MSG:5003,0,2,"Failed to save title to file file://%s/%s","Failed to save
 exit 0
 `)
 
-			files, err := RipTitles(context.Background(), "/dev/sr0",
+			files, err := RipTitles(
+				context.Background(),
+				"/dev/sr0",
 				[]disc.MKVTitle{{Index: 0, Duration: 5 * time.Minute}, {Index: 2, Duration: 5 * time.Minute}},
-				outDir, "test-key", 2, 256, 100, 0, nil)
+				outDir,
+				RipOptions{
+					Key:               "test-key",
+					TimeoutMinutes:    2,
+					CacheMB:           256,
+					ReadErrorLimit:    100,
+					NoProgressMinutes: 0,
+				},
+			)
 			if tc.wantErr {
 				var re *ReadError
 				if !errors.As(err, &re) || !errors.Is(err, ErrRipSaveFailed) || re.Title != 0 {
@@ -464,9 +506,19 @@ exit 0
 `)
 
 	episode := 22 * time.Minute
-	files, err := RipTitles(context.Background(), "/dev/sr0",
+	files, err := RipTitles(
+		context.Background(),
+		"/dev/sr0",
 		[]disc.MKVTitle{{Index: 0, Duration: episode}, {Index: 2, Duration: episode}, {Index: 4, Duration: episode}},
-		outDir, "test-key", 2, 256, 100, 0, nil)
+		outDir,
+		RipOptions{
+			Key:               "test-key",
+			TimeoutMinutes:    2,
+			CacheMB:           256,
+			ReadErrorLimit:    100,
+			NoProgressMinutes: 0,
+		},
+	)
 	var re *ReadError
 	if !errors.Is(err, ErrRipSaveFailed) || !errors.As(err, &re) || re.Title != 2 {
 		t.Fatalf("RipTitles() error = %v, want ErrRipSaveFailed for title 2", err)
@@ -490,9 +542,19 @@ touch "$last/Disc_t00.mkv" "$last/Disc_t01.mkv" "$last/Disc_t02.mkv" "$last/Disc
 exit 0
 `)
 
-	files, err := RipTitles(context.Background(), "/dev/sr0",
+	files, err := RipTitles(
+		context.Background(),
+		"/dev/sr0",
 		[]disc.MKVTitle{{Index: 0, Duration: 5 * time.Minute}, {Index: 2, Duration: 5 * time.Minute}},
-		outDir, "test-key", 2, 256, 100, 0, nil)
+		outDir,
+		RipOptions{
+			Key:               "test-key",
+			TimeoutMinutes:    2,
+			CacheMB:           256,
+			ReadErrorLimit:    100,
+			NoProgressMinutes: 0,
+		},
+	)
 	if err != nil {
 		t.Fatalf("RipTitles() error = %v", err)
 	}
@@ -521,9 +583,19 @@ touch "$last/Disc_t00.mkv"
 exec sleep 10
 `)
 
-	files, err := RipTitles(context.Background(), "/dev/sr0",
+	files, err := RipTitles(
+		context.Background(),
+		"/dev/sr0",
 		[]disc.MKVTitle{{Index: 0, Duration: 5 * time.Minute}},
-		outDir, "test-key", 3, 256, 100, 0, nil)
+		outDir,
+		RipOptions{
+			Key:               "test-key",
+			TimeoutMinutes:    3,
+			CacheMB:           256,
+			ReadErrorLimit:    100,
+			NoProgressMinutes: 0,
+		},
+	)
 	if !errors.Is(err, ErrRipTimeout) {
 		t.Fatalf("RipTitles() error = %v, want ErrRipTimeout", err)
 	}
@@ -565,9 +637,19 @@ printf 'MSG:5014,131072,2,"Saving 2 titles into directory x"\n'
 touch "$last/Disc_t00.mkv"
 `)
 
-	files, err := RipTitles(context.Background(), "/dev/sr0",
+	files, err := RipTitles(
+		context.Background(),
+		"/dev/sr0",
 		[]disc.MKVTitle{{Index: 0, Duration: 5 * time.Minute}, {Index: 2, Duration: 5 * time.Minute}},
-		outDir, "test-key", 2, 256, 100, 0, nil)
+		outDir,
+		RipOptions{
+			Key:               "test-key",
+			TimeoutMinutes:    2,
+			CacheMB:           256,
+			ReadErrorLimit:    100,
+			NoProgressMinutes: 0,
+		},
+	)
 	var re *ReadError
 	if !errors.Is(err, ErrRipSaveFailed) || !errors.As(err, &re) || re.Title != 2 {
 		t.Fatalf("RipTitles() error = %v, want ErrRipSaveFailed for missing title 2", err)
@@ -590,9 +672,19 @@ touch "$last/Disc_t00.mkv" "$last/Disc_t02.mkv"
 exit 0
 `)
 
-	files, err := RipTitles(context.Background(), "/dev/sr0",
+	files, err := RipTitles(
+		context.Background(),
+		"/dev/sr0",
 		[]disc.MKVTitle{{Index: 0, Duration: 5 * time.Minute}, {Index: 2, Duration: 5 * time.Minute}},
-		outDir, "test-key", 2, 256, 10, 0, nil)
+		outDir,
+		RipOptions{
+			Key:               "test-key",
+			TimeoutMinutes:    2,
+			CacheMB:           256,
+			ReadErrorLimit:    10,
+			NoProgressMinutes: 0,
+		},
+	)
 	if err != nil {
 		t.Fatalf("RipTitles() error = %v with complete output files", err)
 	}

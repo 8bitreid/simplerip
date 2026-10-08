@@ -4,7 +4,7 @@ package server
 
 import (
 	"context"
-	_ "embed"
+	_ "embed" // enables //go:embed for the web UI assets
 	"errors"
 	"fmt"
 	"log/slog"

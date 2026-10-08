@@ -27,6 +27,7 @@ services:
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - SIMPLERIP_UI_URL=${SIMPLERIP_UI_URL:-}
       - SIMPLERIP_HOST=${SIMPLERIP_HOST:-}
+      - DATABASE_URL=postgres://simplerip:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/simplerip?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
@@ -37,7 +38,7 @@ services:
     environment:
       POSTGRES_DB: simplerip
       POSTGRES_USER: simplerip
-      POSTGRES_PASSWORD: simplerip
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

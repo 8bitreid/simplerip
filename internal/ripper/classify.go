@@ -60,16 +60,8 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 	minFeature := time.Duration(cfg.MinFeatureMinutes) * time.Minute
 	tolerance := time.Duration(cfg.DurationToleranceSec) * time.Second
 
-	// Rule 0: Check if all or most titles have zero duration (missing metadata).
-	// This happens with heavily encrypted discs or when makemkvcon can't read title info.
-	zeroCount := 0
-	for _, t := range titles {
-		if t.Duration == 0 {
-			zeroCount++
-		}
-	}
-	// If 80%+ of titles have no duration, the metadata is unreliable.
-	if len(titles) > 0 && float64(zeroCount)/float64(len(titles)) >= 0.8 {
+	// Rule 0: metadata missing (encrypted disc or makemkvcon read failure).
+	if hasMissingMetadata(titles) {
 		return ClassificationResult{
 			Pattern:         DiscPatternAmbiguous,
 			MissingMetadata: true,
@@ -77,15 +69,7 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 		}
 	}
 
-	var junk, candidates []disc.MKVTitle
-	for _, t := range titles {
-		if t.Duration < minExtra {
-			junk = append(junk, t)
-		} else {
-			candidates = append(candidates, t)
-		}
-	}
-
+	junk, candidates := splitByDuration(titles, minExtra)
 	if len(candidates) == 0 {
 		return ClassificationResult{
 			Pattern:    DiscPatternAmbiguous,
@@ -105,84 +89,13 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 	// Rule 0.5: Multi-angle detection
 	// If we have 2+ titles marked as angles with same duration and chapter count,
 	// it's a multi-angle disc. Select only angle 1.
-	angleGroup := detectMultiAngle(largest)
-	if len(angleGroup) > 1 {
-		// Find angle 1 (or the first angle if angle 1 doesn't exist)
-		var mainAngle *disc.MKVTitle
-		for i := range angleGroup {
-			if angleGroup[i].AngleNumber == 1 {
-				mainAngle = &angleGroup[i]
-				break
-			}
-		}
-		if mainAngle == nil {
-			mainAngle = &angleGroup[0]
-		}
-
-		// Separate angles from other candidates
-		var nonAngles, angles []disc.MKVTitle
-		for _, t := range candidates {
-			if t.AngleNumber > 0 && t.Duration == mainAngle.Duration && t.ChapterCount == mainAngle.ChapterCount {
-				angles = append(angles, t)
-			} else {
-				nonAngles = append(nonAngles, t)
-			}
-		}
-
-		return ClassificationResult{
-			Pattern:     DiscPatternMovie,
-			MainTitles:  []disc.MKVTitle{*mainAngle},
-			ExtraTitles: nonAngles,
-			JunkTitles:  junk,
-			AllTitles:   candidates,
-			MultiAngle:  true,
-			AngleCount:  len(angles),
-		}
+	if angleGroup := detectMultiAngle(largest); len(angleGroup) > 1 {
+		return classifyMultiAngle(angleGroup, candidates, junk)
 	}
 
 	// Rule 1: TV
 	if len(largest) >= cfg.TVThreshold {
-		isEpisodeClusterTitle := func(candidate disc.MKVTitle) bool {
-			for _, episode := range largest {
-				delta := candidate.Duration - episode.Duration
-				if delta < 0 {
-					delta = -delta
-				}
-				if delta <= tolerance {
-					return true
-				}
-			}
-			return false
-		}
-		type titleIdentity struct {
-			index      int
-			name       string
-			duration   time.Duration
-			chapters   int
-			sourceFile string
-		}
-		identity := func(t disc.MKVTitle) titleIdentity {
-			return titleIdentity{t.Index, t.Name, t.Duration, t.ChapterCount, t.SourceFileName}
-		}
-		clusterTitles := make(map[titleIdentity]bool, len(largest))
-		for _, t := range largest {
-			clusterTitles[identity(t)] = true
-		}
-		var main, extras []disc.MKVTitle
-		for _, t := range candidates {
-			if clusterTitles[identity(t)] || isEpisodeClusterTitle(t) {
-				main = append(main, t)
-			} else {
-				extras = append(extras, t)
-			}
-		}
-		return ClassificationResult{
-			Pattern:     DiscPatternTV,
-			MainTitles:  main,
-			ExtraTitles: extras,
-			JunkTitles:  junk,
-			AllTitles:   candidates,
-		}
+		return classifyTV(largest, candidates, junk, tolerance)
 	}
 
 	// Rule 2: Double feature — two same-duration titles, both feature-length.
@@ -196,14 +109,7 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 	}
 
 	// Rule 3: Single movie.
-	var features, extras []disc.MKVTitle
-	for _, t := range candidates {
-		if t.Duration >= minFeature {
-			features = append(features, t)
-		} else {
-			extras = append(extras, t)
-		}
-	}
+	extras, features := splitByDuration(candidates, minFeature)
 	if len(features) == 1 {
 		return ClassificationResult{
 			Pattern:     DiscPatternMovie,
@@ -221,6 +127,118 @@ func ClassifyTitles(titles []disc.MKVTitle, cfg config.DetectionConfig) Classifi
 		JunkTitles:  junk,
 		AllTitles:   candidates,
 	}
+}
+
+// hasMissingMetadata reports whether 80%+ of titles have no duration, in which
+// case the scan metadata is unreliable.
+func hasMissingMetadata(titles []disc.MKVTitle) bool {
+	if len(titles) == 0 {
+		return false
+	}
+	zeroCount := 0
+	for _, t := range titles {
+		if t.Duration == 0 {
+			zeroCount++
+		}
+	}
+	return float64(zeroCount)/float64(len(titles)) >= 0.8
+}
+
+// splitByDuration partitions titles into those shorter than threshold and the rest,
+// preserving order.
+func splitByDuration(titles []disc.MKVTitle, threshold time.Duration) (shorter, atLeast []disc.MKVTitle) {
+	for _, t := range titles {
+		if t.Duration < threshold {
+			shorter = append(shorter, t)
+		} else {
+			atLeast = append(atLeast, t)
+		}
+	}
+	return shorter, atLeast
+}
+
+// classifyMultiAngle selects angle 1 (or the first angle if there is no angle
+// 1) as the main title; every non-angle candidate becomes an extra.
+func classifyMultiAngle(angleGroup, candidates, junk []disc.MKVTitle) ClassificationResult {
+	mainAngle := angleGroup[0]
+	for _, t := range angleGroup {
+		if t.AngleNumber == 1 {
+			mainAngle = t
+			break
+		}
+	}
+
+	var nonAngles, angles []disc.MKVTitle
+	for _, t := range candidates {
+		if t.AngleNumber > 0 && t.Duration == mainAngle.Duration && t.ChapterCount == mainAngle.ChapterCount {
+			angles = append(angles, t)
+		} else {
+			nonAngles = append(nonAngles, t)
+		}
+	}
+
+	return ClassificationResult{
+		Pattern:     DiscPatternMovie,
+		MainTitles:  []disc.MKVTitle{mainAngle},
+		ExtraTitles: nonAngles,
+		JunkTitles:  junk,
+		AllTitles:   candidates,
+		MultiAngle:  true,
+		AngleCount:  len(angles),
+	}
+}
+
+// titleIdentity distinguishes titles that share a duration, so cluster
+// membership survives the sort in ClassifyTitles.
+type titleIdentity struct {
+	index      int
+	name       string
+	duration   time.Duration
+	chapters   int
+	sourceFile string
+}
+
+func identityOf(t disc.MKVTitle) titleIdentity {
+	return titleIdentity{t.Index, t.Name, t.Duration, t.ChapterCount, t.SourceFileName}
+}
+
+// classifyTV makes every candidate in, or within tolerance of, the episode
+// cluster a main title; the rest are extras.
+func classifyTV(cluster, candidates, junk []disc.MKVTitle, tolerance time.Duration) ClassificationResult {
+	clusterTitles := make(map[titleIdentity]bool, len(cluster))
+	for _, t := range cluster {
+		clusterTitles[identityOf(t)] = true
+	}
+	var main, extras []disc.MKVTitle
+	for _, t := range candidates {
+		if clusterTitles[identityOf(t)] || nearAnyDuration(t, cluster, tolerance) {
+			main = append(main, t)
+		} else {
+			extras = append(extras, t)
+		}
+	}
+	return ClassificationResult{
+		Pattern:     DiscPatternTV,
+		MainTitles:  main,
+		ExtraTitles: extras,
+		JunkTitles:  junk,
+		AllTitles:   candidates,
+	}
+}
+
+// nearAnyDuration reports whether candidate is within tolerance of any title
+// in group.
+func nearAnyDuration(candidate disc.MKVTitle, group []disc.MKVTitle, tolerance time.Duration) bool {
+	for _, t := range group {
+		delta := candidate.Duration - t.Duration
+		if delta < 0 {
+			delta = -delta
+		}
+		if delta <= tolerance {
+			return true
+		}
+	}
+	return false
 }
 
 // buildClusters groups a duration-sorted slice into consecutive runs where

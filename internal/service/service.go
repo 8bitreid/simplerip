@@ -136,7 +136,9 @@ func (s *RipService) awaitManualSelection(ctx context.Context, jobID string, tim
 	}
 
 	waitCtx := ctx
-	cancel := func() {}
+	cancel := func() {
+		// No timeout configured: nothing to cancel.
+	}
 	if timeoutMin > 0 {
 		waitCtx, cancel = context.WithTimeout(ctx, time.Duration(timeoutMin)*time.Minute)
 	}
@@ -629,11 +631,7 @@ func (s *RipService) ripTVTitles(
 	if err != nil {
 		return nil, nil, fmt.Errorf("create TV batch output directory: %w", err)
 	}
-	batchFiles, batchErr := ripper.RipTitles(
-		ctx, device, titles, batchOutputDir, s.cfg.MakeMKV.Key, timeoutMinutes,
-		cacheMBForDisc(s.cfg.MakeMKV.CacheMB, discType),
-		s.cfg.MakeMKV.ReadErrorLimit, s.cfg.MakeMKV.NoProgressMin, progressCb,
-	)
+	batchFiles, batchErr := ripper.RipTitles(ctx, device, titles, batchOutputDir, s.ripOptions(timeoutMinutes, discType, progressCb))
 	if errors.Is(context.Cause(ctx), errRestart) {
 		return nil, nil, errRestart
 	}
@@ -713,11 +711,7 @@ func (s *RipService) ripTVTitles(
 						ETASec:  int(remaining.Seconds()),
 					})
 				}
-				_, ripErr = ripper.RipTitle(
-					ctx, device, title, attemptDir, s.cfg.MakeMKV.Key,
-					singleTimeout, cacheMBForDisc(s.cfg.MakeMKV.CacheMB, discType),
-					s.cfg.MakeMKV.ReadErrorLimit, s.cfg.MakeMKV.NoProgressMin, fallbackProgress,
-				)
+				_, ripErr = ripper.RipTitle(ctx, device, title, attemptDir, s.ripOptions(singleTimeout, discType, fallbackProgress))
 				if errors.Is(context.Cause(ctx), errRestart) {
 					return nil, nil, errRestart
 				}
@@ -945,7 +939,9 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			})
 			if s.store != nil {
 				persistCtx := ctx
-				persistCancel := func() {}
+				persistCancel := func() {
+					// Parent context still live: nothing to cancel.
+				}
 				if ctx.Err() != nil {
 					persistCtx, persistCancel = context.WithTimeout(context.Background(), 5*time.Second)
 				}
@@ -1606,18 +1602,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 			err   error
 		)
 		for attempt := 1; attempt <= attempts; attempt++ {
-			files, err = ripper.RipTitle(
-				ctx,
-				device,
-				title,
-				ripOutputDir,
-				s.cfg.MakeMKV.Key,
-				s.cfg.MakeMKV.TimeoutMinutes,
-				cacheMBForDisc(s.cfg.MakeMKV.CacheMB, scanned.Type),
-				s.cfg.MakeMKV.ReadErrorLimit,
-				s.cfg.MakeMKV.NoProgressMin,
-				progressCb,
-			)
+			files, err = ripper.RipTitle(ctx, device, title, ripOutputDir, s.ripOptions(s.cfg.MakeMKV.TimeoutMinutes, scanned.Type, progressCb))
 			if err == nil {
 				slog.Info("rip phase completed", "phase", "ripping", "device", device,
 					"disc", scanned.DiscName, "title_index", title.Index,
@@ -2336,6 +2321,18 @@ func isAllDigits(s string) bool {
 //
 // 4K UHD discs are classified as Blu-ray by makemkvcon, so they receive the
 // 1024 MB budget which comfortably covers their ~128 Mbps peak bitrate.
+// ripOptions builds makemkvcon rip settings from config for one run.
+func (s *RipService) ripOptions(timeoutMinutes int, discType disc.DiscType, progress ripper.ProgressCallback) ripper.RipOptions {
+	return ripper.RipOptions{
+		Key:               s.cfg.MakeMKV.Key,
+		TimeoutMinutes:    timeoutMinutes,
+		CacheMB:           cacheMBForDisc(s.cfg.MakeMKV.CacheMB, discType),
+		ReadErrorLimit:    s.cfg.MakeMKV.ReadErrorLimit,
+		NoProgressMinutes: s.cfg.MakeMKV.NoProgressMin,
+		Progress:          progress,
+	}
+}
+
 func cacheMBForDisc(cfgCacheMB int, discType disc.DiscType) int {
 	if cfgCacheMB > 0 {
 		return cfgCacheMB

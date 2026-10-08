@@ -102,47 +102,47 @@ func Probe(ctx context.Context, path string) (*FileInfo, error) {
 	}
 
 	info := &FileInfo{Path: path}
-
-	// Format-level fields.
-	if raw.Format.Duration != "" {
-		if secs, err := strconv.ParseFloat(raw.Format.Duration, 64); err == nil {
-			info.Duration = time.Duration(secs * float64(time.Second))
-		}
+	applyFormat(info, raw.Format)
+	for _, st := range raw.Streams {
+		applyStream(info, st)
 	}
-	if raw.Format.Size != "" {
-		if b, err := strconv.ParseInt(raw.Format.Size, 10, 64); err == nil {
-			info.SizeBytes = b
-		}
-	}
-
-	// Per-stream fields.
-	for _, s := range raw.Streams {
-		switch s.CodecType {
-		case "video":
-			if info.VideoCodec == "" {
-				info.VideoCodec = s.CodecName
-				if s.Width > 0 && s.Height > 0 {
-					info.Resolution = fmt.Sprintf("%dx%d", s.Width, s.Height)
-				}
-			}
-		case "audio":
-			lang := ""
-			if s.Tags != nil {
-				lang = s.Tags["language"]
-			}
-			info.Audio = append(info.Audio, AudioTrack{
-				Codec:    s.CodecName,
-				Profile:  s.Profile,
-				Channels: s.Channels,
-				Layout:   s.ChannelLayout,
-				Language: lang,
-			})
-		case "subtitle":
-			info.Subtitles++
-		}
-	}
-
 	return info, nil
+}
+
+// applyFormat copies container-level duration and size into info, ignoring
+// values ffprobe could not report.
+func applyFormat(info *FileInfo, f ffprobeFormat) {
+	if secs, err := strconv.ParseFloat(f.Duration, 64); err == nil {
+		info.Duration = time.Duration(secs * float64(time.Second))
+	}
+	if b, err := strconv.ParseInt(f.Size, 10, 64); err == nil {
+		info.SizeBytes = b
+	}
+}
+
+// applyStream records one stream: the first video stream sets codec and
+// resolution, every audio stream is kept, and subtitles are counted.
+func applyStream(info *FileInfo, s ffprobeStream) {
+	switch s.CodecType {
+	case "video":
+		if info.VideoCodec != "" {
+			return
+		}
+		info.VideoCodec = s.CodecName
+		if s.Width > 0 && s.Height > 0 {
+			info.Resolution = fmt.Sprintf("%dx%d", s.Width, s.Height)
+		}
+	case "audio":
+		info.Audio = append(info.Audio, AudioTrack{
+			Codec:    s.CodecName,
+			Profile:  s.Profile,
+			Channels: s.Channels,
+			Layout:   s.ChannelLayout,
+			Language: s.Tags["language"],
+		})
+	case "subtitle":
+		info.Subtitles++
+	}
 }
 
 // DurationWithin returns true if a and b are within tolerance of each other.

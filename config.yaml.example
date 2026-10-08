@@ -108,5 +108,7 @@ metadata:
   preferred_language: eng
 
 # ── Database ─────────────────────────────────────────────────────────────────
+# Docker Compose sets DATABASE_URL from POSTGRES_PASSWORD in .env, which
+# overrides this value.
 database:
-  url: "postgres://simplerip:simplerip@db:5432/simplerip?sslmode=disable"
+  url: ""

@@ -123,6 +123,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("TMDB_ACCESS_TOKEN"); v != "" {
 		cfg.Metadata.TMDBAccessToken = v
 	}
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		cfg.Database.URL = v
+	}
 }
 
 func defaults() Config {

@@ -781,13 +781,13 @@ function setActiveTab(tab, save = true) {
   });
   updateTabBadges();
   if (save) {
-    try { localStorage.setItem('tab', tab); } catch (_) {}
+    try { localStorage.setItem('tab', tab); } catch (_) { /* storage unavailable (private mode); tab just isn't remembered */ }
   }
 }
 
 function initTabs() {
   let storedTab = '';
-  try { storedTab = localStorage.getItem('tab') || ''; } catch (_) {}
+  try { storedTab = localStorage.getItem('tab') || ''; } catch (_) { /* storage unavailable; fall back to default tab */ }
   const tab = validTabs.has(storedTab) ? storedTab : 'drives';
   setActiveTab(tab);
   document.querySelectorAll('.tabbar [data-go]').forEach(button => {
@@ -816,16 +816,16 @@ function updateTabBadges() {
 
 function esc(s) {
   return String(s ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
 
 function escAttr(s) {
-  return String(s ?? '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  return String(s ?? '').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
 let savedAutoEject = [];
-try { savedAutoEject = JSON.parse(localStorage.getItem('simplerip-auto-eject') || '[]'); } catch (_) {}
+try { savedAutoEject = JSON.parse(localStorage.getItem('simplerip-auto-eject') || '[]'); } catch (_) { /* storage unavailable or corrupt; start with none */ }
 const autoEjectDevices = new Set(Array.isArray(savedAutoEject) ? savedAutoEject : []);
 
 function isManualSearchWait(stage, message) {
@@ -901,9 +901,9 @@ function renderResolveResults(device, results) {
 
 function selectionPayload(button) {
   const payload = {
-    tmdb_id: parseInt(button.dataset.id, 10),
+    tmdb_id: Number.parseInt(button.dataset.id, 10),
     title: button.dataset.title,
-    year: parseInt(button.dataset.year, 10),
+    year: Number.parseInt(button.dataset.year, 10),
     media_type: button.dataset.type || 'movie',
   };
   if (payload.media_type !== 'tv') return payload;
@@ -1106,17 +1106,10 @@ function driveCardHTML(st) {
     const waitingIdentify = isCurrent && isManualSearchWait(stage, message) && s === 'identify';
     const indeterminate = isCurrent && INDETERMINATE_STAGES.has(s);
 
-    const circleClass = isDone ? 'done' : waitingIdentify ? 'waiting' : isCurrent ? 'active' : '';
-    const labelClass  = isDone ? 'done' : isCurrent ? 'active' : '';
-    const icon = isDone
-      ? '✓'
-      : waitingIdentify
-        ? '⚠'
-        : indeterminate
-          ? '<span class="spinner"></span>'
-          : (isCurrent ? '' : '');
-
-    const connectorClass = isDone ? 'done' : (isCurrent ? 'active' : '');
+    const labelClass = stageStateClass(isDone, isCurrent);
+    const circleClass = waitingIdentify && !isDone ? 'waiting' : labelClass;
+    const icon = stageIcon(isDone, waitingIdentify, indeterminate);
+    const connectorClass = labelClass;
 
     return `
       <div class="stage-node">
@@ -1275,8 +1268,23 @@ function fmtUptime(totalSeconds) {
   return `${remainder}s`;
 }
 
+function stageStateClass(isDone, isCurrent) {
+  if (isDone) return 'done';
+  if (isCurrent) return 'active';
+  return '';
+}
+
+function stageIcon(isDone, waitingIdentify, indeterminate) {
+  if (isDone) return '✓';
+  if (waitingIdentify) return '⚠';
+  if (indeterminate) return '<span class="spinner"></span>';
+  return '';
+}
+
 function statusDotHTML(ok, warn) {
-  const cls = ok ? 'ok' : (warn ? 'warn' : 'bad');
+  let cls = 'bad';
+  if (ok) cls = 'ok';
+  else if (warn) cls = 'warn';
   return `<span class="status-dot ${cls}"></span>`;
 }
 
@@ -1369,7 +1377,9 @@ async function fetchJobsPage(reset) {
     jobsHasMore = page.length === 100;
     renderJobs();
     jobs.forEach(j => { if (j.Device) ensureDevice(j.Device); });
-  } catch (_) {}
+  } catch (_) {
+    // Network error: keep the current list; the next refresh retries.
+  }
   finally {
     jobsLoadingMore = false;
     updateLoadMoreButton();
@@ -1389,9 +1399,11 @@ async function loadDevices() {
     const devices = await r.json() || [];
     devices.forEach(device => {
       ensureDevice(device);
-      fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device, enabled: autoEjectDevices.has(device) }) }).catch(() => {});
+      fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device, enabled: autoEjectDevices.has(device) }) }).catch(() => { /* best effort; server keeps its previous setting */ });
     });
-  } catch (_) {}
+  } catch (_) {
+    // Network error: drive cards appear once status arrives over the WebSocket.
+  }
 }
 
 function renderJobs() {
@@ -1712,7 +1724,7 @@ function connectWS() {
   // case the server restarted or events were missed while disconnected.
   ws.onopen = () => loadSystemInfo();
   ws.onmessage = e => {
-    try { applyProgressEvent(JSON.parse(e.data)); } catch (_) {}
+    try { applyProgressEvent(JSON.parse(e.data)); } catch (_) { /* ignore malformed frames */ }
   };
   ws.onclose = () => setTimeout(connectWS, 3000);
 }
