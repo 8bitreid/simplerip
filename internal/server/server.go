@@ -312,6 +312,8 @@ func (s *Server) trackDriveStatus() {
 		state.DriveStatus = status
 		s.curStates[device] = state
 		s.mu.Unlock()
+		// Push the change to connected clients; onStatus only fires on change.
+		s.svc.EventBus().Emit(state)
 	})
 	for range events {
 	}

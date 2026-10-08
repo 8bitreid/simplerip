@@ -768,6 +768,7 @@ let jobsLoadingMore = false;
 let selectedJobId = null;
 let detailPanel = null;
 let jobsRefreshTimer = null;
+let infoRefreshTimer = null;
 const layout = document.querySelector('.layout');
 const validTabs = new Set(['drives', 'rips', 'info']);
 
@@ -939,14 +940,30 @@ function ensureDevice(device) {
 
 function applyProgressEvent(ev) {
   const dev = ev.device;
+  const prev = dev ? driveStates[dev] : undefined;
   if (dev) {
     ensureDevice(dev);
     driveStates[dev] = { ...driveStates[dev], ...ev, device: dev, progressAt: Date.now() };
   }
   renderDrives();
-  if (ev.stage === 'done' || ev.stage === 'error' || ev.stage === 'cancelled') {
+  const stageChanged = !prev || prev.stage !== ev.stage;
+  const finished = ev.stage === 'done' || ev.stage === 'error' || ev.stage === 'cancelled';
+  if (finished && stageChanged) {
     scheduleJobsRefresh();
   }
+  // System info (rip counts, staging space, drives with discs) only changes
+  // when a rip finishes or a drive's status changes, so refresh on those events.
+  if ((finished && stageChanged) || (prev && ev.drive_status && prev.drive_status !== ev.drive_status)) {
+    scheduleInfoRefresh();
+  }
+}
+
+function scheduleInfoRefresh() {
+  if (infoRefreshTimer) return;
+  infoRefreshTimer = setTimeout(() => {
+    infoRefreshTimer = null;
+    loadSystemInfo();
+  }, 700);
 }
 
 function scheduleJobsRefresh() {
@@ -1436,24 +1453,6 @@ function renderJobs() {
 
 document.getElementById('load-more-jobs').addEventListener('click', () => fetchJobsPage(false));
 
-async function loadDriveStatuses() {
-  try {
-    const response = await fetch('/api/status');
-    if (!response.ok) return;
-    const statuses = await response.json();
-    let changed = false;
-    for (const [device, status] of Object.entries(statuses || {})) {
-      ensureDevice(device);
-      const driveStatus = status.drive_status;
-      if (driveStatus && driveStates[device].drive_status !== driveStatus) {
-        driveStates[device].drive_status = driveStatus;
-        changed = true;
-      }
-    }
-    if (changed) renderDrives();
-  } catch (_) {}
-}
-
 async function deleteJob(id) {
   if (!confirm('Delete this rip from history? Delivered files are not touched.')) return;
   const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -1709,6 +1708,9 @@ async function applyReidentify(jobId, payload) {
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/progress`);
+  // On (re)connect the server replays every drive's state; refresh info too in
+  // case the server restarted or events were missed while disconnected.
+  ws.onopen = () => loadSystemInfo();
   ws.onmessage = e => {
     try { applyProgressEvent(JSON.parse(e.data)); } catch (_) {}
   };
@@ -1720,11 +1722,13 @@ function connectWS() {
 initTabs();
 loadDevices();
 loadJobs();
-loadDriveStatuses();
-loadSystemInfo();
-setInterval(loadDriveStatuses, 5000);
-setInterval(loadSystemInfo, 30000);
+// Uptime ticks locally from started_at; no server round-trip needed.
 setInterval(updateInfoUptime, 1000);
+// Delivery reachability can change without any rip event; recheck when the
+// user comes back to the tab rather than polling.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') scheduleInfoRefresh();
+});
 connectWS();
 </script>
 </body>
