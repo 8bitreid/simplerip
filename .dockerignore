@@ -1,0 +1,13 @@
+# Keep the build context small: only Go sources and entrypoint.sh are needed.
+staging/
+.git/
+.github/
+.claude/
+.env
+*.env
+config.yaml
+config/
+makemkv-config/
+observability/
+simplerip
+*.md

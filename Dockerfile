@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # ── Stage 1: build the simplerip Go binary ──────────────────────────────────
 FROM golang:1.25-alpine AS gobuilder
 
@@ -9,35 +11,20 @@ ARG BUILD_DATE=unknown
 
 # Cache module downloads separately from source.
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
         -o /simplerip \
         ./cmd/simplerip
 
 
-# ── Stage 2: install makemkvcon from the community PPA ──────────────────────
-FROM ubuntu:24.04 AS makemkv
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        software-properties-common \
-        gnupg \
-        ca-certificates \
-    && add-apt-repository -y ppa:heyarje/makemkv-beta \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        makemkv-bin \
-        makemkv-oss \
-    && rm -rf /var/lib/apt/lists/*
-
-
-# ── Stage 3: final runtime image ─────────────────────────────────────────────
+# ── Stage 2: final runtime image ─────────────────────────────────────────────
 FROM ubuntu:24.04 AS final
 
 ENV DEBIAN_FRONTEND=noninteractive
