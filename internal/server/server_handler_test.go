@@ -16,6 +16,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/8bitreid/simplerip/internal/config"
+	"github.com/8bitreid/simplerip/internal/disc"
 	"github.com/8bitreid/simplerip/internal/service"
 	"github.com/8bitreid/simplerip/internal/store"
 	"github.com/8bitreid/simplerip/internal/tools"
@@ -30,6 +31,29 @@ type mockStore struct {
 	addEvent     func(ctx context.Context, jobID, stage, message string, data any) error
 	updateJob    func(ctx context.Context, id, title string, year int, status, pattern string) error
 	deleteJob    func(ctx context.Context, id string) error
+	driveStats   store.DriveStats
+	driveJobs    []store.Job
+	autoEject    map[string]bool
+}
+
+func (m *mockStore) DriveAutoEject(ctx context.Context) (map[string]bool, error) {
+	return m.autoEject, nil
+}
+
+func (m *mockStore) SetDriveAutoEject(ctx context.Context, device string, enabled bool) error {
+	if m.autoEject == nil {
+		m.autoEject = map[string]bool{}
+	}
+	m.autoEject[device] = enabled
+	return nil
+}
+
+func (m *mockStore) DriveStats(ctx context.Context, device string) (store.DriveStats, error) {
+	return m.driveStats, nil
+}
+
+func (m *mockStore) RecentJobsForDevice(ctx context.Context, device string, limit int) ([]store.Job, error) {
+	return m.driveJobs, nil
 }
 
 func (m *mockStore) DeleteJob(ctx context.Context, id string) error {
@@ -618,5 +642,92 @@ func TestUpgraderCheckOrigin(t *testing.T) {
 				t.Errorf("CheckOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestHandleDrive(t *testing.T) {
+	sys := t.TempDir()
+	devDir := filepath.Join(sys, "sr0", "device")
+	if err := os.MkdirAll(devDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"vendor": "ASUS    \n", "model": "BW-16D1HT       \n", "rev": "3.10\n"} {
+		if err := os.WriteFile(filepath.Join(devDir, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(disc.SetSysBlockDirForTest(sys))
+
+	st := &mockStore{
+		driveStats: store.DriveStats{Done: 19, Error: 10, DeliveredGB: 143.9, DriveName: "BD-RE ASUS BW-16D1HT 3.10 KLIO4993744",
+			LibreDrive: "Using LibreDrive mode (v06.3 id=0FA242DD4D0B)"},
+		driveJobs: []store.Job{{ID: "job-1", Device: "/dev/sr0", Title: "Flipper", Status: "done"}},
+	}
+	s := newTestServer(st)
+	s.devices = []string{"/dev/sr0"}
+	s.autoEject = map[string]bool{"/dev/sr0": true}
+	s.curStates["/dev/sr0"] = service.ProgressEvent{Device: "/dev/sr0", Stage: "ripping", DriveStatus: "disc_present"}
+
+	rr := doRequest(t, s, http.MethodGet, "/api/drive?device=/dev/sr0", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Hardware  disc.DriveHardware    `json:"hardware"`
+		MakeMKV   *driveScanInfo        `json:"makemkv"`
+		AutoEject bool                  `json:"auto_eject"`
+		State     service.ProgressEvent `json:"state"`
+		Stats     *store.DriveStats     `json:"stats"`
+		Recent    []store.Job           `json:"recent"`
+	}
+	decodeJSON(t, rr, &got)
+	if got.Hardware != (disc.DriveHardware{Vendor: "ASUS", Model: "BW-16D1HT", Firmware: "3.10"}) {
+		t.Fatalf("hardware = %+v", got.Hardware)
+	}
+	if got.MakeMKV == nil || got.MakeMKV.Name != st.driveStats.DriveName || got.MakeMKV.LibreDrive == "" {
+		t.Fatalf("makemkv info should fall back to the last recorded scan: %+v", got.MakeMKV)
+	}
+	if !got.AutoEject || got.State.Stage != "ripping" || got.Stats == nil || got.Stats.Done != 19 || len(got.Recent) != 1 {
+		t.Fatalf("drive info = %+v", got)
+	}
+
+	if rr := doRequest(t, s, http.MethodGet, "/api/drive?device=/dev/sda", nil); rr.Code != http.StatusNotFound {
+		t.Fatalf("unconfigured device status = %d, want 404", rr.Code)
+	}
+}
+
+func TestAutoEjectIsSavedPerDrive(t *testing.T) {
+	st := &mockStore{autoEject: map[string]bool{"/dev/sr1": true}}
+	s := newTestServer(st)
+	s.devices = []string{"/dev/sr0", "/dev/sr1"}
+	s.autoEject = map[string]bool{}
+	s.loadAutoEject()
+
+	rr := doRequest(t, s, http.MethodPost, "/api/auto-eject", []byte(`{"device":"/dev/sr0","enabled":true}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	rr = doRequest(t, s, http.MethodPost, "/api/auto-eject", []byte(`{"device":"/dev/sr1","enabled":false}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST status = %d", rr.Code)
+	}
+	if !st.autoEject["/dev/sr0"] || st.autoEject["/dev/sr1"] {
+		t.Fatalf("saved settings = %v, want sr0 on and sr1 off", st.autoEject)
+	}
+
+	var got map[string]bool
+	rr = doRequest(t, s, http.MethodGet, "/api/auto-eject", nil)
+	decodeJSON(t, rr, &got)
+	if len(got) != 2 || !got["/dev/sr0"] || got["/dev/sr1"] {
+		t.Fatalf("GET /api/auto-eject = %v", got)
+	}
+
+	// A restarted server restores what was saved.
+	restarted := newTestServer(st)
+	restarted.devices = s.devices
+	restarted.autoEject = map[string]bool{}
+	restarted.loadAutoEject()
+	if !restarted.autoEject["/dev/sr0"] || restarted.autoEject["/dev/sr1"] {
+		t.Fatalf("restored settings = %v", restarted.autoEject)
 	}
 }

@@ -274,3 +274,23 @@ EOF
 		t.Fatalf("unexpected scan result: %+v", result)
 	}
 }
+
+func TestScanRecordsDriveNameAndLibreDrive(t *testing.T) {
+	out := strings.Join([]string{
+		`DRV:0,2,999,1,"BD-RE HL-DT-ST BD-RE BU40N 1.03 R8XXXX","FLIPPER","/dev/sr1"`,
+		`DRV:1,2,999,1,"BD-RE ASUS BW-16D1HT 3.10 KLIO4993744","SPONGEBOB_DISC2","/dev/sr0"`,
+		`DRV:2,256,999,0,"","",""`,
+		`MSG:1011,0,1,"Using LibreDrive mode (v06.3 id=0FA242DD4D0B)","%1","Using LibreDrive mode (v06.3 id=0FA242DD4D0B)"`,
+		`CINFO:2,0,"SPONGEBOB_DISC2"`,
+	}, "\n")
+	result, err := ScanInfoFromReader(strings.NewReader(out), "/dev/sr0")
+	if err != nil {
+		t.Fatalf("ScanInfoFromReader() error = %v", err)
+	}
+	if result.DriveName != "BD-RE ASUS BW-16D1HT 3.10 KLIO4993744" {
+		t.Fatalf("DriveName = %q, want the /dev/sr0 drive", result.DriveName)
+	}
+	if result.LibreDrive != "Using LibreDrive mode (v06.3 id=0FA242DD4D0B)" {
+		t.Fatalf("LibreDrive = %q", result.LibreDrive)
+	}
+}

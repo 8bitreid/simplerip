@@ -400,13 +400,9 @@ header h1 {
 }
 .eject-spacer { flex: 1 0 14px; }
 .drive-actions { display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; }
-.auto-eject-label { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
-.auto-eject-label input { accent-color: var(--accent); }
 .cancel-rip-btn { border-color: var(--red); color: var(--red); }
 .cancel-rip-btn:hover { background: rgba(239,68,68,0.12); }
 .drive-actions { display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; }
-.auto-eject-label { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
-.auto-eject-label input { accent-color: var(--accent); }
 .cancel-rip-btn { border-color: var(--red); color: var(--red); }
 .cancel-rip-btn:hover { background: rgba(239,68,68,0.12); }
 .drive-card > .card-edit-btn { align-self: flex-start; margin-top: 10px; }
@@ -728,6 +724,65 @@ header h1 {
 .msg-error   { color: var(--red);   font-size: 12px; margin-top: 6px; }
 .msg-success { color: var(--green); font-size: 12px; margin-top: 6px; }
 .msg-info    { color: var(--text-muted); font-size: 12px; margin-top: 6px; }
+/* Phone-style on/off switch. */
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--text); cursor: pointer; }
+.switch {
+  appearance: none; -webkit-appearance: none; flex: 0 0 auto;
+  position: relative; width: 44px; height: 26px; margin: 0; cursor: pointer;
+  border-radius: 999px; background: var(--surface2); border: 1px solid var(--border);
+  transition: background 0.2s, border-color 0.2s;
+}
+.switch::before {
+  content: ''; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+  transition: transform 0.2s;
+}
+.switch:checked { background: var(--green); border-color: var(--green); }
+.switch:checked::before { transform: translateX(18px); }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.drive-card-tools { display: flex; align-items: center; gap: 8px; }
+.drive-info-btn {
+  width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 15px; line-height: 1;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text-muted);
+}
+.drive-info-btn:hover { color: var(--text); border-color: var(--accent); }
+
+/* Drive details panel. */
+.drive-dialog {
+  width: min(560px, calc(100vw - 32px)); max-height: 85vh; padding: 0; margin: auto;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.drive-dialog::backdrop { background: rgba(0,0,0,0.55); }
+.dd-head {
+  position: sticky; top: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 16px 18px 12px; background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.dd-title { font-family: monospace; font-size: 15px; font-weight: 600; }
+.dd-subtitle { color: var(--text-muted); font-size: 13px; margin-top: 2px; }
+.dd-close { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; padding: 2px 6px; }
+.dd-close:hover { color: var(--text); }
+.dd-body { padding: 4px 18px 18px; }
+.dd-section { padding: 14px 0; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.dd-section:last-child { border-bottom: none; }
+.dd-section h3 { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.dd-row { display: flex; justify-content: space-between; gap: 16px; font-size: 13px; }
+.dd-row span:first-child { color: var(--text-muted); flex: 0 0 auto; }
+.dd-row span:last-child { text-align: right; overflow-wrap: anywhere; }
+.dd-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.dd-tile { background: var(--surface2); border-radius: var(--radius-sm); padding: 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.dd-tile b { font-size: 20px; }
+.dd-tile span { font-size: 11px; color: var(--text-muted); }
+.dd-recent-head { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+.dd-job {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; text-align: left;
+  width: 100%; padding: 8px 10px; font: inherit; color: var(--text); cursor: pointer;
+  background: var(--surface2); border: 1px solid transparent; border-radius: var(--radius-sm);
+}
+.dd-job:hover { border-color: var(--accent); }
+.dd-job-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.dd-job-date { grid-column: 1 / -1; font-size: 11px; color: var(--text-muted); }
 </style>
 </head>
 <body>
@@ -757,6 +812,8 @@ header h1 {
     </main>
   </div>
 </div>
+
+<dialog id="drive-dialog" class="drive-dialog" aria-labelledby="drive-dialog-title"></dialog>
 
 <script>
 // Checklist order, matching the real backend pipeline.
@@ -852,9 +909,8 @@ function escAttr(s) {
   return String(s ?? '').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
-let savedAutoEject = [];
-try { savedAutoEject = JSON.parse(localStorage.getItem('simplerip-auto-eject') || '[]'); } catch (_) { /* storage unavailable or corrupt; start with none */ }
-const autoEjectDevices = new Set(Array.isArray(savedAutoEject) ? savedAutoEject : []);
+// Drives with auto eject on. The server saves this per drive; the UI only mirrors it.
+const autoEjectDevices = new Set();
 
 function isManualSearchWait(stage, message) {
   const canon = canonStage(stage || '');
@@ -1098,12 +1154,11 @@ function renderDriveGrid(grid) {
       alert(data.error || 'Could not cancel the rip.');
     }
   }));
-  grid.querySelectorAll('.auto-eject-toggle').forEach(input => input.addEventListener('change', async () => {
-    const d = input.dataset.device;
-    if (input.checked) autoEjectDevices.add(d); else autoEjectDevices.delete(d);
-    localStorage.setItem('simplerip-auto-eject', JSON.stringify([...autoEjectDevices]));
-    const response = await fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: d, enabled: input.checked }) }).catch(() => null);
-    if (!response || !response.ok) alert('Could not save the auto-eject setting on the server.');
+  grid.querySelectorAll('.auto-eject-toggle').forEach(input => input.addEventListener('change', () => {
+    setAutoEject(input.dataset.device, input.checked);
+  }));
+  grid.querySelectorAll('.drive-info-btn').forEach(btn => btn.addEventListener('click', () => {
+    openDriveDialog(btn.dataset.device);
   }));
   grid.querySelectorAll('.card-edit-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1208,7 +1263,10 @@ function driveCardHTML(st) {
         <span class="drive-device">${esc(device)}</span>
         ${discTypeChip}
       </div>
-      ${st.needs_input && !isIdle ? '<span class="badge badge-waiting">⚠ needs input</span>' : badgeHTML(stage, message)}
+      <div class="drive-card-tools">
+        ${st.needs_input && !isIdle ? '<span class="badge badge-waiting">⚠ needs input</span>' : badgeHTML(stage, message)}
+        <button type="button" class="drive-info-btn" data-device="${escAttr(device)}" aria-label="Drive details for ${escAttr(device)}" title="Drive details">ⓘ</button>
+      </div>
     </div>`;
 
   if (isIdle) {
@@ -1405,6 +1463,11 @@ setInterval(() => {
   });
 }, 250);
 
+// autoEjectSwitchHTML is a phone-style on/off switch for a drive's auto eject.
+function autoEjectSwitchHTML(device, checked) {
+  return `<label class="switch-row"><span>Auto eject when complete</span><input class="switch auto-eject-toggle" type="checkbox" role="switch" data-device="${escAttr(device)}" ${checked}></label>`;
+}
+
 function driveActionsHTML(device, active, driveStatus) {
   const checked = autoEjectDevices.has(device) ? 'checked' : '';
   const trayAction = {
@@ -1413,7 +1476,185 @@ function driveActionsHTML(device, active, driveStatus) {
     tray_open: 'Close',
   }[driveStatus];
   const action = trayAction || 'Checking…';
-  return `<div class="drive-actions">${active ? `<button class="btn cancel-rip-btn" data-device="${escAttr(device)}">Cancel rip</button>` : ''}<label class="auto-eject-label"><input class="auto-eject-toggle" type="checkbox" data-device="${escAttr(device)}" ${checked}> Auto eject when complete</label><button type="button" class="eject-btn" data-device="${escAttr(device)}" ${trayAction ? '' : 'disabled'}>${action}</button></div>`;
+  return `<div class="drive-actions">${active ? `<button class="btn cancel-rip-btn" data-device="${escAttr(device)}">Cancel rip</button>` : ''}${autoEjectSwitchHTML(device, checked)}<button type="button" class="eject-btn" data-device="${escAttr(device)}" ${trayAction ? '' : 'disabled'}>${action}</button></div>`;
+}
+
+// setAutoEject saves a drive's auto eject setting and keeps every switch for
+// that drive (card and drive panel) in step.
+async function setAutoEject(device, enabled) {
+  const show = on => {
+    if (on) autoEjectDevices.add(device); else autoEjectDevices.delete(device);
+    document.querySelectorAll('.auto-eject-toggle').forEach(el => {
+      if (el.dataset.device === device) el.checked = on;
+    });
+  };
+  show(enabled);
+  const response = await fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device, enabled }) }).catch(() => null);
+  if (!response || !response.ok) {
+    show(!enabled);
+    alert('Could not save the auto-eject setting.');
+  }
+}
+
+// loadAutoEject reads each drive's saved auto-eject setting from the server.
+async function loadAutoEject() {
+  try {
+    const r = await fetch('/api/auto-eject');
+    if (!r.ok) return;
+    const settings = await r.json() || {};
+    autoEjectDevices.clear();
+    Object.entries(settings).forEach(([device, on]) => { if (on) autoEjectDevices.add(device); });
+    renderDrives();
+  } catch (_) { /* switches show off until the next load */ }
+}
+
+// ── Drive details panel ──────────────────────────────────────────────────
+
+let driveDialogDevice = null;
+
+const DRIVE_STATUS_TEXT = {
+  disc_present: 'Tray closed · disc present', no_disc: 'Tray closed · empty', tray_open: 'Tray open',
+  loading: 'Loading disc', detecting: 'Checking…', unresponsive: 'Not responding',
+};
+
+function fmtMinutes(min) {
+  if (!min) return '—';
+  const h = Math.floor(min / 60), m = Math.round(min % 60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function libreDriveText(msg) {
+  if (!msg) return 'Not reported';
+  const version = /\((v[\d.]+)/.exec(msg);
+  return /Using LibreDrive mode/i.test(msg) ? `Enabled${version ? ` (${version[1]})` : ''}` : msg;
+}
+
+// driveSerial takes the serial from makemkvcon's drive name, which ends
+// "<model> <firmware> <serial>".
+function driveSerial(name, firmware) {
+  if (!name || !firmware) return '';
+  const at = name.lastIndexOf(` ${firmware} `);
+  return at >= 0 ? name.slice(at + firmware.length + 2).trim() : '';
+}
+
+function driveModelName(data) {
+  const hw = data.hardware || {};
+  return [hw.vendor, hw.model].filter(Boolean).join(' ') || (data.makemkv && data.makemkv.name) || '';
+}
+
+function infoRows(rows) {
+  return rows.filter(([, value]) => value !== '' && value != null)
+    .map(([label, value]) => `<div class="dd-row"><span>${esc(label)}</span><span>${esc(String(value))}</span></div>`).join('');
+}
+
+function driveDialogShell(device, body, subtitle = '') {
+  return `
+    <div class="dd-head">
+      <div>
+        <div id="drive-dialog-title" class="dd-title">${esc(device)}</div>
+        ${subtitle ? `<div class="dd-subtitle">${esc(subtitle)}</div>` : ''}
+      </div>
+      <button type="button" class="dd-close" aria-label="Close">✕</button>
+    </div>
+    <div class="dd-body">${body}</div>`;
+}
+
+function driveDialogBody(data) {
+  const device = data.device;
+  const st = { ...(data.state || {}), ...(driveStates[device] || {}) };
+  const hw = data.hardware || {};
+  const mk = data.makemkv || {};
+  const stats = data.stats;
+  const active = isDriveActive(st);
+  const activity = active ? `${st.stage}${st.title ? ` · ${st.title}` : ''}` : 'Idle';
+
+  const settings = `
+    <section class="dd-section">
+      <h3>Settings</h3>
+      ${autoEjectSwitchHTML(device, data.auto_eject ? 'checked' : '')}
+      <div class="tv-hint">Opens the tray after a rip is delivered.</div>
+    </section>`;
+  const now = `
+    <section class="dd-section">
+      <h3>Now</h3>
+      ${infoRows([
+        ['Tray', DRIVE_STATUS_TEXT[st.drive_status] || 'Unknown'],
+        ['Activity', activity],
+        ['Disc type', st.disc_type && st.disc_type !== 'unknown' ? fmtDiscType(st.disc_type) : ''],
+      ])}
+    </section>`;
+  const drive = `
+    <section class="dd-section">
+      <h3>Drive</h3>
+      ${infoRows([
+        ['Vendor', hw.vendor || ''], ['Model', hw.model || ''], ['Firmware', hw.firmware || ''],
+        ['Serial', driveSerial(mk.name, hw.firmware)],
+        ['LibreDrive', libreDriveText(mk.libredrive)],
+        ['MakeMKV name', mk.name || 'Not scanned yet'],
+      ])}
+      ${mk.scanned_at ? `<div class="tv-hint">From the scan at ${esc(fmtDate(mk.scanned_at))}.</div>` : (mk.name ? '<div class="tv-hint">From the last recorded scan.</div>' : '')}
+    </section>`;
+  let history = '';
+  if (stats) {
+    const recent = (data.recent || []).map(j => `
+      <button type="button" class="dd-job" data-job="${escAttr(j.ID)}">
+        <span class="dd-job-title">${esc(j.Title ? `${j.Title}${j.Year && !j.Title.includes(`(${j.Year})`) ? ` (${j.Year})` : ''}` : (j.DiscLabel || 'Unknown disc'))}</span>
+        ${badgeHTML(j.Status)}
+        <span class="dd-job-date">${esc(fmtDate(j.FinishedAt || j.CreatedAt))}</span>
+      </button>`).join('');
+    history = `
+      <section class="dd-section">
+        <h3>History</h3>
+        <div class="dd-tiles">
+          <div class="dd-tile"><b>${stats.done}</b><span>done</span></div>
+          <div class="dd-tile"><b>${stats.error}</b><span>errors</span></div>
+          <div class="dd-tile"><b>${stats.cancelled}</b><span>cancelled</span></div>
+        </div>
+        ${infoRows([
+          ['Delivered', `${(stats.delivered_gb || 0).toFixed(1)} GB`],
+          ['Average rip', fmtMinutes(stats.avg_minutes)],
+          ['Last finished', stats.last_rip_at ? fmtDate(stats.last_rip_at) : '—'],
+        ])}
+        ${recent ? `<div class="dd-recent-head">Recent rips</div>${recent}` : '<div class="tv-hint">No rips on this drive yet.</div>'}
+      </section>`;
+  }
+  return settings + now + drive + history;
+}
+
+function bindDriveDialog(dialog) {
+  const close = dialog.querySelector('.dd-close');
+  if (close) close.addEventListener('click', () => dialog.close());
+  dialog.querySelectorAll('.auto-eject-toggle').forEach(input => input.addEventListener('change', () => {
+    setAutoEject(input.dataset.device, input.checked);
+    renderDrives();
+  }));
+  dialog.querySelectorAll('.dd-job').forEach(btn => btn.addEventListener('click', () => {
+    dialog.close();
+    openJob(btn.dataset.job);
+  }));
+}
+
+async function openDriveDialog(device) {
+  const dialog = document.getElementById('drive-dialog');
+  driveDialogDevice = device;
+  dialog.innerHTML = driveDialogShell(device, '<div class="msg-info">Loading drive details…</div>');
+  bindDriveDialog(dialog);
+  if (!dialog.open) dialog.showModal();
+  let body, subtitle = '';
+  try {
+    const r = await fetch(`/api/drive?device=${encodeURIComponent(device)}`);
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'request failed');
+    // The server's saved setting is authoritative.
+    if (data.auto_eject) autoEjectDevices.add(device); else autoEjectDevices.delete(device);
+    body = driveDialogBody(data);
+    subtitle = driveModelName(data);
+  } catch (e) {
+    body = `<div class="msg-error">Could not load drive details: ${esc(e.message)}</div>`;
+  }
+  if (driveDialogDevice !== device || !dialog.open) return;
+  dialog.innerHTML = driveDialogShell(device, body, subtitle);
+  bindDriveDialog(dialog);
 }
 
 async function doCardSearch(device) {
@@ -1538,7 +1779,9 @@ function renderInfoCard(info) {
   }
 
   const version = info.version || 'dev';
-  const buildDate = info.build_date ? new Date(info.build_date).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'unknown';
+  const built = new Date(info.build_date || '');
+  const buildDate = isNaN(built) ? 'unknown date' : built.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+  const buildMeta = info.commit && info.commit !== 'unknown' ? `${info.commit} · ${buildDate}` : buildDate;
   const uptime = info.started_at ? fmtUptime((Date.now() - new Date(info.started_at).getTime()) / 1000) : 'Unavailable';
   const host = info.hostname || 'unknown';
   const makemkv = info.tools && info.tools.makemkvcon && info.tools.makemkvcon.version ? info.tools.makemkvcon.version : 'unavailable';
@@ -1558,7 +1801,7 @@ function renderInfoCard(info) {
   el.innerHTML = `
     <h2>SimpleRip</h2>
     <div class="info-card-body">
-      <div class="info-row"><span>Version</span><div class="info-value"><strong>${esc(version)}</strong><div class="muted">${esc(buildDate)}</div></div></div>
+      <div class="info-row"><span>Version</span><div class="info-value"><strong>${esc(version)}</strong><div class="muted">${esc(buildMeta)}</div></div></div>
       <div class="info-row"><span>Uptime</span><div class="info-value"><strong>${esc(uptime)}</strong></div></div>
       <div class="info-row"><span>Host</span><div class="info-value"><strong>${esc(host)}</strong></div></div>
       <div class="info-row"><span>makemkvcon</span><div class="info-value"><strong>${esc(String(makemkv))}</strong></div></div>
@@ -1638,10 +1881,8 @@ async function loadDevices() {
     const r = await fetch('/api/devices');
     if (!r.ok) return;
     const devices = await r.json() || [];
-    devices.forEach(device => {
-      ensureDevice(device);
-      fetch('/api/auto-eject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device, enabled: autoEjectDevices.has(device) }) }).catch(() => { /* best effort; server keeps its previous setting */ });
-    });
+    devices.forEach(ensureDevice);
+    await loadAutoEject();
   } catch (_) {
     // Network error: drive cards appear once status arrives over the WebSocket.
   }
@@ -1970,7 +2211,7 @@ function connectWS() {
   const ws = new WebSocket(`${proto}//${location.host}/ws/progress`);
   // On (re)connect the server replays every drive's state; refresh info too in
   // case the server restarted or events were missed while disconnected.
-  ws.onopen = () => loadSystemInfo();
+  ws.onopen = () => { loadSystemInfo(); loadAutoEject(); };
   ws.onmessage = e => {
     try { applyProgressEvent(JSON.parse(e.data)); } catch (_) { /* ignore malformed frames */ }
   };
@@ -1982,6 +2223,10 @@ function connectWS() {
 initTabs();
 loadDevices();
 loadJobs();
+// Clicking the dimmed area around the drive panel closes it.
+document.getElementById('drive-dialog').addEventListener('click', e => {
+  if (e.target === e.currentTarget) e.currentTarget.close();
+});
 // Uptime ticks locally from started_at; no server round-trip needed.
 setInterval(updateInfoUptime, 1000);
 // Delivery reachability can change without any rip event; recheck when the

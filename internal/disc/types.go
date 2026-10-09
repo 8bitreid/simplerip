@@ -61,4 +61,10 @@ type ClassifiedDisc struct {
 	DiscName string
 	// Warnings collects MSG lines from makemkvcon that may indicate problems.
 	Warnings []string
+	// DriveName is makemkvcon's name for the scanned drive, e.g.
+	// "BD-RE ASUS BW-16D1HT 3.10 KLIO4993744" (type, model, firmware, serial).
+	DriveName string
+	// LibreDrive is makemkvcon's LibreDrive status for the scanned drive,
+	// e.g. "Using LibreDrive mode (v06.3 id=0FA242DD4D0B)"; empty if not reported.
+	LibreDrive string
 }

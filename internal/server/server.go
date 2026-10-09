@@ -47,6 +47,10 @@ type jobStore interface {
 	DeleteJob(ctx context.Context, id string) error
 	DeleteFinishedJobs(ctx context.Context) (int64, error)
 	JobStatusCounts(ctx context.Context) (map[string]int64, error)
+	DriveStats(ctx context.Context, device string) (store.DriveStats, error)
+	RecentJobsForDevice(ctx context.Context, device string, limit int) ([]store.Job, error)
+	DriveAutoEject(ctx context.Context) (map[string]bool, error)
+	SetDriveAutoEject(ctx context.Context, device string, enabled bool) error
 }
 
 type BuildMetadata struct {
@@ -116,6 +120,7 @@ func New(svc *service.RipService, st *store.Store, devices []string, cfg *config
 	}
 	if st != nil {
 		s.store = st
+		s.loadAutoEject()
 	}
 
 	s.infoCache.tools = probeToolVersions()
@@ -146,6 +151,8 @@ func (s *Server) registerRoutes() {
 	s.e.POST("/api/eject/:device", s.handleEject)
 	s.e.POST("/api/cancel", s.handleCancelRip)
 	s.e.POST("/api/auto-eject", s.handleAutoEject)
+	s.e.GET("/api/auto-eject", s.handleGetAutoEject)
+	s.e.GET("/api/drive", s.handleDrive)
 	s.e.GET("/api/jobs", s.handleListJobs)
 	s.e.GET("/api/jobs/:id", s.handleGetJob)
 	s.e.DELETE("/api/jobs/:id", s.handleDeleteJob)
@@ -261,10 +268,102 @@ func (s *Server) handleAutoEject(c echo.Context) error {
 	if !s.isConfiguredDevice(body.Device) {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
 	}
+	if s.store != nil {
+		if err := s.store.SetDriveAutoEject(c.Request().Context(), body.Device, body.Enabled); err != nil {
+			slog.Error("saving auto eject setting", "device", body.Device, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "could not save the auto eject setting"})
+		}
+	}
 	s.mu.Lock()
 	s.autoEject[body.Device] = body.Enabled
 	s.mu.Unlock()
 	return c.JSON(http.StatusOK, map[string]any{"ok": true, "device": body.Device, "enabled": body.Enabled})
+}
+
+// handleGetAutoEject returns every configured drive's auto-eject setting.
+func (s *Server) handleGetAutoEject(c echo.Context) error {
+	settings := make(map[string]bool, len(s.devices))
+	s.mu.RLock()
+	for _, dev := range s.devices {
+		settings[dev] = s.autoEject[dev]
+	}
+	s.mu.RUnlock()
+	return c.JSON(http.StatusOK, settings)
+}
+
+// loadAutoEject restores the saved per-drive auto-eject settings.
+func (s *Server) loadAutoEject() {
+	ctx, cancel := context.WithTimeout(s.ctx, infoProbeTimeout)
+	defer cancel()
+	settings, err := s.store.DriveAutoEject(ctx)
+	if err != nil {
+		slog.Error("loading auto eject settings; all drives default to off", "error", err)
+		return
+	}
+	s.mu.Lock()
+	for device, enabled := range settings {
+		s.autoEject[device] = enabled
+	}
+	s.mu.Unlock()
+}
+
+// driveRecentJobs is how many recent rips the drive panel lists.
+const driveRecentJobs = 5
+
+// driveInfo is the body of GET /api/drive?device=/dev/sr0.
+type driveInfo struct {
+	Device    string                `json:"device"`
+	Hardware  disc.DriveHardware    `json:"hardware"`
+	MakeMKV   *driveScanInfo        `json:"makemkv,omitempty"`
+	AutoEject bool                  `json:"auto_eject"`
+	State     service.ProgressEvent `json:"state"`
+	Stats     *store.DriveStats     `json:"stats,omitempty"`
+	Recent    []store.Job           `json:"recent"`
+}
+
+// driveScanInfo is what makemkvcon reported about the drive on its last scan.
+type driveScanInfo struct {
+	Name       string     `json:"name"`
+	LibreDrive string     `json:"libredrive,omitempty"`
+	ScannedAt  *time.Time `json:"scanned_at,omitempty"`
+}
+
+// handleDrive returns hardware, current state, settings and rip history for
+// one configured drive.
+func (s *Server) handleDrive(c echo.Context) error {
+	device := strings.TrimSpace(c.QueryParam("device"))
+	if !s.isConfiguredDevice(device) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "unknown device"})
+	}
+	info := driveInfo{Device: device, Hardware: disc.ReadDriveHardware(device), Recent: []store.Job{}}
+	s.mu.RLock()
+	info.AutoEject = s.autoEject[device]
+	info.State = s.curStates[device]
+	s.mu.RUnlock()
+	if scanned, ok := s.svc.ScannedDriveInfo(device); ok {
+		at := scanned.ScannedAt
+		info.MakeMKV = &driveScanInfo{Name: scanned.Name, LibreDrive: scanned.LibreDrive, ScannedAt: &at}
+	}
+	if s.store != nil {
+		ctx, cancel := context.WithTimeout(c.Request().Context(), infoProbeTimeout)
+		defer cancel()
+		stats, err := s.store.DriveStats(ctx, device)
+		if err != nil {
+			slog.Error("reading drive stats", "device", device, "error", err)
+		} else {
+			info.Stats = &stats
+			if info.MakeMKV == nil && stats.DriveName != "" {
+				info.MakeMKV = &driveScanInfo{Name: stats.DriveName, LibreDrive: stats.LibreDrive}
+			}
+		}
+		recent, err := s.store.RecentJobsForDevice(ctx, device, driveRecentJobs)
+		if err != nil {
+			slog.Error("reading recent drive jobs", "device", device, "error", err)
+		} else if recent != nil {
+			info.Recent = recent
+		}
+	}
+	return c.JSON(http.StatusOK, info)
 }
 
 func (s *Server) isConfiguredDevice(device string) bool {
