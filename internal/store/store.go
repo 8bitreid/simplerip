@@ -233,6 +233,44 @@ func (s *Store) AddEvent(ctx context.Context, jobID, stage, message string, data
 	return nil
 }
 
+// IdentityRecord is one identity decision recorded for a past job: either a
+// manual correction or a confident automatic TV match.
+type IdentityRecord struct {
+	JobID     string
+	DiscLabel string
+	Data      json.RawMessage
+	CreatedAt time.Time
+}
+
+// IdentityHistory returns identity decisions from jobs other than excludeJobID,
+// newest first.
+func (s *Store) IdentityHistory(ctx context.Context, excludeJobID string, limit int) ([]IdentityRecord, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT e.job_id, COALESCE(j.disc_label, ''), e.data, e.created_at
+		 FROM job_events e JOIN jobs j ON j.id = e.job_id
+		 WHERE e.stage = 'identify' AND e.job_id::text <> $1
+		   AND (e.data->>'correction' = 'true'
+		        OR (e.data->>'action' = 'tv_identification' AND e.data->>'show_confidence' = 'high'))
+		 ORDER BY e.created_at DESC, e.id DESC
+		 LIMIT $2`,
+		excludeJobID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing identity history: %w", err)
+	}
+	defer rows.Close()
+
+	var records []IdentityRecord
+	for rows.Next() {
+		var r IdentityRecord
+		if err := rows.Scan(&r.JobID, &r.DiscLabel, &r.Data, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning identity history: %w", err)
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
 func (s *Store) ListJobs(ctx context.Context, limit, offset int) ([]Job, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT j.id, j.device, j.disc_label, j.title, j.year, j.status, j.pattern, j.disc_type, j.created_at, j.finished_at, j.updated_at,

@@ -102,15 +102,27 @@ func RankTVCandidates(query string, results []MediaSearchResult) []TVCandidate {
 		}
 		seen[result.ID] = true
 		score := titleSimilarity(query, result.Title)
-		ranked = append(ranked, TVCandidate{Media: result, Similarity: score, MatchedQuery: query})
-	}
-	sort.SliceStable(ranked, func(i, j int) bool {
-		if ranked[i].Similarity == ranked[j].Similarity {
-			return ranked[i].Media.Title < ranked[j].Media.Title
+		prefix := false
+		if leading := leadingWordsSimilarity(query, result.Title); leading > score {
+			score, prefix = leading, true
 		}
-		return ranked[i].Similarity > ranked[j].Similarity
-	})
+		ranked = append(ranked, TVCandidate{Media: result, Similarity: score, MatchedQuery: query, PrefixOnly: prefix})
+	}
+	SortTVCandidates(ranked)
 	return ranked
+}
+
+// SortTVCandidates orders candidates by similarity, then TMDB vote count, then title.
+func SortTVCandidates(ranked []TVCandidate) {
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].Similarity != ranked[j].Similarity {
+			return ranked[i].Similarity > ranked[j].Similarity
+		}
+		if ranked[i].Media.VoteCount != ranked[j].Media.VoteCount {
+			return ranked[i].Media.VoteCount > ranked[j].Media.VoteCount
+		}
+		return ranked[i].Media.Title < ranked[j].Media.Title
+	})
 }
 
 // TVCandidate includes a normalized string similarity score (0–1); it is not
@@ -119,6 +131,34 @@ type TVCandidate struct {
 	Media        MediaSearchResult
 	Similarity   float64
 	MatchedQuery string
+	// PrefixOnly marks a score earned because the query is the title's leading
+	// words ("spongebob" for "SpongeBob SquarePants") rather than the whole
+	// title. Such a match needs corroborating evidence before it is trusted.
+	PrefixOnly bool
+}
+
+// leadingWordsSimilarity scores a disc label that abbreviates a series title
+// to its leading words. Labels are often truncated, so this is strong but not
+// exact evidence. It returns 0 unless every query word matches, in order, the
+// start of the title.
+func leadingWordsSimilarity(query, title string) float64 {
+	q := strings.Fields(normalizedTitle(query))
+	t := strings.Fields(normalizedTitle(title))
+	if len(q) > 0 && len(t) > 0 && q[0] == "the" && t[0] != "the" {
+		q = q[1:]
+	}
+	if len(t) > 0 && t[0] == "the" && (len(q) == 0 || q[0] != "the") {
+		t = t[1:]
+	}
+	if len(q) == 0 || len(q) >= len(t) || len(strings.Join(q, "")) < 4 {
+		return 0
+	}
+	for i, word := range q {
+		if t[i] != word {
+			return 0
+		}
+	}
+	return 0.85 + 0.15*float64(len(q))/float64(len(t))
 }
 
 // ConfidentTVMatch accepts only a high-similarity result with a clear lead.
@@ -149,12 +189,15 @@ type TVSeason struct {
 	Episodes     []TVEpisode `json:"episodes"`
 }
 
-func (c *Client) tvRequest(ctx context.Context, endpoint string, target any) error {
+func (c *Client) tvRequest(ctx context.Context, endpoint string, params url.Values, target any) error {
 	u, err := url.Parse(tmdbBase + endpoint)
 	if err != nil {
 		return fmt.Errorf("build TMDB TV URL: %w", err)
 	}
 	q := u.Query()
+	for key, values := range params {
+		q[key] = values
+	}
 	c.setAPIKey(q)
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -202,6 +245,7 @@ func (c *Client) SearchTV(ctx context.Context, query string) ([]MediaSearchResul
 			ID           int    `json:"id"`
 			Name         string `json:"name"`
 			FirstAirDate string `json:"first_air_date"`
+			VoteCount    int    `json:"vote_count"`
 		} `json:"results"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
@@ -216,7 +260,7 @@ func (c *Client) SearchTV(ctx context.Context, query string) ([]MediaSearchResul
 		if len(item.FirstAirDate) >= 4 {
 			year = item.FirstAirDate[:4]
 		}
-		results = append(results, MediaSearchResult{ID: item.ID, Title: item.Name, Year: year, MediaType: "tv"})
+		results = append(results, MediaSearchResult{ID: item.ID, Title: item.Name, Year: year, MediaType: "tv", VoteCount: item.VoteCount})
 		if len(results) == 10 {
 			break
 		}
@@ -229,10 +273,72 @@ func (c *Client) GetTV(ctx context.Context, id int) (*TMDbTVDetail, error) {
 		return nil, fmt.Errorf("invalid TMDB TV ID %d", id)
 	}
 	var detail TMDbTVDetail
-	if err := c.tvRequest(ctx, fmt.Sprintf("/tv/%d", id), &detail); err != nil {
+	if err := c.tvRequest(ctx, fmt.Sprintf("/tv/%d", id), nil, &detail); err != nil {
 		return nil, err
 	}
 	return &detail, nil
+}
+
+// maxAppendedSeasons is TMDB's limit on append_to_response items per request.
+const maxAppendedSeasons = 20
+
+// maxFetchedSeasons bounds how many seasons GetTVWithSeasons will load.
+const maxFetchedSeasons = 60
+
+// TVShowData is a series with every numbered season's episode list.
+type TVShowData struct {
+	Detail  TMDbTVDetail
+	Seasons []TVSeason // numbered seasons (no specials), ascending
+	// Complete is false when some numbered season could not be loaded.
+	Complete bool
+}
+
+// GetTVWithSeasons loads a series and all of its numbered seasons, bundling up
+// to 20 seasons per request with append_to_response. A season missing from a
+// bundled response is fetched on its own.
+func (c *Client) GetTVWithSeasons(ctx context.Context, id int) (*TVShowData, error) {
+	detail, err := c.GetTV(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	show := &TVShowData{Detail: *detail, Complete: true}
+	var numbers []int
+	for _, season := range detail.Seasons {
+		if season.SeasonNumber > 0 {
+			numbers = append(numbers, season.SeasonNumber)
+		}
+	}
+	if len(numbers) > maxFetchedSeasons {
+		show.Complete = false
+		return show, nil
+	}
+	for start := 0; start < len(numbers); start += maxAppendedSeasons {
+		chunk := numbers[start:min(start+maxAppendedSeasons, len(numbers))]
+		keys := make([]string, len(chunk))
+		for i, number := range chunk {
+			keys[i] = fmt.Sprintf("season/%d", number)
+		}
+		var bundle map[string]json.RawMessage
+		params := url.Values{"append_to_response": {strings.Join(keys, ",")}}
+		if err := c.tvRequest(ctx, fmt.Sprintf("/tv/%d", id), params, &bundle); err != nil {
+			return nil, err
+		}
+		for i, number := range chunk {
+			var season TVSeason
+			raw, ok := bundle[keys[i]]
+			if !ok || json.Unmarshal(raw, &season) != nil || season.SeasonNumber != number {
+				fetched, err := c.GetTVSeason(ctx, id, number)
+				if err != nil {
+					show.Complete = false
+					continue
+				}
+				season = *fetched
+			}
+			show.Seasons = append(show.Seasons, season)
+		}
+	}
+	sort.Slice(show.Seasons, func(i, j int) bool { return show.Seasons[i].SeasonNumber < show.Seasons[j].SeasonNumber })
+	return show, nil
 }
 
 func (c *Client) GetTVSeason(ctx context.Context, id, season int) (*TVSeason, error) {
@@ -240,7 +346,7 @@ func (c *Client) GetTVSeason(ctx context.Context, id, season int) (*TVSeason, er
 		return nil, fmt.Errorf("invalid TMDB TV season %d for show %d", season, id)
 	}
 	var detail TVSeason
-	if err := c.tvRequest(ctx, fmt.Sprintf("/tv/%d/season/%d", id, season), &detail); err != nil {
+	if err := c.tvRequest(ctx, fmt.Sprintf("/tv/%d/season/%d", id, season), nil, &detail); err != nil {
 		return nil, err
 	}
 	return &detail, nil
@@ -327,6 +433,111 @@ func MatchSeasonByRuntime(titles []disc.MKVTitle, seasons []TVSeason) (int, bool
 		used[bestEpisode] = true
 	}
 	return scores[0].number, true, episodes
+}
+
+// RuntimeFit says whether a series' episode runtimes could produce a disc's titles.
+type RuntimeFit int
+
+const (
+	// RuntimeFitUnknown means TMDB lacks the runtimes to say either way.
+	RuntimeFitUnknown RuntimeFit = iota
+	// RuntimeFitMatch means some season has enough episodes whose runtimes
+	// closely match the disc's title durations.
+	RuntimeFitMatch
+	// RuntimeFitMismatch means no season has enough episodes, or the runtimes
+	// that are known are clearly different from the disc's titles.
+	RuntimeFitMismatch
+)
+
+func (f RuntimeFit) String() string {
+	switch f {
+	case RuntimeFitMatch:
+		return "fits"
+	case RuntimeFitMismatch:
+		return "mismatch"
+	default:
+		return "unknown"
+	}
+}
+
+const (
+	// Mean minutes between disc titles and episode runtimes for a season to fit.
+	runtimeFitMaxCost = 2.0
+	// Beyond this mean distance, known runtimes rule the season out.
+	runtimeMismatchMinCost = 3.0
+)
+
+// SeasonRuntimeFit checks the disc's titles against every numbered season and
+// reports the best-fitting season and its mean per-title runtime distance.
+func SeasonRuntimeFit(titles []disc.MKVTitle, seasons []TVSeason) (fit RuntimeFit, season int, cost float64) {
+	if len(titles) == 0 {
+		return RuntimeFitUnknown, 0, 0
+	}
+	bestCost := math.Inf(1)
+	bigEnough, missingRuntimes, numbered := false, false, false
+	for _, s := range seasons {
+		if s.SeasonNumber < 1 {
+			continue
+		}
+		numbered = true
+		if len(s.Episodes) < len(titles) {
+			continue
+		}
+		bigEnough = true
+		known := make([]TVEpisode, 0, len(s.Episodes))
+		for _, episode := range s.Episodes {
+			if episode.Runtime > 0 {
+				known = append(known, episode)
+			}
+		}
+		if len(known) < len(titles) {
+			missingRuntimes = true
+			continue
+		}
+		if _, c, ok := matchRuntimeDistribution(titles, known); ok && c < bestCost {
+			bestCost, season = c, s.SeasonNumber
+		}
+	}
+	switch {
+	case !numbered:
+		return RuntimeFitUnknown, 0, 0
+	case bestCost <= runtimeFitMaxCost:
+		return RuntimeFitMatch, season, bestCost
+	case !bigEnough:
+		return RuntimeFitMismatch, 0, 0
+	case missingRuntimes || bestCost <= runtimeMismatchMinCost:
+		if math.IsInf(bestCost, 1) {
+			return RuntimeFitUnknown, 0, 0
+		}
+		return RuntimeFitUnknown, season, bestCost
+	default:
+		return RuntimeFitMismatch, season, bestCost
+	}
+}
+
+// genericLabelStems are disc labels that say nothing about the content, so
+// two discs sharing one are not evidence of the same series.
+var genericLabelStems = map[string]bool{
+	"dvd": true, "dvd video": true, "dvdvideo": true, "video ts": true, "bluray": true,
+	"blu ray": true, "bdmv": true, "bd rom": true, "disc": true, "disk": true,
+	"video": true, "volume": true, "untitled": true, "no label": true, "new volume": true,
+}
+
+// TVLabelStem returns a disc label with its trailing disc/volume number
+// removed ("SPONGEBOB_DISC2" → "spongebob"), so discs from one set share a
+// stem. It returns "" for labels too generic to identify a series.
+func TVLabelStem(label string) string {
+	stem := normalizedTitle(normalizeTVLabel(label))
+	letters := 0
+	for _, r := range stem {
+		if r >= 'a' && r <= 'z' {
+			letters++
+		}
+	}
+	if letters < 3 || genericLabelStems[stem] {
+		return ""
+	}
+	return stem
 }
 
 func matchRuntimeDistribution(titles []disc.MKVTitle, episodes []TVEpisode) ([]TVEpisode, float64, bool) {

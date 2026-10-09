@@ -83,3 +83,47 @@ func TestPinnedRuntimeLifecycle(t *testing.T) {
 		t.Fatalf("runtime leaked into next job: %d", got)
 	}
 }
+
+func TestReidentifyRipClearsSearchPrompt(t *testing.T) {
+	s := New(&config.Config{}, nil)
+	_, ch := s.EventBus().Subscribe()
+	s.beginRipTitle("/dev/sr0", "SPONGEBOB_DISC1")
+	s.emit(ProgressEvent{Device: "/dev/sr0", Stage: "identifying",
+		Message: "TV disc detected. Search for the show and select its season."})
+	<-ch
+
+	if !s.ReidentifyRip("/dev/sr0", "SpongeBob SquarePants (1999)") {
+		t.Fatal("re-identify should apply to an active job")
+	}
+	ev := <-ch
+	if ev.Title != "SpongeBob SquarePants (1999)" {
+		t.Errorf("Title = %q, want the chosen show", ev.Title)
+	}
+	if ev.Message != "Identified as SpongeBob SquarePants (1999)" {
+		t.Errorf("Message = %q, want the search prompt replaced", ev.Message)
+	}
+}
+
+func TestNeedsUnconfirmedMatchNotice(t *testing.T) {
+	tests := []struct {
+		name                                                    string
+		hasMain, tmdbConfigured, confirmed, tvMatched, tvPrompt bool
+		want                                                    bool
+	}{
+		{"unmatched movie", true, true, false, false, false, true},
+		{"confirmed movie", true, true, true, false, false, false},
+		{"no TMDB key", true, false, false, false, false, false},
+		{"no main titles", false, true, false, false, false, false},
+		{"matched TV show", true, true, false, true, false, false},
+		{"unresolved TV already prompted", true, true, false, false, true, false},
+		{"matched TV with unresolved season", true, true, false, true, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := needsUnconfirmedMatchNotice(tt.hasMain, tt.tmdbConfigured, tt.confirmed, tt.tvMatched, tt.tvPrompt)
+			if got != tt.want {
+				t.Errorf("needsUnconfirmedMatchNotice() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

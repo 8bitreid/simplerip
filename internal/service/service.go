@@ -41,6 +41,30 @@ type ProgressEvent struct {
 	DiscType    string `json:"disc_type,omitempty"`    // bluray, dvd, unknown
 	DriveStatus string `json:"drive_status,omitempty"` // disc_present, no_disc, tray_open, loading, detecting, unresponsive
 	ETASec      int    `json:"eta_seconds,omitempty"`  // estimated seconds remaining while ripping; 0 = unknown
+
+	// NeedsInput is set on every event for the device while a TV disc waits
+	// for the user, so the request survives later progress events and page
+	// reloads. Nil once answered or no longer answerable.
+	NeedsInput *TVInputRequest `json:"needs_input,omitempty"`
+}
+
+// TVInputRequest tells the UI what a TV disc still needs from the user.
+type TVInputRequest struct {
+	// Kind is "show" (no show chosen), "season" (show chosen, season
+	// unknown) or "episode" (show and season known, episode order not).
+	Kind    string `json:"kind"`
+	Summary string `json:"summary"`
+	// The matched or suggested show, if any.
+	ShowID    int    `json:"tmdb_id,omitempty"`
+	ShowTitle string `json:"title,omitempty"`
+	ShowYear  int    `json:"year,omitempty"`
+	// ShowMatched is true when the show was identified with confidence,
+	// false when it is only a suggestion.
+	ShowMatched bool `json:"show_matched"`
+	// Season is the matched season, or the suggested one when
+	// SeasonSuggested is set.
+	Season          int  `json:"season,omitempty"`
+	SeasonSuggested bool `json:"season_suggested,omitempty"`
 }
 
 type ManualSelection struct {
@@ -268,6 +292,8 @@ type RipService struct {
 	// busy with an alternate rip.
 	alternates map[string]*altState
 	altBusy    map[string]bool
+	// pendingInput is what an in-flight TV rip is waiting on the user for.
+	pendingInput map[string]*TVInputRequest
 }
 
 var (
@@ -302,6 +328,7 @@ func New(cfg *config.Config, st *store.Store) *RipService {
 		restarts:      make(map[string]*restartState),
 		alternates:    make(map[string]*altState),
 		altBusy:       make(map[string]bool),
+		pendingInput:  make(map[string]*TVInputRequest),
 	}
 }
 
@@ -311,10 +338,27 @@ func New(cfg *config.Config, st *store.Store) *RipService {
 func (s *RipService) emit(ev ProgressEvent) {
 	if ev.Device != "" {
 		s.ripMu.Lock()
+		switch ev.Stage {
+		case "delivering", "done", "error", "cancelled", "idle":
+			// The answer can no longer change this rip.
+			delete(s.pendingInput, ev.Device)
+		}
+		if ev.NeedsInput == nil {
+			ev.NeedsInput = s.pendingInput[ev.Device]
+		}
 		s.lastEvent[ev.Device] = ev
 		s.ripMu.Unlock()
 	}
 	s.eventBus.Emit(ev)
+}
+
+// requestTVInput records what a TV disc needs from the user and announces it.
+func (s *RipService) requestTVInput(ev ProgressEvent, request TVInputRequest) {
+	s.ripMu.Lock()
+	s.pendingInput[ev.Device] = &request
+	s.ripMu.Unlock()
+	ev.NeedsInput = &request
+	s.emit(ev)
 }
 
 // beginRipTitle registers (or updates) the live title for a device's rip.
@@ -387,6 +431,7 @@ func (s *RipService) endRipTitle(device string) {
 	delete(s.titleLocked, device)
 	delete(s.titleFrozen, device)
 	delete(s.pinnedRuntime, device)
+	delete(s.pendingInput, device)
 	s.ripMu.Unlock()
 }
 
@@ -414,13 +459,21 @@ func (s *RipService) ReidentifyRip(device, folder string) bool {
 	}
 	s.ripTitles[device] = folder
 	s.titleLocked[device] = true
+	// The user answered; stop asking.
+	delete(s.pendingInput, device)
 	last, hasLast := s.lastEvent[device]
 	s.ripMu.Unlock()
 
 	if hasLast {
+		last.NeedsInput = nil
 		last.Title = folder
-		if last.Stage == "ripping" {
+		switch last.Stage {
+		case "ripping":
 			last.Message = fmt.Sprintf("Ripping %s (%d%%)", folder, last.Percent)
+		case "identifying":
+			// Replace any "search for the title" prompt so the UI closes its
+			// search panel once the user has chosen.
+			last.Message = "Identified as " + folder
 		}
 		s.emit(last)
 	}
@@ -1011,6 +1064,8 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	episodeNumbers := run.episodeNumbers
 	autoTVMatch := false
 	tvSuggestion := ""
+	var tvShow *metadata.MediaSearchResult // matched or suggested series
+	tvSuggestedSeason := 0
 	// Do not let an unrelated movie match hide a disc that looks like a TV set.
 	preliminaryDisc := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
 	runtimeMin := 0
@@ -1040,11 +1095,26 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		tmdbConfirmedMovie = true
 		runtimeMin = s.ripRuntime(device)
 	} else if !manualIdentity && mediaType == "" && preliminaryDisc.Pattern == ripper.DiscPatternTV {
+		sibling, err := s.tvSiblingFor(ctx, job.ID, scanned.DiscName)
+		if err != nil {
+			slog.Warn("could not read earlier disc identities; continuing without them",
+				"disc", scanned.DiscName, "error", err)
+		}
 		lookupCtx, lookupCancel := context.WithTimeout(ctx, 20*time.Second)
-		tv := s.identifyTV(lookupCtx, scanned.DiscName, preliminaryDisc.MainTitles)
+		tv := s.identifyTV(lookupCtx, scanned.DiscName, preliminaryDisc.MainTitles, sibling)
 		lookupCancel()
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return context.Canceled
+		}
+		if tv.Show != nil {
+			tvShow = tv.Show
+			tvSuggestedSeason = tv.SuggestedSeason
+		}
+		if !tv.ShowCertain && tv.Show != nil {
+			tvSuggestion = tv.Show.Title
+			if yr, _ := strconv.Atoi(tv.Show.Year); yr > 0 {
+				tvSuggestion = fmt.Sprintf("%s (%d)", tvSuggestion, yr)
+			}
 		}
 		if tv.ShowCertain && tv.Show != nil {
 			autoTVMatch = true
@@ -1062,11 +1132,6 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				job.Title, job.Year = tv.Show.Title, year
 				if err := s.store.UpdateAutoIdentity(ctx, job.ID, tv.Show.Title, year); err != nil {
 					slog.Error("failed to update automatic TV identity", "job", job.ID, "error", err)
-				}
-			} else if tv.Show != nil {
-				tvSuggestion = tv.Show.Title
-				if yr, _ := strconv.Atoi(tv.Show.Year); yr > 0 {
-					tvSuggestion = fmt.Sprintf("%s (%d)", tvSuggestion, yr)
 				}
 			}
 		}
@@ -1239,7 +1304,11 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		_ = s.store.UpdateStatusPattern(ctx, job.ID, "scanning", pattern)
 	}
 
-	if result.Pattern == ripper.DiscPatternTV && (!autoTVMatch || season == 0 || len(episodeNumbers) != len(result.MainTitles)) {
+	tvPromptSent := false
+	// A show and season the user already chose by hand need nothing more.
+	userChoseTV := mediaType == "tv" && !autoTVMatch && season > 0
+	if result.Pattern == ripper.DiscPatternTV && !userChoseTV && (!autoTVMatch || season == 0 || len(episodeNumbers) != len(result.MainTitles)) {
+		tvPromptSent = true
 		identificationMessage := "TV disc detected. Search for the show and select its season."
 		switch {
 		case autoTVMatch && season > 0:
@@ -1249,14 +1318,18 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		case tvSuggestion != "":
 			identificationMessage = fmt.Sprintf("TV disc detected. Possible show suggestion: %s; not selected automatically. Search to confirm or correct it.", tvSuggestion)
 		}
-		s.emit(ProgressEvent{
+		if tvSuggestedSeason > 0 && season == 0 {
+			identificationMessage += fmt.Sprintf(" An earlier disc of this set was season %d.", tvSuggestedSeason)
+		}
+		summary := tvSelectionSummary(autoTVMatch, season, mediaTitle, tvSuggestion, tvSuggestedSeason)
+		s.requestTVInput(ProgressEvent{
 			Device:  device,
 			Stage:   "identifying",
 			Title:   mediaTitle,
 			Percent: 0,
 			Message: identificationMessage,
-		})
-		s.notifyTVSelection(job.ID, scanned.DiscName, device, mediaTitle)
+		}, tvInputRequest(autoTVMatch, season, tvShow, tvSuggestedSeason, summary))
+		s.notifyTVSelection(job.ID, scanned.DiscName, device, mediaTitle, summary)
 		if s.store != nil {
 			_ = s.store.AddEvent(ctx, job.ID, "identify", "TV metadata unresolved; continuing without guessing season or episode order", map[string]any{"action": "tv_manual_search_available"})
 			_ = s.store.UpdateStatus(ctx, job.ID, "identifying")
@@ -1279,9 +1352,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	mediaTitle = s.currentTitle(device, mediaTitle)
 	run.title = mediaTitle
 
-	// With a TMDB key configured, an unconfirmed match means the disc will be
-	// delivered under its raw label unless someone corrects it.
-	if len(result.MainTitles) > 0 && s.tmdbConfigured() && !tmdbConfirmedMovie && !(autoTVMatch && mediaType == "tv") {
+	if needsUnconfirmedMatchNotice(len(result.MainTitles) > 0, s.tmdbConfigured(), tmdbConfirmedMovie, autoTVMatch && mediaType == "tv", tvPromptSent) {
 		s.notifier.Notify(notify.Message{
 			Event:   notify.EventNeedsInput,
 			JobID:   job.ID,
@@ -2546,15 +2617,63 @@ func newNotifier(cfg config.NotificationConfig) *notify.Dispatcher {
 	}, cfg.UIURL)
 }
 
-func (s *RipService) notifyTVSelection(jobID, discName, device, title string) {
+// needsUnconfirmedMatchNotice reports whether to warn that a disc will be
+// delivered under its raw label: with a TMDB key configured, nothing confirmed
+// the match. A TV disc that already sent its own needs-input prompt is skipped
+// so the user gets one notification, not two.
+func needsUnconfirmedMatchNotice(hasMainTitles, tmdbConfigured, movieConfirmed, tvMatched, tvPromptSent bool) bool {
+	return hasMainTitles && tmdbConfigured && !movieConfirmed && !tvMatched && !tvPromptSent
+}
+
+func (s *RipService) notifyTVSelection(jobID, discName, device, title, summary string) {
 	s.notifier.Notify(notify.Message{
 		Event:   notify.EventNeedsInput,
 		JobID:   jobID,
 		Disc:    discName,
 		Device:  device,
 		Title:   title,
-		Summary: "TV metadata is unresolved. Open SimpleRip to inspect the evidence, confirm or correct the show, and choose a season if known.",
+		Summary: summary,
 	})
+}
+
+// tvInputRequest describes what a TV disc still needs, for the UI's form.
+// show is the matched (showMatched) or suggested series, or nil.
+func tvInputRequest(showMatched bool, season int, show *metadata.MediaSearchResult, suggestedSeason int, summary string) TVInputRequest {
+	request := TVInputRequest{Kind: "show", Summary: summary}
+	if show != nil {
+		request.ShowID, request.ShowTitle = show.ID, show.Title
+		request.ShowYear, _ = strconv.Atoi(show.Year)
+		request.ShowMatched = showMatched
+	}
+	switch {
+	case showMatched && season > 0:
+		request.Kind, request.Season = "episode", season
+	case showMatched:
+		request.Kind = "season"
+		request.Season, request.SeasonSuggested = suggestedSeason, suggestedSeason > 0
+	case show != nil && suggestedSeason > 0:
+		request.Season, request.SeasonSuggested = suggestedSeason, true
+	}
+	return request
+}
+
+// tvSelectionSummary says what a TV disc still needs from the user: only the
+// unresolved parts, so a matched show isn't presented as unknown.
+func tvSelectionSummary(showMatched bool, season int, title, suggestion string, suggestedSeason int) string {
+	earlier := ""
+	if suggestedSeason > 0 {
+		earlier = fmt.Sprintf(" (an earlier disc of this set was season %d)", suggestedSeason)
+	}
+	switch {
+	case showMatched && season > 0:
+		return fmt.Sprintf("Matched %s, season %d. Episode order could not be confirmed; open SimpleRip to confirm the starting episode.", title, season)
+	case showMatched:
+		return fmt.Sprintf("Matched %s. Open SimpleRip to choose the season%s.", title, earlier)
+	case suggestion != "":
+		return fmt.Sprintf("Possible match: %s, not selected automatically. Open SimpleRip to confirm or correct the show and choose the season%s.", suggestion, earlier)
+	default:
+		return "TV show not identified. Open SimpleRip to inspect the evidence, search for the show, and choose a season if known."
+	}
 }
 
 // canReselect reports whether the disc has a single-feature shape where

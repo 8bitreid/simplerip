@@ -189,23 +189,22 @@ header h1 {
 @media (max-width: 900px) {
   .app { padding: 16px 12px 32px; }
   .layout { grid-template-columns: minmax(0, 1fr); }
-  body { padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
   .panel { display: none; }
   .layout[data-tab="drives"] .panel[data-panel="drives"] { display: grid; }
   .layout[data-tab="rips"] .panel[data-panel="rips"],
   .layout[data-tab="info"] .panel[data-panel="info"] { display: block; }
+  /* Pinned to the top of the screen; the negative margins cancel .app's padding. */
   .tabbar {
-    position: fixed;
+    position: sticky;
     z-index: 100;
-    right: 0;
-    bottom: 0;
-    left: 0;
+    top: 0;
     display: flex;
     justify-content: space-around;
     gap: 8px;
-    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    margin: -16px -12px 16px;
+    padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
     background: var(--surface);
-    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
   }
   .tabbar button {
     flex: 1;
@@ -440,6 +439,23 @@ header h1 {
 .badge-identify,
 .badge-identifying { background: rgba(245,158,11,0.15); color: var(--yellow); }
 .badge-waiting { background: rgba(239,68,68,0.14); color: var(--red); }
+/* TV disc waiting on the user: a persistent box on the drive card. */
+.card-resolve.tv-need {
+  border: 1px solid var(--yellow); border-radius: var(--radius);
+  background: rgba(245,158,11,0.08); padding: 12px;
+}
+.tv-need-head { font-weight: 600; color: var(--yellow); margin-bottom: 4px; }
+.tv-need-summary { color: var(--text); margin-bottom: 10px; line-height: 1.4; }
+.tv-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.tv-show { line-height: 1.4; }
+.tv-tag { font-size: 11px; padding: 1px 6px; border-radius: var(--radius-sm); margin-left: 4px; }
+.tv-tag-matched { background: rgba(34,197,94,0.15); color: var(--green); }
+.tv-tag-suggested { background: rgba(245,158,11,0.15); color: var(--yellow); }
+.tv-fields { display: flex; flex-wrap: wrap; gap: 10px; }
+.tv-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); flex: 1 1 120px; }
+.tv-fields .tv-input { width: 100%; }
+.tv-hint { font-size: 12px; color: var(--text-muted); }
+.tv-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .badge-rip,
 .badge-analyzing  { background: rgba(59,130,246,0.15); color: var(--blue); }
 .badge-ripping    { background: rgba(99,102,241,0.15); color: var(--accent); }
@@ -696,6 +712,18 @@ header h1 {
   flex-shrink: 0;
 }
 .sr-apply:hover { background: var(--accent-hover); }
+.sr-meta { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.type-pill { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: var(--radius-sm); letter-spacing: 0.02em; }
+.type-pill-movie { background: rgba(59,130,246,0.16); color: var(--blue); }
+.type-pill-tv { background: rgba(34,197,94,0.16); color: var(--green); }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.filter-chip {
+  font: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface2); color: var(--text-muted);
+}
+.filter-chip.active { border-color: var(--accent); background: rgba(99,102,241,0.15); color: var(--text); }
+.filter-count { opacity: 0.7; margin-left: 2px; }
 
 .msg-error   { color: var(--red);   font-size: 12px; margin-top: 6px; }
 .msg-success { color: var(--green); font-size: 12px; margin-top: 6px; }
@@ -704,6 +732,11 @@ header h1 {
 </head>
 <body>
 <div class="app">
+  <nav class="tabbar" aria-label="Dashboard sections">
+    <button type="button" data-go="drives">Drives<span id="drives-tab-badge" class="tab-badge tab-badge-dot" hidden></span></button>
+    <button type="button" data-go="rips">Recent Rips<span id="rips-tab-badge" class="tab-badge" hidden></span></button>
+    <button type="button" data-go="info">Info</button>
+  </nav>
   <div class="layout" data-tab="drives">
     <aside class="sidebar">
       <header><h1>SimpleRip</h1></header>
@@ -723,11 +756,6 @@ header h1 {
       </div>
     </main>
   </div>
-  <nav class="tabbar" aria-label="Dashboard sections">
-    <button type="button" data-go="drives">Drives<span id="drives-tab-badge" class="tab-badge tab-badge-dot" hidden></span></button>
-    <button type="button" data-go="rips">Recent Rips<span id="rips-tab-badge" class="tab-badge" hidden></span></button>
-    <button type="button" data-go="info">Info</button>
-  </nav>
 </div>
 
 <script>
@@ -885,18 +913,49 @@ function findActiveJobForDevice(device) {
   return jobs.find(j => j.Device === device && !isTerminal(j.Status));
 }
 
-function renderResolveResults(device, results) {
+// mediaTypePill labels a search result as a movie or a TV series.
+function mediaTypePill(type) {
+  return type === 'tv'
+    ? '<span class="type-pill type-pill-tv">TV series</span>'
+    : '<span class="type-pill type-pill-movie">Movie</span>';
+}
+
+function searchResultMeta(r) {
+  return `${r.year || 'Year unknown'}${r.runtime ? ` · ${r.runtime} min` : ''}`;
+}
+
+// defaultSearchFilter starts the search on the type of disc in the drive.
+function defaultSearchFilter(device) {
+  const st = driveStates[device] || {};
+  if (st.needs_input) return 'tv';
+  const job = findActiveJobForDevice(device);
+  const pattern = job && String(job.Pattern || '').toLowerCase();
+  if (pattern === 'tv') return 'tv';
+  if (pattern === 'movie') return 'movie';
+  return 'all';
+}
+
+function renderResolveResults(device, results, filter = 'all') {
   if (!results.length) return '<div class="msg-info">No results found.</div>';
-  return results.map(r => `
+  const counts = { all: results.length, movie: 0, tv: 0 };
+  results.forEach(r => { counts[(r.media_type || 'movie') === 'tv' ? 'tv' : 'movie']++; });
+  const chip = (key, label) => `<button type="button" class="filter-chip${filter === key ? ' active' : ''}"
+    data-device="${escAttr(device)}" data-filter="${key}" aria-pressed="${filter === key}">${label} <span class="filter-count">${counts[key]}</span></button>`;
+  const shown = results.filter(r => filter === 'all' || (r.media_type || 'movie') === filter);
+  const rows = shown.length ? shown.map(r => `
     <div class="sr-row">
       <div>
         <div class="sr-title">${esc(r.title)}</div>
-        <div class="sr-meta">${r.year || '—'}${r.runtime ? ' · ' + r.runtime + ' min' : ''} · ${esc(r.media_type || 'movie')}</div>
+        <div class="sr-meta">${mediaTypePill(r.media_type || 'movie')} ${esc(searchResultMeta(r))}</div>
       </div>
       <button class="sr-apply card-resolve-apply" data-device="${escAttr(device)}"
         data-id="${r.id}" data-title="${escAttr(r.title)}" data-year="${r.year || 0}"
         data-type="${escAttr(r.media_type || 'movie')}">Select</button>
-    </div>`).join('');
+    </div>`).join('')
+    : `<div class="msg-info">No ${filter === 'tv' ? 'TV series' : 'movies'} found. Try All.</div>`;
+  return `<div class="filter-chips" role="group" aria-label="Filter results">
+      ${chip('all', 'All')}${chip('movie', 'Movies')}${chip('tv', 'TV')}
+    </div>${rows}`;
 }
 
 function selectionPayload(button) {
@@ -917,8 +976,10 @@ function selectionPayload(button) {
   }
   const episodeText = prompt('Starting episode number on this disc (optional). Leave blank to continue after the highest episode already saved for this season.');
   if (episodeText === null) return null;
-  const episodeStart = episodeText.trim() === '' ? 0 : Number(episodeText.trim());
-  if (!Number.isInteger(episodeStart) || episodeStart < 1) {
+  const episodeTrimmed = episodeText.trim();
+  // Blank sends 0: the server continues after the highest saved episode.
+  const episodeStart = episodeTrimmed === '' ? 0 : Number(episodeTrimmed);
+  if (episodeTrimmed !== '' && (!Number.isInteger(episodeStart) || episodeStart < 1)) {
     alert('Enter a starting episode number greater than zero, or leave it blank.');
     return null;
   }
@@ -943,7 +1004,13 @@ function applyProgressEvent(ev) {
   const prev = dev ? driveStates[dev] : undefined;
   if (dev) {
     ensureDevice(dev);
-    driveStates[dev] = { ...driveStates[dev], ...ev, device: dev, progressAt: Date.now() };
+    // The server repeats needs_input on every event while it waits, so an event
+    // without it means the request was answered or is over.
+    driveStates[dev] = { ...driveStates[dev], ...ev, needs_input: ev.needs_input || null, device: dev, progressAt: Date.now() };
+    if (!ev.needs_input && cardResolveState[dev] && !cardResolveState[dev].open && !cardResolveState[dev].picked
+        && !cardResolveState[dev].applying && !isManualSearchWait(ev.stage, ev.message)) {
+      delete cardResolveState[dev];
+    }
   }
   renderDrives();
   const stageChanged = !prev || prev.stage !== ev.stage;
@@ -974,13 +1041,31 @@ function scheduleJobsRefresh() {
   }, 700);
 }
 
-function renderDrives() {
+// force re-renders even while a card's search box has focus; use it when the
+// user's own action (search, select) must show up immediately. Focus returns
+// to that search box if it is still on the card.
+function renderDrives(force = false) {
   updateTabBadges();
   const grid = document.getElementById('drives-grid');
   // Re-rendering replaces the DOM, which would drop focus and typed text on
   // every progress tick. Skip while the user is typing in a card's search box.
   const focused = document.activeElement;
-  if (focused && focused.classList && focused.classList.contains('card-resolve-input')) return;
+  const typingIn = focused && focused.classList && focused.classList.contains('card-resolve-input')
+    ? focused.dataset.device : null;
+  if (typingIn && !force) return;
+  renderDriveGrid(grid);
+  if (typingIn) {
+    const field = focused.dataset.field || 'query';
+    const input = [...grid.querySelectorAll('.card-resolve-input')]
+      .find(el => el.dataset.device === typingIn && (el.dataset.field || 'query') === field);
+    if (input) {
+      input.focus();
+      if (input.type === 'text') input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }
+}
+
+function renderDriveGrid(grid) {
   const devices = knownDevices.size > 0 ? [...knownDevices] : [];
   if (!devices.length) {
     grid.innerHTML = '<div class="jobs-empty">Loading drives…</div>';
@@ -1029,21 +1114,58 @@ function renderDrives() {
     });
   });
   grid.querySelectorAll('.card-resolve-cancel').forEach(btn => {
-    btn.addEventListener('click', () => { delete cardResolveState[btn.dataset.device]; renderDrives(); });
+    btn.addEventListener('click', () => { delete cardResolveState[btn.dataset.device]; renderDrives(true); });
   });
   grid.querySelectorAll('.card-resolve-search').forEach(btn => {
     btn.addEventListener('click', () => doCardSearch(btn.dataset.device));
   });
   grid.querySelectorAll('.card-resolve-input').forEach(input => {
+    const d = input.dataset.device;
+    const field = input.dataset.field || 'query';
     input.addEventListener('input', () => {
-      cardResolveState[input.dataset.device] = { ...(cardResolveState[input.dataset.device] || {}), query: input.value };
+      const rs = cardResolveState[d] || {};
+      cardResolveState[d] = field === 'query'
+        ? { ...rs, query: input.value }
+        : { ...rs, form: { ...(rs.form || {}), [field]: input.value } };
     });
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') doCardSearch(input.dataset.device); });
+    input.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      if (field === 'query') doCardSearch(d); else confirmTVForm(d);
+    });
   });
   grid.querySelectorAll('.card-resolve-apply').forEach(btn => {
     btn.addEventListener('click', () => {
+      const d = btn.dataset.device;
+      if ((btn.dataset.type || 'movie') === 'tv') {
+        // Ask for season and episode inline instead of browser dialogs.
+        const show = {
+          id: Number.parseInt(btn.dataset.id, 10), title: btn.dataset.title,
+          year: Number.parseInt(btn.dataset.year, 10) || 0,
+        };
+        cardResolveState[d] = { ...(cardResolveState[d] || {}), picked: show, open: false, form: {}, message: '' };
+        renderDrives(true);
+        return;
+      }
       const payload = selectionPayload(btn);
-      if (payload) applyCardReidentify(btn.dataset.device, payload);
+      if (payload) applyCardReidentify(d, payload);
+    });
+  });
+  grid.querySelectorAll('.filter-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const d = btn.dataset.device;
+      cardResolveState[d] = { ...(cardResolveState[d] || {}), filter: btn.dataset.filter };
+      renderDrives(true);
+    });
+  });
+  grid.querySelectorAll('.tv-confirm').forEach(btn => {
+    btn.addEventListener('click', () => confirmTVForm(btn.dataset.device));
+  });
+  grid.querySelectorAll('.tv-other-show').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const d = btn.dataset.device;
+      const rs = cardResolveState[d] || {};
+      cardResolveState[d] = { ...rs, picked: null, open: true, form: {}, message: '' };
+      renderDrives(true);
     });
   });
 }
@@ -1086,7 +1208,7 @@ function driveCardHTML(st) {
         <span class="drive-device">${esc(device)}</span>
         ${discTypeChip}
       </div>
-      ${badgeHTML(stage, message)}
+      ${st.needs_input && !isIdle ? '<span class="badge badge-waiting">⚠ needs input</span>' : badgeHTML(stage, message)}
     </div>`;
 
   if (isIdle) {
@@ -1128,27 +1250,46 @@ function driveCardHTML(st) {
     : '';
   const etaText = canon === 'rip' ? fmtETA(st.eta_seconds) : '';
   const etaHTML = etaText
-    ? `<div class="drive-subtitle">${pct}% · ~${esc(etaText)} remaining</div>`
+    ? `<div class="drive-subtitle">${Math.round(pct)}% · ~${esc(etaText)} remaining</div>`
     : '';
 
   const canEdit = ['scanning', 'identifying', 'analyzing', 'ripping'].includes(stage);
-  const editOpen = canEdit && !!(cardResolveState[device] && cardResolveState[device].open);
-  const showResolve = isManualSearchWait(stage, message) || editOpen;
+  const need = canEdit ? st.needs_input : null;
+  const rsExisting = cardResolveState[device];
+  const editOpen = canEdit && !!(rsExisting && rsExisting.open);
+  const picked = canEdit && rsExisting ? rsExisting.picked : null;
+  // The show the TV form confirms: one picked from search, else the matched or suggested show.
+  const formShow = picked || (need && need.tmdb_id ? { id: need.tmdb_id, title: need.title, year: need.year } : null);
+  const showForm = !!formShow && (!!need || !!picked) && !editOpen;
+  const showSearch = editOpen || (!!need && !formShow) || (!need && isManualSearchWait(stage, message));
+  const showResolve = showForm || showSearch || !!need;
   let resolvePanelHTML = '';
   if (showResolve) {
-    const rs = cardResolveState[device] || { query: title || '', results: null, message: '' };
+    const rs = rsExisting || { query: (need && need.title) || title || '', results: null, message: '' };
     cardResolveState[device] = rs;
-    resolvePanelHTML = `
-      <div class="card-resolve" data-device="${escAttr(device)}">
+    if (rs.applying) {
+      resolvePanelHTML = `<div class="card-resolve"><div class="msg-info">Applying ${esc(rs.applying)}…</div></div>`;
+    } else {
+      const needHTML = need ? `
+        <div class="tv-need-head">Needs your input</div>
+        <div class="tv-need-summary">${esc(tvNeedPrompt(need))}</div>` : '';
+      const formHTML = showForm ? tvConfirmFormHTML(device, formShow, need, rs, !!picked) : '';
+      const searchHTML = showSearch ? `
         <div class="search-row">
-          <input class="search-input card-resolve-input" data-device="${escAttr(device)}"
+          <input class="search-input card-resolve-input" data-device="${escAttr(device)}" data-field="query"
             type="text" aria-label="Search TMDB for the correct title" placeholder="Search TMDB…" value="${escAttr(rs.query)}" />
           <button class="btn btn-primary card-resolve-search" data-device="${escAttr(device)}">Search</button>
           ${editOpen ? `<button class="btn card-resolve-cancel" data-device="${escAttr(device)}">Cancel</button>` : ''}
         </div>
-        <div class="search-results">${rs.results ? renderResolveResults(device, rs.results) : ''}</div>
-        ${rs.message ? `<div class="msg-error">${esc(rs.message)}</div>` : ''}
-      </div>`;
+        <div class="search-results">${rs.results ? renderResolveResults(device, rs.results, rs.filter || defaultSearchFilter(device)) : ''}</div>` : '';
+      resolvePanelHTML = `
+        <div class="card-resolve${need ? ' tv-need' : ''}" data-device="${escAttr(device)}">
+          ${needHTML}
+          ${formHTML}
+          ${searchHTML}
+          ${rs.message ? `<div class="msg-error">${esc(rs.message)}</div>` : ''}
+        </div>`;
+    }
   }
 
   return `
@@ -1160,10 +1301,86 @@ function driveCardHTML(st) {
       <div class="stages">${stagesHTML}</div>
       ${progressHTML}
       ${etaHTML}
-      ${canEdit && !showResolve ? `<button class="btn card-edit-btn" data-device="${escAttr(device)}">✎ Edit title</button>` : ''}
+      ${canEdit && !showResolve && !picked ? `<button class="btn card-edit-btn" data-device="${escAttr(device)}">✎ Edit title</button>` : ''}
       ${resolvePanelHTML}
       ${driveActionsHTML(device, isDriveActive(st), st.drive_status)}
     </div>`;
+}
+
+// tvNeedPrompt is the drive card's one-line ask for a TV disc. (need.summary
+// is worded for notifications, which point the user to SimpleRip.)
+function tvNeedPrompt(need) {
+  switch (need.kind) {
+    case 'season': return 'Which season is this disc? The rip continues meanwhile.';
+    case 'episode': return `Season ${need.season} matched, but the episode order could not be confirmed. Check the first episode number.`;
+    case 'show': return need.tmdb_id
+      ? 'Is this the right show? Confirm it and choose the season.'
+      : 'The show was not identified. Search for it below.';
+    default: return need.summary || '';
+  }
+}
+
+// tvConfirmFormHTML is the inline season/episode form for a TV disc. show is
+// the series being confirmed; need is the server's request (may be null when
+// the user picked a show from search without being asked).
+function tvConfirmFormHTML(device, show, need, rs, fromSearch) {
+  const form = rs.form || {};
+  const fromNeed = need && need.tmdb_id === show.id;
+  const season = form.season ?? (fromNeed && need.season ? String(need.season) : '');
+  const episode = form.episode ?? '';
+  const label = `${show.title}${show.year ? ` (${show.year})` : ''}`;
+  let tag = '';
+  if (!fromSearch && need) tag = need.show_matched ? 'matched' : 'suggested';
+  const seasonHint = fromNeed && need.season_suggested && form.season === undefined
+    ? '<div class="tv-hint">Season pre-filled from an earlier disc of this set.</div>' : '';
+  const d = escAttr(device);
+  return `
+    <div class="tv-form">
+      <div class="tv-show">Show: <strong>${esc(label)}</strong>${tag ? ` <span class="tv-tag tv-tag-${tag}">${tag}</span>` : ''}</div>
+      <div class="tv-fields">
+        <label>Season
+          <input class="search-input card-resolve-input tv-input" data-device="${d}" data-field="season"
+            type="number" min="1" inputmode="numeric" value="${escAttr(season)}" />
+        </label>
+        <label>First episode on disc
+          <input class="search-input card-resolve-input tv-input" data-device="${d}" data-field="episode"
+            type="number" min="1" inputmode="numeric" placeholder="Next after saved" value="${escAttr(episode)}" />
+        </label>
+      </div>
+      ${seasonHint}
+      <div class="tv-hint">Leave the first episode blank to continue after the episodes already saved for this season.</div>
+      <div class="tv-actions">
+        <button class="btn btn-primary tv-confirm" data-device="${d}">Confirm</button>
+        <button class="btn tv-other-show" data-device="${d}">Different show…</button>
+        ${fromSearch ? `<button class="btn card-resolve-cancel" data-device="${d}">Cancel</button>` : ''}
+      </div>
+    </div>`;
+}
+
+// confirmTVForm validates the inline TV form and applies it.
+function confirmTVForm(device) {
+  const rs = cardResolveState[device] || {};
+  const st = driveStates[device] || {};
+  const need = st.needs_input;
+  const show = rs.picked || (need && need.tmdb_id ? { id: need.tmdb_id, title: need.title, year: need.year } : null);
+  if (!show) return;
+  const form = rs.form || {};
+  const seasonText = String(form.season ?? (need && need.tmdb_id === show.id && need.season ? need.season : '')).trim();
+  const season = Number(seasonText);
+  const episodeText = String(form.episode ?? '').trim();
+  const episodeStart = episodeText === '' ? 0 : Number(episodeText);
+  let error = '';
+  if (!Number.isInteger(season) || season < 1) error = 'Enter a season number of 1 or more.';
+  else if (episodeText !== '' && (!Number.isInteger(episodeStart) || episodeStart < 1)) error = 'Enter a first episode of 1 or more, or leave it blank.';
+  if (error) {
+    cardResolveState[device] = { ...rs, message: error };
+    renderDrives(true);
+    return;
+  }
+  applyCardReidentify(device, {
+    tmdb_id: show.id, title: show.title, year: show.year || 0,
+    media_type: 'tv', season, episode_start: episodeStart,
+  });
 }
 
 // Estimate only a short distance beyond the latest server value. The ETA
@@ -1215,15 +1432,32 @@ async function doCardSearch(device) {
   } catch (_) {
     cardResolveState[device] = { ...rs, results: null, message: 'Search request failed.' };
   }
-  renderDrives();
+  renderDrives(true);
+}
+
+function selectionLabel(payload) {
+  let label = payload.title + (payload.year ? ` (${payload.year})` : '');
+  if (payload.media_type === 'tv') {
+    label += `, season ${payload.season}`;
+    if (payload.episode_start) label += ` from episode ${payload.episode_start}`;
+  }
+  return label;
 }
 
 async function applyCardReidentify(device, payload) {
+  const label = selectionLabel(payload);
+  // Show the choice was taken right away; the results stay hidden until it fails.
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  cardResolveState[device] = { ...cardResolveState[device], applying: label, message: '' };
+  renderDrives(true);
+  const fail = message => {
+    cardResolveState[device] = { ...cardResolveState[device], applying: '', message };
+    renderDrives(true);
+  };
   let job = findActiveJobForDevice(device);
   if (!job) { await loadJobs(); job = findActiveJobForDevice(device); }
   if (!job) {
-    cardResolveState[device] = { ...cardResolveState[device], message: 'No active job found for this drive.' };
-    renderDrives();
+    fail('No active job found for this drive.');
     return;
   }
   try {
@@ -1234,16 +1468,23 @@ async function applyCardReidentify(device, payload) {
     });
     const data = await r.json();
     if (!r.ok) {
-      cardResolveState[device] = { ...cardResolveState[device], message: data.error || 'Failed' };
-      renderDrives();
+      fail(data.error || 'Failed');
       return;
     }
-    delete cardResolveState[device]; // card will re-render past "identify" on the next progress event
-    if (data.message) showToast(data.message);
+    delete cardResolveState[device];
+    // The server re-emits the drive's state with the new title; don't let the
+    // old "search for the show" message reopen the panel before that arrives.
+    const st = driveStates[device];
+    if (st && isManualSearchWait(st.stage, st.message)) {
+      const title = payload.title + (payload.year ? ` (${payload.year})` : '');
+      driveStates[device] = { ...st, title, message: `Identified as ${title}` };
+    }
+    if (driveStates[device]) driveStates[device] = { ...driveStates[device], needs_input: null };
+    renderDrives(true);
+    showToast(`Saved: ${label}.${data.message ? ' ' + data.message : ''}`);
     await loadJobs();
   } catch (_) {
-    cardResolveState[device] = { ...cardResolveState[device], message: 'Request failed.' };
-    renderDrives();
+    fail('Request failed.');
   }
 }
 
@@ -1564,9 +1805,13 @@ function tvIdentificationSummary(rawData) {
   if (!data || data.action !== 'tv_identification') return '';
   const best = Array.isArray(data.candidates) ? data.candidates[0] : null;
   const candidate = best
-    ? `${esc(best.title)}${best.year ? ` (${esc(String(best.year))})` : ''} · title similarity ${Number(best.title_similarity || 0).toFixed(2)} from “${esc(best.matched_query || data.query || '')}”`
+    ? `${esc(best.title)}${best.year ? ` (${esc(String(best.year))})` : ''} · title similarity ${Number(best.title_similarity || 0).toFixed(2)} from “${esc(best.matched_query || data.query || '')}”${best.runtime_fit ? ` · runtimes ${esc(best.runtime_fit)}` : ''}`
     : 'no TMDB series candidate';
-  return `<div class="tl-tv-summary">TV evidence: show ${esc(data.show_confidence || 'unresolved')} — ${candidate}; season ${esc(data.season_confidence || 'unresolved')}; episodes ${esc(data.episode_confidence || 'unresolved')}${data.lookup_error ? `; lookup issue: ${esc(data.lookup_error)}` : ''}. Similarity is not a probability.</div>`;
+  const reason = data.show_reason ? ` (${esc(data.show_reason)})` : '';
+  const season = data.suggested_season
+    ? `suggested ${esc(String(data.suggested_season))} from earlier disc ${esc(data.earlier_disc_label || '')}`
+    : esc(data.season_confidence || 'unresolved');
+  return `<div class="tl-tv-summary">TV evidence: show ${esc(data.show_confidence || 'unresolved')}${reason} — ${candidate}; season ${season}; episodes ${esc(data.episode_confidence || 'unresolved')}${data.lookup_error ? `; lookup issue: ${esc(data.lookup_error)}` : ''}. Similarity is not a probability.</div>`;
 }
 
 async function ripAlternate(jobId, idx) {
@@ -1666,7 +1911,7 @@ function renderDetail(job, events) {
         <div class="sr-row">
           <div>
             <div class="sr-title">${esc(r.title)}</div>
-            <div class="sr-meta">${r.year || '—'}${r.runtime ? ' · ' + r.runtime + ' min' : ''} · ${esc(r.media_type || 'movie')}</div>
+            <div class="sr-meta">${mediaTypePill(r.media_type || 'movie')} ${esc(searchResultMeta(r))}</div>
           </div>
           <button class="sr-apply"
             data-id="${r.id}"
@@ -1695,7 +1940,8 @@ function renderDetail(job, events) {
 async function applyReidentify(jobId, payload) {
   const msg = document.getElementById('reid-msg');
   if (!msg) return;
-  msg.innerHTML = '<div class="msg-info">Applying…</div>';
+  const results = document.getElementById('reid-results');
+  msg.innerHTML = `<div class="msg-info">Applying ${esc(selectionLabel(payload))}…</div>`;
   try {
     const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/reidentify`, {
       method: 'POST',
@@ -1707,7 +1953,8 @@ async function applyReidentify(jobId, payload) {
       msg.innerHTML = `<div class="msg-error">${esc(data.error || 'Failed')}</div>`;
       return;
     }
-    msg.innerHTML = `<div class="msg-success">Updated to "${esc(data.Title || payload.title)}". ${esc(data.message || '')}</div>`;
+    if (results) results.innerHTML = '';
+    msg.innerHTML = `<div class="msg-success">Saved: ${esc(selectionLabel(payload))}. ${esc(data.message || '')}</div>`;
     const title = detailPanel && detailPanel.querySelector('.detail-title');
     if (title) title.textContent = `${data.Title || payload.title}${data.Year ? ` (${data.Year})` : ''}`;
     await loadJobs();
