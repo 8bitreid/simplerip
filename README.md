@@ -48,6 +48,8 @@ export MAKEMKV_KEY="your-license-key-here"
 docker compose up -d
 ```
 
+To build from a local checkout, use `make up` instead: it stamps the image with the current branch (`<branch>-SNAPSHOT`), commit (with `-dirty` for uncommitted changes) and build time, which the dashboard shows under Version. `make version` prints what would be stamped.
+
 Optical drives are passed through as devices (`/dev/sr0`, `/dev/sr1`). Set `MAKEMKV_KEY` for Blu-ray ripping (recommended) — see Configuration below. Set `SIMPLERIP_HOST` to override the hostname shown in the dashboard info card.
 
 ---

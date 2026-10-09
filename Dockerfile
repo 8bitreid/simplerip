@@ -15,9 +15,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 COPY . .
+# A plain `docker compose build` passes no BUILD_DATE; stamp the build time.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build \
+    if [ "${BUILD_DATE}" = unknown ]; then BUILD_DATE=$(date -u +%FT%TZ); fi \
+    && CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
         -o /simplerip \
