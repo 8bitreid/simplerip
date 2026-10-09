@@ -266,10 +266,11 @@ if [ -f %q ]; then
   COUNT=$(cat %q)
 fi
 COUNT=$((COUNT + 1))
-echo "$COUNT" > %q
+# Write then rename, so the test never reads a truncated, empty file.
+echo "$COUNT" > %q.tmp && mv %q.tmp %q
 echo 'TCOUNT:1'
 exit 0
-`, stateFile, stateFile, stateFile)
+`, stateFile, stateFile, stateFile, stateFile, stateFile)
 	if err := os.WriteFile(mockPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
