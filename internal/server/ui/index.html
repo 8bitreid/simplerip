@@ -908,7 +908,11 @@ function selectionPayload(button) {
   };
   if (payload.media_type !== 'tv') return payload;
 
-  const seasonText = prompt(`What season is this disc of "${payload.title}"?`);
+  // Pre-fill the season an earlier disc of this set was confirmed as.
+  const st = button.dataset.device ? driveStates[button.dataset.device] : null;
+  const suggestedSeason = st && st.suggested_tmdb_id === payload.tmdb_id && st.suggested_season
+    ? String(st.suggested_season) : '';
+  const seasonText = prompt(`What season is this disc of "${payload.title}"?`, suggestedSeason);
   if (seasonText === null) return null;
   const season = Number(seasonText.trim());
   if (!Number.isInteger(season) || season < 1) {
@@ -945,7 +949,13 @@ function applyProgressEvent(ev) {
   const prev = dev ? driveStates[dev] : undefined;
   if (dev) {
     ensureDevice(dev);
-    driveStates[dev] = { ...driveStates[dev], ...ev, device: dev, progressAt: Date.now() };
+    const base = { ...driveStates[dev] };
+    // A TV suggestion belongs to one disc; drop it when a new rip starts or ends.
+    if (['scanning', 'done', 'error', 'cancelled', 'idle'].includes(ev.stage)) {
+      delete base.suggested_tmdb_id;
+      delete base.suggested_season;
+    }
+    driveStates[dev] = { ...base, ...ev, device: dev, progressAt: Date.now() };
   }
   renderDrives();
   const stageChanged = !prev || prev.stage !== ev.stage;
@@ -1567,9 +1577,13 @@ function tvIdentificationSummary(rawData) {
   if (!data || data.action !== 'tv_identification') return '';
   const best = Array.isArray(data.candidates) ? data.candidates[0] : null;
   const candidate = best
-    ? `${esc(best.title)}${best.year ? ` (${esc(String(best.year))})` : ''} · title similarity ${Number(best.title_similarity || 0).toFixed(2)} from “${esc(best.matched_query || data.query || '')}”`
+    ? `${esc(best.title)}${best.year ? ` (${esc(String(best.year))})` : ''} · title similarity ${Number(best.title_similarity || 0).toFixed(2)} from “${esc(best.matched_query || data.query || '')}”${best.runtime_fit ? ` · runtimes ${esc(best.runtime_fit)}` : ''}`
     : 'no TMDB series candidate';
-  return `<div class="tl-tv-summary">TV evidence: show ${esc(data.show_confidence || 'unresolved')} — ${candidate}; season ${esc(data.season_confidence || 'unresolved')}; episodes ${esc(data.episode_confidence || 'unresolved')}${data.lookup_error ? `; lookup issue: ${esc(data.lookup_error)}` : ''}. Similarity is not a probability.</div>`;
+  const reason = data.show_reason ? ` (${esc(data.show_reason)})` : '';
+  const season = data.suggested_season
+    ? `suggested ${esc(String(data.suggested_season))} from earlier disc ${esc(data.earlier_disc_label || '')}`
+    : esc(data.season_confidence || 'unresolved');
+  return `<div class="tl-tv-summary">TV evidence: show ${esc(data.show_confidence || 'unresolved')}${reason} — ${candidate}; season ${season}; episodes ${esc(data.episode_confidence || 'unresolved')}${data.lookup_error ? `; lookup issue: ${esc(data.lookup_error)}` : ''}. Similarity is not a probability.</div>`;
 }
 
 async function ripAlternate(jobId, idx) {

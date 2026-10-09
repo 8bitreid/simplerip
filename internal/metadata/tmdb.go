@@ -28,6 +28,9 @@ type MediaSearchResult struct {
 	Title     string
 	Year      string
 	MediaType string
+	// VoteCount is TMDB's vote count, a rough popularity prior. TV search
+	// fills it; other searches leave it zero.
+	VoteCount int
 }
 
 // Year returns the four-digit release year, or "" if unavailable.

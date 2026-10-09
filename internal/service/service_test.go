@@ -280,10 +280,15 @@ func TestRipService_ScanDisc_TV(t *testing.T) {
 
 func TestIdentifyTVUsesExplicitEpisodeMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/3/search/tv" || r.URL.Query().Get("query") != "the wire" {
+		switch {
+		case r.URL.Path == "/3/search/tv" && r.URL.Query().Get("query") == "the wire":
+			_, _ = fmt.Fprint(w, `{"results":[{"id":1438,"name":"The Wire","first_air_date":"2002-06-02"}]}`)
+		case r.URL.Path == "/3/tv/1438":
+			// Candidate evidence: details with no season runtimes.
+			_, _ = fmt.Fprint(w, `{"id":1438,"name":"The Wire","seasons":[]}`)
+		default:
 			t.Errorf("unexpected TMDB TV request: %s", r.URL.String())
 		}
-		_, _ = fmt.Fprint(w, `{"results":[{"id":1438,"name":"The Wire","first_air_date":"2002-06-02"}]}`)
 	}))
 	defer server.Close()
 	installHostRewrites(t, map[string]string{"api.themoviedb.org": server.URL})
@@ -295,7 +300,7 @@ func TestIdentifyTVUsesExplicitEpisodeMetadata(t *testing.T) {
 		{Index: 4, Name: "S02E03", Duration: 59 * time.Minute},
 		{Index: 1, Name: "S02E01", Duration: 58 * time.Minute},
 		{Index: 3, Name: "S02E02", Duration: 60 * time.Minute},
-	})
+	}, nil)
 	if !result.ShowCertain || result.Show == nil || result.Show.Title != "The Wire" {
 		t.Fatalf("show match = %+v", result)
 	}
@@ -321,7 +326,7 @@ func TestIdentifyTVKeepsWeakCandidateAsSuggestion(t *testing.T) {
 		{Index: 0, Name: "Title 0", Duration: 22 * time.Minute},
 		{Index: 1, Name: "Title 1", Duration: 22 * time.Minute},
 		{Index: 2, Name: "Title 2", Duration: 22 * time.Minute},
-	})
+	}, nil)
 	if result.ShowCertain {
 		t.Fatalf("weak match must not be selected: %+v", result)
 	}
@@ -355,7 +360,7 @@ func TestIdentifyTVInfersDistinctiveSeasonRuntimes(t *testing.T) {
 		{Index: 7, Duration: 24*time.Minute + 5*time.Second},
 		{Index: 2, Duration: 20*time.Minute + 3*time.Second},
 		{Index: 4, Duration: 22*time.Minute + 2*time.Second},
-	})
+	}, nil)
 	if !result.ShowCertain || result.Show == nil || result.Season != 1 {
 		t.Fatalf("runtime season match = %+v", result)
 	}

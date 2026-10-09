@@ -41,6 +41,12 @@ type ProgressEvent struct {
 	DiscType    string `json:"disc_type,omitempty"`    // bluray, dvd, unknown
 	DriveStatus string `json:"drive_status,omitempty"` // disc_present, no_disc, tray_open, loading, detecting, unresponsive
 	ETASec      int    `json:"eta_seconds,omitempty"`  // estimated seconds remaining while ripping; 0 = unknown
+
+	// Set on a TV identification prompt: the suggested show's TMDB ID and,
+	// from an earlier disc of the same set, its season. The UI pre-fills the
+	// season when the user selects that show.
+	SuggestedShowID int `json:"suggested_tmdb_id,omitempty"`
+	SuggestedSeason int `json:"suggested_season,omitempty"`
 }
 
 type ManualSelection struct {
@@ -1016,6 +1022,7 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 	episodeNumbers := run.episodeNumbers
 	autoTVMatch := false
 	tvSuggestion := ""
+	tvSuggestedShowID, tvSuggestedSeason := 0, 0
 	// Do not let an unrelated movie match hide a disc that looks like a TV set.
 	preliminaryDisc := ripper.ClassifyTitles(scanned.Titles, s.cfg.Detection)
 	runtimeMin := 0
@@ -1045,11 +1052,26 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		tmdbConfirmedMovie = true
 		runtimeMin = s.ripRuntime(device)
 	} else if !manualIdentity && mediaType == "" && preliminaryDisc.Pattern == ripper.DiscPatternTV {
+		sibling, err := s.tvSiblingFor(ctx, job.ID, scanned.DiscName)
+		if err != nil {
+			slog.Warn("could not read earlier disc identities; continuing without them",
+				"disc", scanned.DiscName, "error", err)
+		}
 		lookupCtx, lookupCancel := context.WithTimeout(ctx, 20*time.Second)
-		tv := s.identifyTV(lookupCtx, scanned.DiscName, preliminaryDisc.MainTitles)
+		tv := s.identifyTV(lookupCtx, scanned.DiscName, preliminaryDisc.MainTitles, sibling)
 		lookupCancel()
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return context.Canceled
+		}
+		if tv.Show != nil {
+			tvSuggestedShowID = tv.Show.ID
+			tvSuggestedSeason = tv.SuggestedSeason
+		}
+		if !tv.ShowCertain && tv.Show != nil {
+			tvSuggestion = tv.Show.Title
+			if yr, _ := strconv.Atoi(tv.Show.Year); yr > 0 {
+				tvSuggestion = fmt.Sprintf("%s (%d)", tvSuggestion, yr)
+			}
 		}
 		if tv.ShowCertain && tv.Show != nil {
 			autoTVMatch = true
@@ -1067,11 +1089,6 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				job.Title, job.Year = tv.Show.Title, year
 				if err := s.store.UpdateAutoIdentity(ctx, job.ID, tv.Show.Title, year); err != nil {
 					slog.Error("failed to update automatic TV identity", "job", job.ID, "error", err)
-				}
-			} else if tv.Show != nil {
-				tvSuggestion = tv.Show.Title
-				if yr, _ := strconv.Atoi(tv.Show.Year); yr > 0 {
-					tvSuggestion = fmt.Sprintf("%s (%d)", tvSuggestion, yr)
 				}
 			}
 		}
@@ -1256,12 +1273,17 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 		case tvSuggestion != "":
 			identificationMessage = fmt.Sprintf("TV disc detected. Possible show suggestion: %s; not selected automatically. Search to confirm or correct it.", tvSuggestion)
 		}
+		if tvSuggestedSeason > 0 && season == 0 {
+			identificationMessage += fmt.Sprintf(" An earlier disc of this set was season %d.", tvSuggestedSeason)
+		}
 		s.emit(ProgressEvent{
-			Device:  device,
-			Stage:   "identifying",
-			Title:   mediaTitle,
-			Percent: 0,
-			Message: identificationMessage,
+			Device:          device,
+			Stage:           "identifying",
+			Title:           mediaTitle,
+			Percent:         0,
+			Message:         identificationMessage,
+			SuggestedShowID: tvSuggestedShowID,
+			SuggestedSeason: tvSuggestedSeason,
 		})
 		s.notifyTVSelection(job.ID, scanned.DiscName, device, mediaTitle)
 		if s.store != nil {

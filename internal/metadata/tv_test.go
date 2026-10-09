@@ -2,9 +2,11 @@ package metadata
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,5 +155,149 @@ func TestTMDBTVRequests(t *testing.T) {
 	season, err := client.GetTVSeason(context.Background(), results[0].ID, 1)
 	if err != nil || len(season.Episodes) != 1 || season.Episodes[0].Runtime != 22 {
 		t.Fatalf("GetTVSeason() = %+v, %v", season, err)
+	}
+}
+
+// spongebobDiscTitles mirrors SPONGEBOB_DISC2: 15 segments of 11:02–11:34.
+func spongebobDiscTitles() []disc.MKVTitle {
+	seconds := []int{11*60 + 44, 11*60 + 3, 11*60 + 2, 11*60 + 3, 11*60 + 3, 11*60 + 3, 11*60 + 2, 11*60 + 3,
+		11*60 + 2, 11*60 + 2, 11*60 + 2, 11*60 + 32, 11*60 + 13, 11*60 + 34, 11*60 + 4}
+	titles := make([]disc.MKVTitle, len(seconds))
+	for i, s := range seconds {
+		titles[i] = disc.MKVTitle{Index: i, Duration: time.Duration(s) * time.Second}
+	}
+	return titles
+}
+
+func runtimeSeason(number int, runtimes ...int) TVSeason {
+	season := TVSeason{SeasonNumber: number}
+	for i, runtime := range runtimes {
+		season.Episodes = append(season.Episodes, TVEpisode{EpisodeNumber: i + 1, Runtime: runtime})
+	}
+	return season
+}
+
+func repeatRuntime(runtime, count int) []int {
+	runtimes := make([]int, count)
+	for i := range runtimes {
+		runtimes[i] = runtime
+	}
+	return runtimes
+}
+
+func TestLeadingWordsSimilarity(t *testing.T) {
+	results := []MediaSearchResult{
+		{ID: 121021, Title: "SpongeBob DocuPants", MediaType: "tv", VoteCount: 26},
+		{ID: 387, Title: "SpongeBob SquarePants", MediaType: "tv", VoteCount: 3281},
+		{ID: 99588, Title: "Kamp Koral: SpongeBob's Under Years", MediaType: "tv", VoteCount: 523},
+	}
+	ranked := RankTVCandidates("SPONGEBOB_DISC2", results)
+	if ranked[0].Media.ID != 387 || ranked[1].Media.ID != 121021 {
+		t.Fatalf("equal leading-word matches should rank by vote count: %+v", ranked)
+	}
+	if !ranked[0].PrefixOnly || ranked[0].Similarity < 0.82 {
+		t.Fatalf("label abbreviating the title should be a strong prefix-only match: %+v", ranked[0])
+	}
+	if ranked[2].Media.ID != 99588 || ranked[2].PrefixOnly || ranked[2].Similarity > 0.5 {
+		t.Fatalf("a title that only contains the label later on is not a leading-word match: %+v", ranked[2])
+	}
+	if got := leadingWordsSimilarity("the office", "The Office Specials"); got < 0.85 {
+		t.Fatalf("leading article should not prevent a prefix match, got %.2f", got)
+	}
+	if got := leadingWordsSimilarity("abc", "ABC Mystery Hour"); got != 0 {
+		t.Fatalf("very short labels must not earn a prefix match, got %.2f", got)
+	}
+	if got := leadingWordsSimilarity("friends", "Friends"); got != 0 {
+		t.Fatalf("a whole-title match is scored by titleSimilarity, got %.2f", got)
+	}
+}
+
+func TestSeasonRuntimeFit(t *testing.T) {
+	titles := spongebobDiscTitles()
+	squarePants := []TVSeason{
+		runtimeSeason(1, append([]int{9, 3}, repeatRuntime(11, 39)...)...),
+		runtimeSeason(2, repeatRuntime(12, 36)...),
+	}
+	if fit, season, cost := SeasonRuntimeFit(titles, squarePants); fit != RuntimeFitMatch || season == 0 || cost > 1 {
+		t.Fatalf("SquarePants fit = %v season %d cost %.2f, want fits", fit, season, cost)
+	}
+	docuPants := []TVSeason{runtimeSeason(1, 14, 13, 12, 18, 14, 14, 11, 12)}
+	if fit, _, _ := SeasonRuntimeFit(titles, docuPants); fit != RuntimeFitMismatch {
+		t.Fatalf("an 8-episode season cannot hold 15 titles, got %v", fit)
+	}
+	reimagined := []TVSeason{runtimeSeason(1, repeatRuntime(4, 20)...)}
+	if fit, _, _ := SeasonRuntimeFit(titles, reimagined); fit != RuntimeFitMismatch {
+		t.Fatalf("4-minute episodes cannot produce 11-minute titles, got %v", fit)
+	}
+	unknown := []TVSeason{runtimeSeason(1, repeatRuntime(0, 20)...)}
+	if fit, _, _ := SeasonRuntimeFit(titles, unknown); fit != RuntimeFitUnknown {
+		t.Fatalf("missing runtimes must not rule a show out, got %v", fit)
+	}
+	if fit, _, _ := SeasonRuntimeFit(titles, nil); fit != RuntimeFitUnknown {
+		t.Fatalf("no season data is unknown, got %v", fit)
+	}
+}
+
+func TestTVLabelStem(t *testing.T) {
+	tests := map[string]string{
+		"SPONGEBOB_DISC2":     "spongebob",
+		"SPONGEBOB_DISK2":     "spongebob",
+		"SpongeBob Disc 1":    "spongebob",
+		"The-Office-Volume-3": "the office",
+		"DVD_VIDEO":           "",
+		"DISC1":               "",
+		"BDMV":                "",
+	}
+	for label, want := range tests {
+		if got := TVLabelStem(label); got != want {
+			t.Errorf("TVLabelStem(%q) = %q, want %q", label, got, want)
+		}
+	}
+}
+
+func TestGetTVWithSeasonsBundlesRequests(t *testing.T) {
+	var bundled, single int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/3/tv/9" && r.URL.Query().Get("append_to_response") == "":
+			seasons := make([]map[string]int, 0, 26)
+			for n := 0; n <= 25; n++ {
+				seasons = append(seasons, map[string]int{"season_number": n})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 9, "name": "Long Show", "seasons": seasons})
+		case r.URL.Path == "/3/tv/9":
+			bundled++
+			keys := strings.Split(r.URL.Query().Get("append_to_response"), ",")
+			if len(keys) > 20 {
+				t.Errorf("bundle of %d seasons exceeds TMDB's limit of 20", len(keys))
+			}
+			body := map[string]any{"id": 9}
+			for _, key := range keys {
+				var n int
+				_, _ = fmt.Sscanf(key, "season/%d", &n)
+				if n == 7 {
+					continue // force the single-season fallback
+				}
+				body[key] = runtimeSeason(n, 22, 23)
+			}
+			_ = json.NewEncoder(w).Encode(body)
+		case r.URL.Path == "/3/tv/9/season/7":
+			single++
+			_ = json.NewEncoder(w).Encode(runtimeSeason(7, 22, 23))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := newTMDBTestClient(t, server)
+	show, err := client.GetTVWithSeasons(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("GetTVWithSeasons() error = %v", err)
+	}
+	if !show.Complete || len(show.Seasons) != 25 || show.Seasons[0].SeasonNumber != 1 || show.Seasons[24].SeasonNumber != 25 {
+		t.Fatalf("seasons = %d complete=%v", len(show.Seasons), show.Complete)
+	}
+	if bundled != 2 || single != 1 {
+		t.Fatalf("requests: %d bundled, %d single; want 2 bundled and 1 fallback", bundled, single)
 	}
 }
