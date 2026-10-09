@@ -986,13 +986,29 @@ function scheduleJobsRefresh() {
   }, 700);
 }
 
-function renderDrives() {
+// force re-renders even while a card's search box has focus; use it when the
+// user's own action (search, select) must show up immediately. Focus returns
+// to that search box if it is still on the card.
+function renderDrives(force = false) {
   updateTabBadges();
   const grid = document.getElementById('drives-grid');
   // Re-rendering replaces the DOM, which would drop focus and typed text on
   // every progress tick. Skip while the user is typing in a card's search box.
   const focused = document.activeElement;
-  if (focused && focused.classList && focused.classList.contains('card-resolve-input')) return;
+  const typingIn = focused && focused.classList && focused.classList.contains('card-resolve-input')
+    ? focused.dataset.device : null;
+  if (typingIn && !force) return;
+  renderDriveGrid(grid);
+  if (typingIn) {
+    const input = [...grid.querySelectorAll('.card-resolve-input')].find(el => el.dataset.device === typingIn);
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }
+}
+
+function renderDriveGrid(grid) {
   const devices = knownDevices.size > 0 ? [...knownDevices] : [];
   if (!devices.length) {
     grid.innerHTML = '<div class="jobs-empty">Loading drives…</div>';
@@ -1041,7 +1057,7 @@ function renderDrives() {
     });
   });
   grid.querySelectorAll('.card-resolve-cancel').forEach(btn => {
-    btn.addEventListener('click', () => { delete cardResolveState[btn.dataset.device]; renderDrives(); });
+    btn.addEventListener('click', () => { delete cardResolveState[btn.dataset.device]; renderDrives(true); });
   });
   grid.querySelectorAll('.card-resolve-search').forEach(btn => {
     btn.addEventListener('click', () => doCardSearch(btn.dataset.device));
@@ -1158,7 +1174,9 @@ function driveCardHTML(st) {
           <button class="btn btn-primary card-resolve-search" data-device="${escAttr(device)}">Search</button>
           ${editOpen ? `<button class="btn card-resolve-cancel" data-device="${escAttr(device)}">Cancel</button>` : ''}
         </div>
-        <div class="search-results">${rs.results ? renderResolveResults(device, rs.results) : ''}</div>
+        <div class="search-results">${rs.applying
+          ? `<div class="msg-info">Applying ${esc(rs.applying)}…</div>`
+          : (rs.results ? renderResolveResults(device, rs.results) : '')}</div>
         ${rs.message ? `<div class="msg-error">${esc(rs.message)}</div>` : ''}
       </div>`;
   }
@@ -1227,15 +1245,32 @@ async function doCardSearch(device) {
   } catch (_) {
     cardResolveState[device] = { ...rs, results: null, message: 'Search request failed.' };
   }
-  renderDrives();
+  renderDrives(true);
+}
+
+function selectionLabel(payload) {
+  let label = payload.title + (payload.year ? ` (${payload.year})` : '');
+  if (payload.media_type === 'tv') {
+    label += `, season ${payload.season}`;
+    if (payload.episode_start) label += ` from episode ${payload.episode_start}`;
+  }
+  return label;
 }
 
 async function applyCardReidentify(device, payload) {
+  const label = selectionLabel(payload);
+  // Show the choice was taken right away; the results stay hidden until it fails.
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  cardResolveState[device] = { ...cardResolveState[device], applying: label, message: '' };
+  renderDrives(true);
+  const fail = message => {
+    cardResolveState[device] = { ...cardResolveState[device], applying: '', message };
+    renderDrives(true);
+  };
   let job = findActiveJobForDevice(device);
   if (!job) { await loadJobs(); job = findActiveJobForDevice(device); }
   if (!job) {
-    cardResolveState[device] = { ...cardResolveState[device], message: 'No active job found for this drive.' };
-    renderDrives();
+    fail('No active job found for this drive.');
     return;
   }
   try {
@@ -1246,17 +1281,22 @@ async function applyCardReidentify(device, payload) {
     });
     const data = await r.json();
     if (!r.ok) {
-      cardResolveState[device] = { ...cardResolveState[device], message: data.error || 'Failed' };
-      renderDrives();
+      fail(data.error || 'Failed');
       return;
     }
     delete cardResolveState[device];
-    renderDrives();
-    if (data.message) showToast(data.message);
+    // The server re-emits the drive's state with the new title; don't let the
+    // old "search for the show" message reopen the panel before that arrives.
+    const st = driveStates[device];
+    if (st && isManualSearchWait(st.stage, st.message)) {
+      const title = payload.title + (payload.year ? ` (${payload.year})` : '');
+      driveStates[device] = { ...st, title, message: `Identified as ${title}` };
+    }
+    renderDrives(true);
+    showToast(`Saved: ${label}.${data.message ? ' ' + data.message : ''}`);
     await loadJobs();
   } catch (_) {
-    cardResolveState[device] = { ...cardResolveState[device], message: 'Request failed.' };
-    renderDrives();
+    fail('Request failed.');
   }
 }
 
@@ -1712,7 +1752,8 @@ function renderDetail(job, events) {
 async function applyReidentify(jobId, payload) {
   const msg = document.getElementById('reid-msg');
   if (!msg) return;
-  msg.innerHTML = '<div class="msg-info">Applying…</div>';
+  const results = document.getElementById('reid-results');
+  msg.innerHTML = `<div class="msg-info">Applying ${esc(selectionLabel(payload))}…</div>`;
   try {
     const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/reidentify`, {
       method: 'POST',
@@ -1724,7 +1765,8 @@ async function applyReidentify(jobId, payload) {
       msg.innerHTML = `<div class="msg-error">${esc(data.error || 'Failed')}</div>`;
       return;
     }
-    msg.innerHTML = `<div class="msg-success">Updated to "${esc(data.Title || payload.title)}". ${esc(data.message || '')}</div>`;
+    if (results) results.innerHTML = '';
+    msg.innerHTML = `<div class="msg-success">Saved: ${esc(selectionLabel(payload))}. ${esc(data.message || '')}</div>`;
     const title = detailPanel && detailPanel.querySelector('.detail-title');
     if (title) title.textContent = `${data.Title || payload.title}${data.Year ? ` (${data.Year})` : ''}`;
     await loadJobs();
