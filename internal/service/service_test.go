@@ -846,7 +846,8 @@ func TestTVDiscSendsInputNeededNotification(t *testing.T) {
 	cfg.Notification.UIURL = "http://ui.test:8080"
 	svc := New(cfg, nil)
 	defer svc.notifier.Wait(context.Background())
-	svc.notifyTVSelection("job-123", "TEST_TV_DISC", "/dev/sr0", "TEST_TV_DISC")
+	svc.notifyTVSelection("job-123", "TEST_TV_DISC", "/dev/sr0", "TEST_TV_DISC",
+		tvSelectionSummary(false, 0, "TEST_TV_DISC", "", 0))
 
 	select {
 	case body := <-bodies:
@@ -864,7 +865,7 @@ func TestTVDiscSendsInputNeededNotification(t *testing.T) {
 			t.Fatalf("embeds = %d, want 1", len(payload.Embeds))
 		}
 		embed := payload.Embeds[0]
-		if embed.Title != "Input needed" || !strings.Contains(embed.Description, "choose a season if known") || embed.URL != cfg.Notification.UIURL {
+		if embed.Title != "Input needed" || !strings.Contains(embed.Description, "TV show not identified") || embed.URL != cfg.Notification.UIURL {
 			t.Fatalf("unexpected TV selection notification: %+v", embed)
 		}
 	case <-time.After(5 * time.Second):

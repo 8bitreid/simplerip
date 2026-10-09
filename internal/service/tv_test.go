@@ -274,3 +274,100 @@ func TestSiblingTVIdentity(t *testing.T) {
 		t.Fatalf("generic labels must not link discs: %+v", got)
 	}
 }
+
+func TestTVSelectionSummaryAsksOnlyForWhatIsMissing(t *testing.T) {
+	tests := []struct {
+		name            string
+		matched         bool
+		season          int
+		suggestion      string
+		suggestedSeason int
+		want, notWant   string
+	}{
+		{name: "show matched, season suggested", matched: true, suggestedSeason: 1,
+			want: "Matched SpongeBob SquarePants (1999). Open SimpleRip to choose the season (an earlier disc of this set was season 1).", notWant: "correct the show"},
+		{name: "show and season matched", matched: true, season: 2,
+			want: "season 2. Episode order could not be confirmed", notWant: "choose the season"},
+		{name: "suggestion only", suggestion: "SpongeBob SquarePants (1999)",
+			want: "Possible match: SpongeBob SquarePants (1999), not selected automatically", notWant: "Matched"},
+		{name: "nothing found",
+			want: "TV show not identified", notWant: "Matched"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := tvSelectionSummary(test.matched, test.season, "SpongeBob SquarePants (1999)", test.suggestion, test.suggestedSeason)
+			if !strings.Contains(got, test.want) || strings.Contains(got, test.notWant) {
+				t.Fatalf("summary = %q, want it to contain %q and not %q", got, test.want, test.notWant)
+			}
+		})
+	}
+}
+
+func TestTVInputRequest(t *testing.T) {
+	show := &metadata.MediaSearchResult{ID: 387, Title: "SpongeBob SquarePants", Year: "1999"}
+	got := tvInputRequest(true, 0, show, 1, "summary")
+	if got.Kind != "season" || got.ShowID != 387 || got.ShowYear != 1999 || !got.ShowMatched || got.Season != 1 || !got.SeasonSuggested {
+		t.Fatalf("matched show, suggested season = %+v", got)
+	}
+	got = tvInputRequest(true, 2, show, 0, "summary")
+	if got.Kind != "episode" || got.Season != 2 || got.SeasonSuggested {
+		t.Fatalf("matched show and season = %+v", got)
+	}
+	got = tvInputRequest(false, 0, show, 0, "summary")
+	if got.Kind != "show" || got.ShowMatched || got.ShowID != 387 || got.Season != 0 {
+		t.Fatalf("suggested show = %+v", got)
+	}
+	if got = tvInputRequest(false, 0, nil, 0, "summary"); got.Kind != "show" || got.ShowID != 0 {
+		t.Fatalf("nothing found = %+v", got)
+	}
+}
+
+func nextEvent(t *testing.T, ch <-chan ProgressEvent) ProgressEvent {
+	t.Helper()
+	select {
+	case ev := <-ch:
+		return ev
+	case <-time.After(2 * time.Second):
+		t.Fatal("no progress event")
+		return ProgressEvent{}
+	}
+}
+
+func TestTVInputRequestPersistsUntilAnswered(t *testing.T) {
+	svc := New(config.Defaults(), nil)
+	id, ch := svc.EventBus().Subscribe()
+	defer svc.EventBus().Unsubscribe(id)
+	const device = "/dev/sr0"
+	svc.beginRipTitle(device, "SPONGEBOB_DISC2")
+
+	svc.requestTVInput(ProgressEvent{Device: device, Stage: "identifying"}, TVInputRequest{Kind: "season", ShowID: 387})
+	if ev := nextEvent(t, ch); ev.NeedsInput == nil || ev.NeedsInput.ShowID != 387 {
+		t.Fatalf("prompt event = %+v", ev)
+	}
+	svc.emit(ProgressEvent{Device: device, Stage: "analyzing", Message: "Analyzing title 1 of 15"})
+	if ev := nextEvent(t, ch); ev.NeedsInput == nil || ev.NeedsInput.Kind != "season" {
+		t.Fatalf("later progress events must keep the request: %+v", ev)
+	}
+	svc.emit(ProgressEvent{Device: "/dev/sr1", Stage: "analyzing"})
+	if ev := nextEvent(t, ch); ev.NeedsInput != nil {
+		t.Fatalf("another drive must not inherit the request: %+v", ev)
+	}
+
+	if !svc.ReidentifyRip(device, "SpongeBob SquarePants (1999)") {
+		t.Fatal("ReidentifyRip() = false")
+	}
+	if ev := nextEvent(t, ch); ev.NeedsInput != nil {
+		t.Fatalf("answering must clear the request: %+v", ev)
+	}
+	svc.emit(ProgressEvent{Device: device, Stage: "ripping"})
+	if ev := nextEvent(t, ch); ev.NeedsInput != nil {
+		t.Fatalf("request reappeared after it was answered: %+v", ev)
+	}
+
+	svc.requestTVInput(ProgressEvent{Device: device, Stage: "identifying"}, TVInputRequest{Kind: "show"})
+	nextEvent(t, ch)
+	svc.emit(ProgressEvent{Device: device, Stage: "delivering"})
+	if ev := nextEvent(t, ch); ev.NeedsInput != nil {
+		t.Fatalf("delivery must end the request: %+v", ev)
+	}
+}
