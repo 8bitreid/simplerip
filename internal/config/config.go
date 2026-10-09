@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -60,6 +61,12 @@ type NotificationEvents struct {
 
 type ServerConfig struct {
 	Port int `yaml:"port"`
+	// AllowedHosts lists extra host names the web UI answers to, on top of
+	// IP addresses, single-label names, private suffixes such as .ts.net and
+	// .local, and the hosts of SIMPLERIP_HOST and ui_url. Requests for any
+	// other host are refused, which blocks DNS rebinding. Overridden by
+	// SIMPLERIP_ALLOWED_HOSTS (comma separated).
+	AllowedHosts []string `yaml:"allowed_hosts"`
 }
 
 type MakeMKVConfig struct {
@@ -119,6 +126,14 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SIMPLERIP_UI_URL"); v != "" {
 		cfg.Notification.UIURL = v
+	}
+	if v := os.Getenv("SIMPLERIP_ALLOWED_HOSTS"); v != "" {
+		cfg.Server.AllowedHosts = nil
+		for _, host := range strings.Split(v, ",") {
+			if host = strings.TrimSpace(host); host != "" {
+				cfg.Server.AllowedHosts = append(cfg.Server.AllowedHosts, host)
+			}
+		}
 	}
 	if v := os.Getenv("TMDB_ACCESS_TOKEN"); v != "" {
 		cfg.Metadata.TMDBAccessToken = v

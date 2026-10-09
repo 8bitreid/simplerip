@@ -121,6 +121,19 @@ This can be either:
 Webhook payload includes full MKV metadata (codec, resolution, audio tracks, size)
 so Discord displays it without a second lookup.
 
+## Web UI security
+The web UI has no login; network access (Tailscale, compose port binding)
+decides who can reach it. `internal/server/security.go` protects the API from
+web pages open in a trusted browser:
+- Host allowlist (`server.allowed_hosts` / `SIMPLERIP_ALLOWED_HOSTS`) blocks
+  DNS rebinding; IPs, single-label names and private suffixes like `.ts.net`
+  are always allowed.
+- `http.CrossOriginProtection` plus a JSON-only body rule block CSRF on
+  POST/DELETE. New state-changing endpoints must take JSON bodies.
+- A strict CSP forbids inline scripts: UI code lives in `ui/app.js` and
+  `ui/app.css`, never in `<script>`/`<style>` in `index.html`, and no inline
+  `on*=` handlers.
+
 ## Subprocess handling
 makemkvcon can hang (known Linux issue, especially with Blu-ray drives).
 All makemkvcon calls use context.WithTimeout. RipTitle returns ErrRipTimeout

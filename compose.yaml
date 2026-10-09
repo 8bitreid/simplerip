@@ -8,6 +8,10 @@ services:
         BUILD_DATE: ${BUILD_DATE:-unknown}
     image: simplerip:local
     ports:
+      # The UI has no login, so this binding decides who can reach it.
+      # "8080:8080" listens on every interface (LAN included; Docker
+      # bypasses ufw). To allow only Tailscale, use "<tailscale ip>:8080:8080",
+      # or "127.0.0.1:8080:8080" plus `tailscale serve --bg 8080` on the host.
       - "8080:8080"
     volumes:
       - ./config.yaml:/config/config.yaml:ro
@@ -27,6 +31,7 @@ services:
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - SIMPLERIP_UI_URL=${SIMPLERIP_UI_URL:-}
       - SIMPLERIP_HOST=${SIMPLERIP_HOST:-}
+      - SIMPLERIP_ALLOWED_HOSTS=${SIMPLERIP_ALLOWED_HOSTS:-}
       - DATABASE_URL=postgres://simplerip:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/simplerip?sslmode=disable
     depends_on:
       db:
