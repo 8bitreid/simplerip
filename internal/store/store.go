@@ -233,6 +233,124 @@ func (s *Store) AddEvent(ctx context.Context, jobID, stage, message string, data
 	return nil
 }
 
+// DriveAutoEject returns each drive's saved auto-eject setting, keyed by device.
+func (s *Store) DriveAutoEject(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.pool.Query(ctx, `SELECT device, auto_eject FROM drive_settings`)
+	if err != nil {
+		return nil, fmt.Errorf("reading drive settings: %w", err)
+	}
+	defer rows.Close()
+	settings := make(map[string]bool)
+	for rows.Next() {
+		var device string
+		var enabled bool
+		if err := rows.Scan(&device, &enabled); err != nil {
+			return nil, fmt.Errorf("scanning drive settings: %w", err)
+		}
+		settings[device] = enabled
+	}
+	return settings, rows.Err()
+}
+
+// SetDriveAutoEject saves whether device ejects its disc after a successful rip.
+func (s *Store) SetDriveAutoEject(ctx context.Context, device string, enabled bool) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO drive_settings (device, auto_eject) VALUES ($1, $2)
+		 ON CONFLICT (device) DO UPDATE SET auto_eject = EXCLUDED.auto_eject, updated_at = now()`,
+		device, enabled,
+	)
+	if err != nil {
+		return fmt.Errorf("saving auto eject for drive %s: %w", device, err)
+	}
+	return nil
+}
+
+// DriveStats summarizes the rips one drive has done.
+type DriveStats struct {
+	Done        int64   `json:"done"`
+	Error       int64   `json:"error"`
+	Cancelled   int64   `json:"cancelled"`
+	DeliveredGB float64 `json:"delivered_gb"`
+	// AvgMinutes is the mean start-to-finish time of successful rips.
+	AvgMinutes float64    `json:"avg_minutes"`
+	LastRipAt  *time.Time `json:"last_rip_at,omitempty"`
+	// DriveName and LibreDrive come from the drive's latest recorded scan.
+	DriveName  string `json:"drive_name,omitempty"`
+	LibreDrive string `json:"libredrive,omitempty"`
+}
+
+// DriveStats returns rip totals for device.
+func (s *Store) DriveStats(ctx context.Context, device string) (DriveStats, error) {
+	var st DriveStats
+	var avgSeconds *float64
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE status = 'done'),
+		        count(*) FILTER (WHERE status = 'error'),
+		        count(*) FILTER (WHERE status = 'cancelled'),
+		        avg(extract(epoch FROM finished_at - created_at)) FILTER (WHERE status = 'done' AND finished_at IS NOT NULL),
+		        max(finished_at)
+		 FROM jobs WHERE device = $1`,
+		device,
+	).Scan(&st.Done, &st.Error, &st.Cancelled, &avgSeconds, &st.LastRipAt)
+	if err != nil {
+		return DriveStats{}, fmt.Errorf("reading stats for drive %s: %w", device, err)
+	}
+	if avgSeconds != nil {
+		st.AvgMinutes = *avgSeconds / 60
+	}
+	err = s.pool.QueryRow(ctx,
+		`SELECT COALESCE(sum((e.data->>'size_gb')::float8), 0)
+		 FROM job_events e JOIN jobs j ON j.id = e.job_id
+		 WHERE j.device = $1 AND e.stage = 'deliver' AND e.data ? 'size_gb'`,
+		device,
+	).Scan(&st.DeliveredGB)
+	if err != nil {
+		return DriveStats{}, fmt.Errorf("reading delivered size for drive %s: %w", device, err)
+	}
+	var name, libre *string
+	err = s.pool.QueryRow(ctx,
+		`SELECT e.data->>'drive_name', e.data->>'libredrive'
+		 FROM job_events e JOIN jobs j ON j.id = e.job_id
+		 WHERE j.device = $1 AND e.stage = 'scan' AND COALESCE(e.data->>'drive_name', '') <> ''
+		 ORDER BY e.created_at DESC LIMIT 1`,
+		device,
+	).Scan(&name, &libre)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return DriveStats{}, fmt.Errorf("reading last scan for drive %s: %w", device, err)
+	}
+	if name != nil {
+		st.DriveName = *name
+	}
+	if libre != nil {
+		st.LibreDrive = *libre
+	}
+	return st, nil
+}
+
+// RecentJobsForDevice returns the newest jobs ripped on device.
+func (s *Store) RecentJobsForDevice(ctx context.Context, device string, limit int) ([]Job, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, device, disc_label, title, year, status, pattern, disc_type, created_at, finished_at, updated_at
+		 FROM jobs WHERE device = $1
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT $2`,
+		device, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing jobs for drive %s: %w", device, err)
+	}
+	defer rows.Close()
+	var jobs []Job
+	for rows.Next() {
+		j, err := scanJob(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scanning job: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
+}
+
 // IdentityRecord is one identity decision recorded for a past job: either a
 // manual correction or a confident automatic TV match.
 type IdentityRecord struct {

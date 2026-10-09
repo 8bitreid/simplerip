@@ -294,6 +294,8 @@ type RipService struct {
 	altBusy    map[string]bool
 	// pendingInput is what an in-flight TV rip is waiting on the user for.
 	pendingInput map[string]*TVInputRequest
+	// scannedDrives holds what makemkvcon last reported about each drive.
+	scannedDrives map[string]ScannedDrive
 }
 
 var (
@@ -329,6 +331,7 @@ func New(cfg *config.Config, st *store.Store) *RipService {
 		alternates:    make(map[string]*altState),
 		altBusy:       make(map[string]bool),
 		pendingInput:  make(map[string]*TVInputRequest),
+		scannedDrives: make(map[string]ScannedDrive),
 	}
 }
 
@@ -571,7 +574,29 @@ func (s *RipService) scanInfo(ctx context.Context, device string) (*disc.Classif
 	}
 	scanCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMinutes)*time.Minute)
 	defer cancel()
-	return ripper.ScanInfo(scanCtx, tools.Path("makemkvcon"), device, s.cfg.MakeMKV.Key)
+	scanned, err := ripper.ScanInfo(scanCtx, tools.Path("makemkvcon"), device, s.cfg.MakeMKV.Key)
+	if scanned != nil && scanned.DriveName != "" {
+		s.ripMu.Lock()
+		s.scannedDrives[device] = ScannedDrive{Name: scanned.DriveName, LibreDrive: scanned.LibreDrive, ScannedAt: time.Now()}
+		s.ripMu.Unlock()
+	}
+	return scanned, err
+}
+
+// ScannedDrive is what makemkvcon reported about a drive on its last scan.
+type ScannedDrive struct {
+	Name       string    `json:"name"`
+	LibreDrive string    `json:"libredrive,omitempty"`
+	ScannedAt  time.Time `json:"scanned_at"`
+}
+
+// ScannedDriveInfo returns what the last scan of device reported, if any
+// scan has run since the service started.
+func (s *RipService) ScannedDriveInfo(device string) (ScannedDrive, bool) {
+	s.ripMu.Lock()
+	defer s.ripMu.Unlock()
+	info, ok := s.scannedDrives[device]
+	return info, ok
 }
 
 func (s *RipService) ripTVTitles(
@@ -1300,6 +1325,8 @@ func (s *RipService) ripDisc(ctx context.Context, device string, run *ripRun) er
 				"main_index":    mainIndex,
 				"main_indices":  mainIndices,
 				"extra_indices": extraIndices,
+				"drive_name":    scanned.DriveName,
+				"libredrive":    scanned.LibreDrive,
 			})
 		_ = s.store.UpdateStatusPattern(ctx, job.ID, "scanning", pattern)
 	}

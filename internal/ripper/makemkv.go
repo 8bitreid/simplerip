@@ -149,14 +149,23 @@ func ScanInfo(ctx context.Context, makemkvBin, device, key string) (*disc.Classi
 // launching a subprocess. device is used only as a label on the result
 // and may be empty. Useful for replaying captured output or fixture files.
 func ScanInfoFromReader(r io.Reader, device string) (*disc.ClassifiedDisc, error) {
-	result, err := parseInfoOutput(r)
+	result, drives, err := parseInfoOutputDrives(r)
 	result.Device = device
+	result.DriveName = drives[device]
 	return result, err
 }
 
 func parseInfoOutput(r io.Reader) (*disc.ClassifiedDisc, error) {
+	result, _, err := parseInfoOutputDrives(r)
+	return result, err
+}
+
+// parseInfoOutputDrives parses an info scan and also returns makemkvcon's
+// drive names keyed by device path, from its DRV lines.
+func parseInfoOutputDrives(r io.Reader) (*disc.ClassifiedDisc, map[string]string, error) {
 	result := &disc.ClassifiedDisc{}
 	titleMap := map[int]*disc.MKVTitle{}
+	drives := map[string]string{}
 
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -170,12 +179,14 @@ func parseInfoOutput(r io.Reader) (*disc.ClassifiedDisc, error) {
 			parseStreamInfo(line[len("SINFO:"):], titleMap)
 		case strings.HasPrefix(line, "MSG:"):
 			parseMsg(line[len("MSG:"):], result)
+		case strings.HasPrefix(line, "DRV:"):
+			parseDrive(line[len("DRV:"):], drives)
 		case strings.HasPrefix(line, "TCOUNT:"), strings.HasPrefix(line, "PRGV:"):
 			// TCOUNT is informational; PRGV during an info scan is unexpected but harmless.
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return result, fmt.Errorf("reading makemkvcon output: %w", err)
+		return result, drives, fmt.Errorf("reading makemkvcon output: %w", err)
 	}
 
 	// Flatten titleMap into an ordered slice.
@@ -190,7 +201,21 @@ func parseInfoOutput(r io.Reader) (*disc.ClassifiedDisc, error) {
 			result.Titles = append(result.Titles, *t)
 		}
 	}
-	return result, nil
+	return result, drives, nil
+}
+
+// parseDrive handles one DRV payload (everything after "DRV:").
+// Format: <index>,<visible>,<enabled>,<flags>,"<drive name>","<disc name>","<device path>"
+// Empty drive slots have no device path and are skipped.
+func parseDrive(payload string, drives map[string]string) {
+	parts := splitRobotLine(payload)
+	if len(parts) < 7 {
+		return
+	}
+	name, path := unquote(parts[4]), unquote(parts[6])
+	if name != "" && path != "" {
+		drives[path] = name
+	}
 }
 
 // parseDiscInfo handles one CINFO payload (everything after "CINFO:").
@@ -330,6 +355,9 @@ func parseMsg(payload string, result *disc.ClassifiedDisc) {
 	flags, err := strconv.Atoi(parts[1])
 	if err != nil {
 		return
+	}
+	if msg := unquote(parts[3]); strings.Contains(msg, "LibreDrive") {
+		result.LibreDrive = msg
 	}
 	if flags != 0 {
 		result.Warnings = append(result.Warnings, unquote(parts[3]))
