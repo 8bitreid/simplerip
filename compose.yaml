@@ -8,7 +8,11 @@ services:
         BUILD_DATE: ${BUILD_DATE:-unknown}
     image: simplerip:local
     ports:
-      - "8080:8080"
+      # The UI has no login, so this binding decides who can reach it.
+      # Unset, it listens on every interface (LAN included; Docker bypasses
+      # ufw). Set SIMPLERIP_BIND_IP in .env to the host's Tailscale IP
+      # (`tailscale ip -4`) to allow only tailnet devices.
+      - "${SIMPLERIP_BIND_IP:-0.0.0.0}:8080:8080"
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - ./makemkv-config:/root/.MakeMKV
@@ -27,6 +31,7 @@ services:
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - SIMPLERIP_UI_URL=${SIMPLERIP_UI_URL:-}
       - SIMPLERIP_HOST=${SIMPLERIP_HOST:-}
+      - SIMPLERIP_ALLOWED_HOSTS=${SIMPLERIP_ALLOWED_HOSTS:-}
       - DATABASE_URL=postgres://simplerip:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/simplerip?sslmode=disable
     depends_on:
       db:

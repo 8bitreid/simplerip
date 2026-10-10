@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -210,6 +211,23 @@ database:
 	}
 	if cfg.Database.URL != "postgres://env" {
 		t.Errorf("Database.URL = %q, want \"postgres://env\" (env var should win)", cfg.Database.URL)
+	}
+}
+
+func TestLoadAllowedHostsEnvOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+server:
+  allowed_hosts: [file.example.com]
+`)
+	t.Setenv("SIMPLERIP_ALLOWED_HOSTS", " rip.example.com, ,ripper.lan ")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"rip.example.com", "ripper.lan"}
+	if strings.Join(cfg.Server.AllowedHosts, ",") != strings.Join(want, ",") {
+		t.Errorf("Server.AllowedHosts = %q, want %q (env var should win)", cfg.Server.AllowedHosts, want)
 	}
 }
 

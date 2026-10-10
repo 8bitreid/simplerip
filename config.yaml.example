@@ -53,6 +53,13 @@ server:
   # Port for the HTTP server with WebSocket progress streaming.
   # The web UI is available at http://localhost:{port}/
   port: 8080
+  # Host names the web UI answers to. IP addresses, single-label names and
+  # private suffixes (.ts.net, .local, .lan, .home.arpa, .internal) always
+  # work, as do the hosts of SIMPLERIP_HOST and ui_url. List any other name
+  # you open the UI with; other hosts are refused to block DNS rebinding.
+  # Env: SIMPLERIP_ALLOWED_HOSTS (comma separated) overrides this list.
+  # allowed_hosts:
+  #   - rip.example.com
 
 # ── MakeMKV ──────────────────────────────────────────────────────────────────
 makemkv:

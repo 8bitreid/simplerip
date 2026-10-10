@@ -33,6 +33,12 @@ const jobsPageSize = 100
 //go:embed ui/index.html
 var indexHTML []byte
 
+//go:embed ui/app.js
+var appJS []byte
+
+//go:embed ui/app.css
+var appCSS []byte
+
 var ejectDevice = func(device string) error {
 	return exec.Command(tools.Path("eject"), "-T", device).Run()
 }
@@ -130,6 +136,7 @@ func New(svc *service.RipService, st *store.Store, devices []string, cfg *config
 	s.e.HidePort = true
 	s.e.Use(middleware.Logger())
 	s.e.Use(middleware.Recover())
+	s.useSecurityMiddleware()
 
 	s.registerRoutes()
 
@@ -143,6 +150,8 @@ func New(svc *service.RipService, st *store.Store, devices []string, cfg *config
 
 func (s *Server) registerRoutes() {
 	s.e.GET("/", s.handleIndex)
+	s.e.GET("/app.js", handleAsset("text/javascript; charset=utf-8", appJS))
+	s.e.GET("/app.css", handleAsset("text/css; charset=utf-8", appCSS))
 	s.e.GET("/ws/progress", s.handleProgressWS)
 	s.e.GET("/api/status", s.handleStatus)
 	s.e.GET("/api/info", s.handleInfo)
@@ -166,6 +175,9 @@ func (s *Server) registerRoutes() {
 // This is a blocking call — use a goroutine if you need concurrent operation.
 func (s *Server) Start(port int) error {
 	addr := fmt.Sprintf(":%d", port)
+	// No read or write timeout: progress WebSockets stay open for hours.
+	s.e.Server.ReadHeaderTimeout = 10 * time.Second
+	s.e.Server.IdleTimeout = 2 * time.Minute
 	return s.e.Start(addr)
 }
 
@@ -178,7 +190,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // handleIndex serves the embedded HTML UI.
 func (s *Server) handleIndex(c echo.Context) error {
+	c.Response().Header().Set(echo.HeaderCacheControl, "no-cache")
 	return c.HTMLBlob(http.StatusOK, indexHTML)
+}
+
+// handleAsset serves an embedded UI file. no-cache makes browsers revalidate,
+// so a redeploy never pairs a new page with a stale script.
+func handleAsset(contentType string, body []byte) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		c.Response().Header().Set(echo.HeaderCacheControl, "no-cache")
+		return c.Blob(http.StatusOK, contentType, body)
+	}
 }
 
 // handleStatus returns the current per-device rip status as JSON, keyed by
@@ -648,6 +670,8 @@ const (
 	wsWriteWait  = 10 * time.Second
 	wsPongWait   = 60 * time.Second
 	wsPingPeriod = (wsPongWait * 9) / 10
+	// wsReadLimit caps client frames; the UI never sends any, only pongs.
+	wsReadLimit = 4096
 )
 
 // handleProgressWS upgrades to WebSocket and streams progress events. It
@@ -668,6 +692,7 @@ func (s *Server) handleProgressWS(c echo.Context) error {
 	// Read pump: required for gorilla to process control frames (pong/close).
 	// It discards client payloads and signals the writer when the peer goes away.
 	connClosed := make(chan struct{})
+	ws.SetReadLimit(wsReadLimit)
 	ws.SetReadDeadline(time.Now().Add(wsPongWait))
 	ws.SetPongHandler(func(string) error {
 		ws.SetReadDeadline(time.Now().Add(wsPongWait))

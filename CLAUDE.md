@@ -121,6 +121,19 @@ This can be either:
 Webhook payload includes full MKV metadata (codec, resolution, audio tracks, size)
 so Discord displays it without a second lookup.
 
+## Web UI security
+The web UI has no login; network access (Tailscale, compose port binding)
+decides who can reach it. `internal/server/security.go` protects the API from
+web pages open in a trusted browser:
+- Host allowlist (`server.allowed_hosts` / `SIMPLERIP_ALLOWED_HOSTS`) blocks
+  DNS rebinding; IPs, single-label names and private suffixes like `.ts.net`
+  are always allowed.
+- `http.CrossOriginProtection` plus a JSON-only body rule block CSRF on
+  POST/DELETE. New state-changing endpoints must take JSON bodies.
+- A strict CSP forbids inline scripts: UI code lives in `ui/app.js` and
+  `ui/app.css`, never in `<script>`/`<style>` in `index.html`, and no inline
+  `on*=` handlers.
+
 ## Subprocess handling
 makemkvcon can hang (known Linux issue, especially with Blu-ray drives).
 All makemkvcon calls use context.WithTimeout. RipTitle returns ErrRipTimeout
@@ -230,7 +243,10 @@ Optical drives passed through as devices (/dev/sr0, /dev/sr1, plus /dev/sg*),
 with `privileged: true` for drive access.
 Secrets come from `.env` (gitignored): MAKEMKV_KEY, TMDB_ACCESS_TOKEN,
 DISCORD_WEBHOOK_URL, and POSTGRES_PASSWORD (required; compose builds
-DATABASE_URL from it).
+DATABASE_URL from it). SIMPLERIP_BIND_IP limits the published UI port to
+one address (the host's Tailscale IP); the host needs
+`net.ipv4.ip_nonlocal_bind=1` so the container can start before Tailscale
+has brought that address up.
 
 ## Automated daemon workflow
 The daemon mode (`simplerip serve`) implements the full automated pipeline:
