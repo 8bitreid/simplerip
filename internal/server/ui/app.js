@@ -267,7 +267,7 @@ function scheduleInfoRefresh() {
   if (infoRefreshTimer) return;
   infoRefreshTimer = setTimeout(() => {
     infoRefreshTimer = null;
-    loadSystemInfo();
+    void loadSystemInfo();
   }, 700);
 }
 
@@ -337,10 +337,10 @@ function renderDriveGrid(grid) {
     }
   }));
   grid.querySelectorAll('.auto-eject-toggle').forEach(input => input.addEventListener('change', () => {
-    setAutoEject(input.dataset.device, input.checked);
+    void setAutoEject(input.dataset.device, input.checked);
   }));
   grid.querySelectorAll('.drive-info-btn').forEach(btn => btn.addEventListener('click', () => {
-    openDriveDialog(btn.dataset.device);
+    void openDriveDialog(btn.dataset.device);
   }));
   grid.querySelectorAll('.card-edit-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -367,7 +367,7 @@ function renderDriveGrid(grid) {
     });
     input.addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
-      if (field === 'query') doCardSearch(d); else confirmTVForm(d);
+      if (field === 'query') void doCardSearch(d); else void confirmTVForm(d);
     });
   });
   grid.querySelectorAll('.card-resolve-apply').forEach(btn => {
@@ -384,7 +384,7 @@ function renderDriveGrid(grid) {
         return;
       }
       const payload = selectionPayload(btn);
-      if (payload) applyCardReidentify(d, payload);
+      if (payload) void applyCardReidentify(d, payload);
     });
   });
   grid.querySelectorAll('.filter-chip').forEach(btn => {
@@ -617,7 +617,7 @@ function confirmTVForm(device) {
     renderDrives(true);
     return;
   }
-  applyCardReidentify(device, {
+  void applyCardReidentify(device, {
     tmdb_id: show.id, title: show.title, year: show.year || 0,
     media_type: 'tv', season, episode_start: episodeStart,
   });
@@ -807,12 +807,12 @@ function bindDriveDialog(dialog) {
   const close = dialog.querySelector('.dd-close');
   if (close) close.addEventListener('click', () => dialog.close());
   dialog.querySelectorAll('.auto-eject-toggle').forEach(input => input.addEventListener('change', () => {
-    setAutoEject(input.dataset.device, input.checked);
+    void setAutoEject(input.dataset.device, input.checked);
     renderDrives();
   }));
   dialog.querySelectorAll('.dd-job').forEach(btn => btn.addEventListener('click', () => {
     dialog.close();
-    openJob(btn.dataset.job);
+    void openJob(btn.dataset.job);
   }));
 }
 
@@ -962,7 +962,7 @@ function renderInfoCard(info) {
 
   const version = info.version || 'dev';
   const built = new Date(info.build_date || '');
-  const buildDate = isNaN(built) ? 'unknown date' : built.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+  const buildDate = Number.isNaN(built.getTime()) ? 'unknown date' : built.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
   const buildMeta = info.commit && info.commit !== 'unknown' ? `${info.commit} · ${buildDate}` : buildDate;
   const uptime = info.started_at ? fmtUptime((Date.now() - new Date(info.started_at).getTime()) / 1000) : 'Unavailable';
   const host = info.hostname || 'unknown';
@@ -1114,7 +1114,7 @@ function renderJobs() {
     row.addEventListener('click', () => openJob(row.dataset.id));
   });
   el.querySelectorAll('.job-delete').forEach(btn => {
-    btn.addEventListener('click', e => { e.stopPropagation(); deleteJob(btn.dataset.id); });
+    btn.addEventListener('click', e => { e.stopPropagation(); void deleteJob(btn.dataset.id); });
   });
   if (detailPanel && selectedJobId) {
     const entry = Array.from(el.querySelectorAll('.job-entry'))
@@ -1247,7 +1247,7 @@ async function ripAlternate(jobId, idx) {
 
 document.addEventListener('click', e => {
   const b = e.target.closest && e.target.closest('.alt-rip');
-  if (b) ripAlternate(b.dataset.job, b.dataset.idx);
+  if (b) void ripAlternate(b.dataset.job, b.dataset.idx);
 });
 
 function renderDetail(job, events) {
@@ -1345,7 +1345,7 @@ function renderDetail(job, events) {
       results.querySelectorAll('.sr-apply').forEach(applyBtn => {
         applyBtn.addEventListener('click', () => {
           const payload = selectionPayload(applyBtn);
-          if (payload) applyReidentify(job.ID, payload);
+          if (payload) void applyReidentify(job.ID, payload);
         });
       });
     } catch (_) {
@@ -1357,7 +1357,7 @@ function renderDetail(job, events) {
   }
 
   btn.addEventListener('click', doSearch);
-  qInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+  qInput.addEventListener('keydown', e => { if (e.key === 'Enter') void doSearch(); });
 }
 
 async function applyReidentify(jobId, payload) {
@@ -1393,7 +1393,7 @@ function connectWS() {
   const ws = new WebSocket(`${proto}//${location.host}/ws/progress`);
   // On (re)connect the server replays every drive's state; refresh info too in
   // case the server restarted or events were missed while disconnected.
-  ws.onopen = () => { loadSystemInfo(); loadAutoEject(); };
+  ws.onopen = () => { void loadSystemInfo(); void loadAutoEject(); };
   ws.onmessage = e => {
     try { applyProgressEvent(JSON.parse(e.data)); } catch (_) { /* ignore malformed frames */ }
   };
@@ -1403,8 +1403,8 @@ function connectWS() {
 // ── Boot ─────────────────────────────────────────────────────────────────
 
 initTabs();
-loadDevices();
-loadJobs();
+void loadDevices();
+void loadJobs();
 // Clicking the dimmed area around the drive panel closes it.
 document.getElementById('drive-dialog').addEventListener('click', e => {
   if (e.target === e.currentTarget) e.currentTarget.close();
